@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -24,11 +25,17 @@ def _is_inconclusive_no_baseline(state: State) -> bool:
 
 def _compute_exit_status(state: State) -> str:
     """
-    Three-value exit status for clear reviewer semantics:
+    Exit-status semantics for reviewer consumption:
     - "success"      : passed baseline checks deterministically  (exit code 0)
     - "inconclusive" : run succeeded but no/insufficient baseline (exit code 2)
+    - "partial"      : wall-clock budget exhausted before all tasks/checks ran
+    - "skipped"      : no executable repository/source was available
     - "failed"       : execution failed or checks failed          (exit code 1)
     """
+    if state.get("status") == "skipped":
+        return "skipped"
+    if state.get("status") == "partial":
+        return "partial"
     if state.get("status") == "failed":
         return "failed"
     judge = state.get("judge", {}) or {}
@@ -39,7 +46,38 @@ def _compute_exit_status(state: State) -> str:
     return "failed"
 
 
+def is_budget_exhausted(state: State) -> bool:
+    """Soft wall-clock budget check shared by run/judge nodes.
+
+    Returns True if ``cfg.paper_budget_sec > 0`` and the elapsed time since
+    ``cfg.t_start_monotonic`` exceeds it. Mutates ``state`` to record a
+    ``budget_exhausted`` history event the first time it fires.
+    """
+    cfg = state.get("config") or {}
+    budget = int(cfg.get("paper_budget_sec") or 0)
+    if budget <= 0:
+        return False
+    t0 = float(cfg.get("t_start_monotonic") or 0.0)
+    if t0 <= 0.0:
+        return False
+    elapsed = time.monotonic() - t0
+    if elapsed < budget:
+        return False
+    if not cfg.get("_budget_exhausted_logged"):
+        cfg["_budget_exhausted_logged"] = True
+        state["config"] = cfg
+        state.setdefault("history", []).append(
+            {
+                "kind": "budget_exhausted",
+                "data": {"elapsed_sec": round(elapsed, 2), "budget_sec": budget},
+            }
+        )
+    return True
+
+
 def _route_after_prepare(state: State) -> str:
+    if state.get("status") == "skipped":
+        return "finalize"
     if state.get("status") == "failed":
         # Some prepare failures are recoverable via fix loop.
         last_err = ""
@@ -72,12 +110,16 @@ def _route_after_plan(state: State) -> str:
 
 
 def _route_after_run(state: State) -> str:
+    if state.get("status") == "partial":
+        return "finalize"
     if state.get("status") == "failed":
         return "fix"
     return "judge"
 
 
 def _route_after_judge(state: State) -> str:
+    if state.get("status") == "partial":
+        return "finalize"
     if state.get("judge", {}).get("passed") is True:
         return "finalize"
     # If judge is inconclusive, do not enter fix loop.
@@ -90,6 +132,8 @@ def _route_after_judge(state: State) -> str:
 
 
 def _route_after_fix(state: State) -> str:
+    if state.get("status") == "partial":
+        return "finalize"
     if state.get("status") == "failed":
         return "finalize"
     # try again
@@ -114,6 +158,7 @@ class ExecutionOrchestrator:
         enable_bibtex: bool = False,
         paper_extracted_dir: str = "",
         run_dir: str = "",
+        paper_budget_sec: int = 0,
     ) -> None:
         self.run_root = run_root
         self.max_attempts = max_attempts
@@ -130,6 +175,7 @@ class ExecutionOrchestrator:
         self.enable_bibtex = enable_bibtex
         self.paper_extracted_dir = paper_extracted_dir
         self.run_dir = run_dir
+        self.paper_budget_sec = int(paper_budget_sec or 0)
 
         self._workflow = self._build_workflow()
         self._app = self._workflow.compile()
@@ -188,6 +234,8 @@ class ExecutionOrchestrator:
                 "enable_bibtex": self.enable_bibtex,
                 "paper_extracted_dir": self.paper_extracted_dir,
                 "run_dir": self.run_dir,
+                "paper_budget_sec": self.paper_budget_sec,
+                "t_start_monotonic": time.monotonic(),
             },
             "history": [],
         }

@@ -130,44 +130,84 @@ def _infer_python_spec_from_requirements(req_path: Path) -> str:
     return "3.11"
 
 
-def _extract_repo_urls_from_pdf(pdf_path: Path, max_pages: int = 8) -> list[str]:
-    """
-    Extract GitHub repository URLs from a PDF using text extraction.
-    Best-effort: returns candidates ordered by first appearance.
-    """
-    try:
-        from pypdf import PdfReader  # type: ignore
+_GITHUB_URL_PATTERN = re.compile(
+    # Tolerate whitespace introduced by PDF -> markdown line wrapping inside URLs,
+    # e.g. ``github.com/ org/repo`` produced by MinerU when the URL straddled a line break.
+    r"(https?://)?github\.com/\s*[A-Za-z0-9_.-]+\s*/\s*[A-Za-z0-9_.-]+",
+    flags=re.IGNORECASE,
+)
 
-        reader = PdfReader(str(pdf_path))
-        texts: list[str] = []
-        for page in reader.pages[: max_pages or 1]:
-            try:
-                texts.append(page.extract_text() or "")
-            except Exception:
-                continue
-        text = "\n".join(texts)
-    except Exception:
-        text = ""
 
+def _harvest_github_urls(text: str) -> list[str]:
     if not text:
         return []
-
-    pat = re.compile(r"(https?://)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", flags=re.IGNORECASE)
-    seen = set()
+    seen: set[str] = set()
     out: list[str] = []
-    for m in pat.finditer(text):
+    for m in _GITHUB_URL_PATTERN.finditer(text):
         raw = (m.group(0) or "").strip()
+        # Collapse intra-URL whitespace from PDF wrapping artifacts.
+        raw = re.sub(r"\s+", "", raw)
         raw = raw.rstrip(").,;:]}'\"")
         if not raw:
             continue
         if not raw.lower().startswith("http"):
             raw = "https://" + raw
+        # Drop anchors / query / fragments and normalise trailing slash.
+        raw = raw.split("#", 1)[0].split("?", 1)[0].rstrip("/")
         key = raw.lower()
         if key in seen:
             continue
         seen.add(key)
         out.append(raw)
     return out
+
+
+def _extract_repo_urls_from_pdf(
+    pdf_path: Path, max_pages: int = 0, extracted_md: Path | None = None
+) -> list[str]:
+    """
+    Extract GitHub repository URLs from a paper.
+
+    Looks at the parsed markdown first (when ``extracted_md`` is provided) since
+    it preserves links from across the entire paper, and falls back to scanning
+    the PDF directly. ``max_pages`` of ``0`` (default) scans all pages.
+    """
+    candidates: list[str] = []
+
+    if extracted_md is not None:
+        try:
+            md_path = Path(extracted_md)
+            if md_path.exists():
+                md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+                candidates.extend(_harvest_github_urls(md_text))
+        except Exception:
+            pass
+
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(str(pdf_path))
+        pages = reader.pages if not max_pages else reader.pages[:max_pages]
+        texts: list[str] = []
+        for page in pages:
+            try:
+                texts.append(page.extract_text() or "")
+            except Exception:
+                continue
+        candidates.extend(_harvest_github_urls("\n".join(texts)))
+    except Exception:
+        pass
+
+    # Deduplicate while preserving order (markdown-derived URLs first).
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for url in candidates:
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(url)
+    return deduped
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
@@ -201,6 +241,11 @@ def _copy_ignore_patterns(src_root: Path):
         ".pytest_cache",
         ".ruff_cache",
         "wandb",
+        # MinerU dumps every figure as a hex-named JPG under
+        # ``paper_extracted/mineru_assets/images/`` — those nested paths blow past
+        # Windows' 260-char MAX_PATH when re-copied into deep run subtrees, and
+        # nothing downstream consumes them. Skip the whole tree.
+        "mineru_assets",
     }
     root_generated_ignored = {
         "runs",
@@ -225,18 +270,50 @@ def _copy_ignore_patterns(src_root: Path):
 
 
 def _configured_demo_dir(paper_key: str) -> Path | None:
-    """Locate a bundled demo fixture for a paper key."""
+    """Locate a bundled demo fixture for a paper key.
+
+    Supports two layouts under ``demos/``:
+    - flat:        ``demos/<key>/`` (legacy)
+    - categorized: ``demos/<category>/<key>/`` (e.g. ``demos/Text/bert``)
+
+    For categorized demos, ``paper_key`` may arrive as either ``<category>_<name>``
+    or just ``<name>``; both are resolved by scanning one level deep.
+    """
     raw_key = str(paper_key or "paper").strip()
     keys: list[str] = []
     for key in (raw_key, slugify_run_key(raw_key)):
         if key and key not in keys:
             keys.append(key)
-    candidates = []
+
+    # Also accept the trailing component of "<category>_<name>"-style keys so
+    # that e.g. ``Text_bert`` matches ``demos/Text/bert``.
+    suffix_keys: list[str] = []
+    for key in list(keys):
+        if "_" in key:
+            tail = key.split("_", 1)[1]
+            for variant in (tail, tail.replace("_", "-"), slugify_run_key(tail)):
+                if variant and variant not in keys and variant not in suffix_keys:
+                    suffix_keys.append(variant)
+    keys.extend(suffix_keys)
+
+    demos_root = _repo_root() / "demos"
+
+    # 1) Direct flat lookup.
     for key in keys:
-        candidates.append(_repo_root() / "demos" / key)
-    for candidate in candidates:
+        candidate = demos_root / key
         if candidate.exists() and candidate.is_dir():
             return candidate.resolve()
+
+    # 2) Categorized lookup: demos/<*>/<key>.
+    if demos_root.exists():
+        for category in demos_root.iterdir():
+            if not category.is_dir():
+                continue
+            for key in keys:
+                candidate = category / key
+                if candidate.exists() and candidate.is_dir():
+                    return candidate.resolve()
+
     return None
 
 
@@ -249,9 +326,24 @@ def _select_demo_source(demo_dir: Path | None) -> Path | None:
     return None
 
 
-def _materialize_demo_fixture(demo_dir: Path | None, baseline_dir: Path) -> None:
+def _load_demo_execution_config(execution_dir: Path, demo_dir: Path) -> dict[str, Any]:
+    for path in (
+        execution_dir / "config.json",
+        execution_dir / "execution_config.json",
+        demo_dir / "execution_config.json",
+    ):
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            continue
+    return {}
+
+
+def _materialize_demo_fixture(demo_dir: Path | None, baseline_dir: Path) -> dict[str, Any]:
     if demo_dir is None:
-        return
+        return {}
     execution_dir = demo_dir / "execution"
 
     def _copy_first(dst_name: str, candidates: tuple[Path, ...]) -> None:
@@ -280,6 +372,13 @@ def _materialize_demo_fixture(demo_dir: Path | None, baseline_dir: Path) -> None
         ),
     )
     copy_file_if_exists(demo_dir / "paper.pdf", baseline_dir / "paper.pdf")
+    wheelhouse = execution_dir / "wheelhouse_linux"
+    if wheelhouse.exists() and wheelhouse.is_dir():
+        try:
+            _copy_tree(wheelhouse, baseline_dir / "wheelhouse_linux")
+        except Exception:
+            pass
+    return _load_demo_execution_config(execution_dir, demo_dir)
 
 
 def _copy_prepared_extract(prepared_extract_dir: str, baseline_dir: Path) -> str:
@@ -461,7 +560,10 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
         else (inputs_dir / "baseline" / slugify_run_key(paper_key)).resolve()
     )
     ensure_dir(baseline_dir)
-    _materialize_demo_fixture(demo_dir, baseline_dir)
+    demo_cfg = _materialize_demo_fixture(demo_dir, baseline_dir)
+    for key, value in demo_cfg.items():
+        if key not in cfg or cfg.get(key) in ("", None):
+            cfg[key] = value
 
     source_dir = (workspace_dir / "source").resolve()
     demo_source_dir = _select_demo_source(demo_dir)
@@ -525,7 +627,18 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
             repo_url = str(cfg.get("paper_repo_url") or "").strip()
             candidates: list[str] = []
             if not repo_url and pdf_path and pdf_path.exists():
-                candidates = _extract_repo_urls_from_pdf(pdf_path)
+                # Prefer the parsed markdown (set by an earlier parse stage or
+                # via ``paper_extracted_dir``) since PDFs often hide links in
+                # cross-page footnotes that pypdf splits awkwardly.
+                md_hint = str(cfg.get("paper_pdf_extracted_md") or "").strip()
+                md_path: Path | None = Path(md_hint) if md_hint else None
+                if md_path is None:
+                    extracted_dir = str(cfg.get("paper_extracted_dir") or "").strip()
+                    if extracted_dir:
+                        guess = Path(extracted_dir) / "paper.mineru.md"
+                        if guess.exists():
+                            md_path = guess
+                candidates = _extract_repo_urls_from_pdf(pdf_path, extracted_md=md_path)
                 write_text(
                     logs_dir / "repo_url_candidates.txt", "\n".join(candidates) + ("\n" if candidates else "")
                 )
@@ -533,11 +646,25 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
 
             if not repo_url:
                 msg = "repo_url_not_found"
-                append_event(run_dir, "prepare_error", {"error": msg})
+                append_event(run_dir, "prepare_skipped", {"reason": msg, "candidates": candidates})
                 state.setdefault("history", []).append(
-                    {"kind": "prepare_error", "data": {"error": msg, "candidates": candidates}}
+                    {
+                        "kind": "prepare_skipped",
+                        "data": {
+                            "reason": msg,
+                            "candidates": candidates,
+                            "message": "No cloneable GitHub repository URL was found in the paper text.",
+                        },
+                    }
                 )
-                state["status"] = "failed"
+                state["run_result"] = {
+                    "success": False,
+                    "skipped": True,
+                    "reason": msg,
+                    "message": "No cloneable repository URL was found, so execution could not run code.",
+                    "tasks": [],
+                }
+                state["status"] = "skipped"
                 return state
 
             ensure_dir(source_dir.parent)
@@ -632,7 +759,13 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
     if not python_spec:
         python_spec = _infer_python_spec_from_requirements(paper_root / "requirements.txt")
     cfg["python_spec"] = python_spec
-    cfg["docker_enabled"] = True
+    docker_enabled_raw = cfg.get("docker_enabled", os.getenv("EXECUTION_DOCKER_ENABLED", "true"))
+    cfg["docker_enabled"] = str(docker_enabled_raw).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     cfg["docker_strategy"] = strategy
 
     tasks_path = str(cfg.get("tasks_path") or "").strip()
@@ -652,7 +785,7 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
     cfg["paper_extracted_tables_dir"] = str((baseline_dir / "paper_extracted" / "tables").resolve())
     state["config"] = cfg
 
-    if not dry_run:
+    if not dry_run and bool(cfg.get("docker_enabled", True)):
         ok_img, img_or_msg = docker_ensure_paper_image(
             cfg,
             paper_key=paper_key,

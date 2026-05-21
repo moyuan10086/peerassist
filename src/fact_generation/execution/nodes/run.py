@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,15 @@ def _ensure_task_output_roots(*, cwd: str, artifact_paths: list[Any]) -> None:
 
 
 def run_node(state: dict[str, Any]) -> dict[str, Any]:
+    # Soft wall-clock budget: short-circuit before launching another batch of
+    # tasks if the per-paper budget is already exhausted.
+    from ..graph import is_budget_exhausted
+
+    if is_budget_exhausted(state):
+        state["status"] = "partial"
+        state["run_result"] = {"success": False, "partial": True, "reason": "paper_budget_exhausted"}
+        return state
+
     cfg = state.get("config", {})
     run_info = state.get("run", {})
     run_dir = Path(run_info.get("dir") or "")
@@ -120,9 +130,46 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         state["run_result"] = {"success": False, "error": msg}
         return state
 
+    wheelhouse_candidates = []
+    if tasks_path:
+        wheelhouse_candidates.append(Path(tasks_path).resolve().parent / "wheelhouse_linux")
+    baseline_path = str(cfg.get("baseline_path") or "").strip()
+    if baseline_path:
+        wheelhouse_candidates.append(Path(baseline_path).resolve().parent / "wheelhouse_linux")
+    run_wheelhouse = run_dir / "wheelhouse_linux"
+    for demo_wheelhouse in wheelhouse_candidates:
+        if demo_wheelhouse.exists() and demo_wheelhouse.is_dir() and not run_wheelhouse.exists():
+            try:
+                shutil.copytree(demo_wheelhouse, run_wheelhouse)
+                append_event(
+                    run_dir,
+                    "wheelhouse_copied",
+                    {"src": str(demo_wheelhouse), "dst": str(run_wheelhouse)},
+                )
+            except Exception:
+                pass
+            break
+
+    from ..graph import is_budget_exhausted as _bx
+
     results = []
     total_tasks = len(tasks)
     for idx, task in enumerate(tasks, 1):
+        if _bx(state):
+            append_event(
+                run_dir,
+                "run_partial",
+                {"reason": "paper_budget_exhausted", "skipped_from_index": idx, "total": total_tasks},
+            )
+            state["status"] = "partial"
+            state["run_result"] = {
+                "success": False,
+                "partial": True,
+                "reason": "paper_budget_exhausted",
+                "tasks": results,
+                "tasks_skipped": total_tasks - idx + 1,
+            }
+            return state
         task_id = str(task.get("id") or f"task_{idx}")
         enabled = bool(task.get("enabled", True))
         pr_host = paper_root or "."
@@ -154,6 +201,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
             results.append({"id": task_id, "success": False, "error": "invalid_cmd"})
             continue
+
+        # Docker mode always runs inside container; ignore per-task use_conda.
+        use_conda = bool(task.get("use_conda", True))
 
         append_event(
             run_dir,

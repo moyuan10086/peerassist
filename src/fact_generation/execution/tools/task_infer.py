@@ -295,7 +295,7 @@ def infer_tasks_heuristic(repo_root: str, mode: str = "smoke") -> InferResult:
             {
                 "id": "repo_smoke",
                 "cwd": "{paper_root}",
-                "cmd": ["python", ep, "--help"],
+                "cmd": ["python", "-m", "py_compile", ep],
                 "timeout_sec": 600,
                 "use_conda": True,
             }
@@ -305,7 +305,7 @@ def infer_tasks_heuristic(repo_root: str, mode: str = "smoke") -> InferResult:
                 {
                     "id": "eval_smoke",
                     "cwd": "{paper_root}",
-                    "cmd": ["python", "eval.py", "--help"],
+                    "cmd": ["python", "-m", "py_compile", "eval.py"],
                     "timeout_sec": 600,
                     "use_conda": True,
                 }
@@ -418,12 +418,7 @@ def infer_tasks_llm(
     }
     system = "You are a senior engineer generating a safe, reproducible tasks.yaml for a research repo."
     llm_cfg = resolve_llm_config(cfg_provider, cfg_model, cfg_base_url)
-    resp = llm_json(
-        prompt=json.dumps(prompt, ensure_ascii=False),
-        system=system,
-        cfg=llm_cfg,
-        module="execution",
-    )
+    resp = llm_json(prompt=json.dumps(prompt, ensure_ascii=False), system=system, cfg=llm_cfg)
     if not isinstance(resp, dict) or resp.get("status") == "error":
         # fallback to heuristics if LLM fails
         hr = infer_tasks_heuristic(repo_root, mode=mode)

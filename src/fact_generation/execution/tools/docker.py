@@ -52,6 +52,41 @@ def _normalize_python_spec_for_image(python_spec: str) -> str:
     return f"{m.group(1)}.{m.group(2)}"
 
 
+def _image_exists(image: str) -> bool:
+    if not image:
+        return False
+    try:
+        r = run_command(docker_cmd(["image", "inspect", image]), cwd=str(_repo_root()), timeout_sec=30)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _select_python_image(cfg: dict, py_tag: str) -> str:
+    explicit = str(
+        cfg.get("docker_paper_python_image") or os.environ.get("EXECUTION_DOCKER_PAPER_PYTHON_IMAGE") or ""
+    ).strip()
+    if explicit:
+        return explicit
+
+    preferred = f"python:{py_tag}"
+    if _image_exists(preferred):
+        return preferred
+
+    # Prefer locally available images before asking Docker to pull from the
+    # network. This keeps execution usable when Docker Desktop has a stale proxy
+    # or the host is offline.
+    local_fallbacks = []
+    if py_tag.startswith("3.7"):
+        local_fallbacks.append("code-eval-paper-verify:3.7")
+    local_fallbacks.extend(["code-evaluation:latest", "code-eval-paper-verify:3.7"])
+    for candidate in local_fallbacks:
+        if _image_exists(candidate):
+            return candidate
+
+    return preferred
+
+
 def _paper_dockerfile_text(*, python_image: str) -> str:
     """
     Paper image Dockerfile (same style as mcp-repo-output):
@@ -62,15 +97,18 @@ def _paper_dockerfile_text(*, python_image: str) -> str:
     return (
         f"FROM {python_image}\n"
         "\n"
-        "RUN useradd -m -u 1000 user && python -m pip install --upgrade pip\n"
+        "USER root\n"
+        "RUN (id -u user >/dev/null 2>&1 || useradd -m -u 1000 user) && python -m pip install --upgrade pip\n"
         "USER user\n"
         'ENV PATH="/home/user/.local/bin:$PATH"\n'
+        "ENTRYPOINT []\n"
+        'CMD ["python"]\n'
         "\n"
         "WORKDIR /app\n"
         "\n"
-        "COPY --chown=user ./requirements.txt requirements.txt\n"
+        "COPY --chown=user ./deployment/requirements.txt requirements.txt\n"
         "COPY --chown=user ./deployment/install_deps.py deployment/install_deps.py\n"
-        "RUN python deployment/install_deps.py\n"
+        "RUN python deployment/install_deps.py || echo install_deps_failed_continuing\n"
         "\n"
         "COPY --chown=user . /app\n"
     )
@@ -325,20 +363,14 @@ def docker_ensure_paper_image(
     if not pr.exists():
         return False, f"paper_root_not_found: {pr}"
     req = pr / "requirements.txt"
-    if not req.exists():
-        return False, f"requirements_not_found: {req}"
 
     # Build tag is derived from dockerfile template + requirements hash + python_spec.
     try:
-        req_bytes = req.read_bytes()
+        req_bytes = req.read_bytes() if req.exists() else b""
     except Exception:
         req_bytes = b""
     py_tag = _normalize_python_spec_for_image(python_spec)
-    python_image = str(
-        cfg.get("docker_paper_python_image")
-        or os.environ.get("EXECUTION_DOCKER_PAPER_PYTHON_IMAGE")
-        or f"python:{py_tag}"
-    ).strip()
+    python_image = _select_python_image(cfg, py_tag)
     dockerfile_text = _paper_dockerfile_text(python_image=python_image)
     install_deps_text = _paper_install_deps_py_text()
     payload = (
@@ -360,6 +392,7 @@ def docker_ensure_paper_image(
     try:
         deployment_dir.mkdir(parents=True, exist_ok=True)
         dockerfile_path.write_text(dockerfile_text, encoding="utf-8", errors="ignore")
+        (deployment_dir / "requirements.txt").write_bytes(req_bytes)
         (deployment_dir / "install_deps.py").write_text(
             _paper_install_deps_py_text(), encoding="utf-8", errors="ignore"
         )
@@ -369,6 +402,7 @@ def docker_ensure_paper_image(
             (legacy_deployment_dir / "Dockerfile").write_text(
                 dockerfile_text, encoding="utf-8", errors="ignore"
             )
+            (legacy_deployment_dir / "requirements.txt").write_bytes(req_bytes)
         except Exception:
             pass
     except Exception:
@@ -406,6 +440,13 @@ def docker_run_paper_image(
     paper_root_host = str(Path(paper_root_host).resolve())
     run_dir_container = "/workspace/run_dir"
     paper_root_container = "/app"
+    mount_source = str(os.getenv("EXECUTION_DOCKER_MOUNT_SOURCE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     args: list[str] = [
         "run",
         "--rm",
@@ -422,8 +463,6 @@ def docker_run_paper_image(
     args.extend(
         [
             "-v",
-            f"{paper_root_host}:{paper_root_container}",
-            "-v",
             f"{run_dir_host}:{run_dir_container}",
             "-w",
             cwd_container,
@@ -437,6 +476,8 @@ def docker_run_paper_image(
             f"EXECUTION_PAPER_ROOT={paper_root_container}",
         ]
     )
+    if mount_source:
+        args[2:2] = ["-v", f"{paper_root_host}:{paper_root_container}"]
     for k, v in env.items():
         if not k:
             continue

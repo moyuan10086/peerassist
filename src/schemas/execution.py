@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from schemas.stage import StageStatus
 
-ExecutionExitStatus = Literal["success", "inconclusive", "failed", "skipped"]
+ExecutionExitStatus = Literal["success", "inconclusive", "failed", "skipped", "partial"]
 # Same set of values as ``StageStatus`` — kept as an alias rather than a
 # duplicate Literal so that adding a new status only needs one edit.
 ExecutionStageStatus = StageStatus

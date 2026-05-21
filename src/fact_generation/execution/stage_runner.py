@@ -52,6 +52,10 @@ async def _run_orchestrator_async(
     paper_extracted_dir: str = "",
     execution_run_dir: Path | None = None,
     enable_refcheck: bool = False,
+    auto_tasks: bool = False,
+    auto_tasks_mode: str = "smoke",
+    auto_tasks_force: bool = False,
+    paper_budget_sec: int = 0,
 ) -> dict[str, Any]:
     from fact_generation.execution.graph import ExecutionOrchestrator
 
@@ -61,6 +65,10 @@ async def _run_orchestrator_async(
         enable_refcheck=enable_refcheck,
         paper_extracted_dir=str(paper_extracted_dir or ""),
         run_dir=str(execution_run_dir or ""),
+        auto_tasks=auto_tasks,
+        auto_tasks_mode=auto_tasks_mode,
+        auto_tasks_force=auto_tasks_force,
+        paper_budget_sec=paper_budget_sec,
     )
     return await orchestrator.run(
         paper_root="",
@@ -82,6 +90,10 @@ def run_execution_stage(
     max_attempts: int = 5,
     no_pdf_extract: bool = False,
     enable_refcheck: bool | None = None,
+    auto_tasks: bool = False,
+    auto_tasks_mode: str = "smoke",
+    auto_tasks_force: bool = False,
+    paper_budget_sec: int = 0,
 ) -> StageResult:
     ensure_full_pipeline_context(run_dir=run_dir, allow_standalone=True, stage="execution")
     bridge = load_bridge_state(run_dir)
@@ -118,6 +130,10 @@ def run_execution_stage(
             max_attempts=max_attempts,
             no_pdf_extract=no_pdf_extract,
             enable_refcheck=resolved_refcheck,
+            auto_tasks=auto_tasks,
+            auto_tasks_mode=auto_tasks_mode,
+            auto_tasks_force=auto_tasks_force,
+            paper_budget_sec=paper_budget_sec,
         )
     )
 
@@ -125,7 +141,7 @@ def run_execution_stage(
     summary, alignment, actual_run_dir = _load_execution_artifacts(state)
     raw_exit = str(run_result.get("exit_status") or "failed")
     exit_status: ExecutionExitStatus = (
-        raw_exit if raw_exit in ("success", "inconclusive", "failed", "skipped") else "failed"  # type: ignore[assignment]
+        raw_exit if raw_exit in ("success", "inconclusive", "failed", "skipped", "partial") else "failed"  # type: ignore[assignment]
     )
 
     stage_status: ExecutionStageStatus = "failed"
@@ -133,6 +149,10 @@ def run_execution_stage(
         stage_status = "ok"
     elif exit_status == "inconclusive":
         stage_status = "inconclusive"
+    elif exit_status == "partial":
+        stage_status = "inconclusive"
+    elif exit_status == "skipped":
+        stage_status = "skipped"
 
     error = ""
     if stage_status == "failed":

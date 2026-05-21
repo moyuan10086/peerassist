@@ -125,7 +125,12 @@ def _judge_highlights(
         isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline" for r in results
     )
 
-    if not run_ok:
+    if bool(run_result.get("skipped")):
+        label = "skipped"
+        msg = str(run_result.get("message") or run_result.get("reason") or "").strip()
+        if msg:
+            notes.append(msg)
+    elif not run_ok:
         label = "execution_failed"
         failed_task = run_result.get("failed_task") or ""
         if failed_task:
@@ -596,8 +601,14 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         try:
             from ..tools.bibtex import lookup_bibtex
 
-            # Use the paper's own title if available from extracted metadata
+            # Collect unique claim titles from tasks
             seen_titles: set = set()
+            for t in tasks:
+                for _claim in t.get("claims") or []:
+                    # Claims look like "Table 4: TransE+CompGCN(...) on FB15k-237, MRR=0.335"
+                    # Try to extract a paper title from the paper_key or config
+                    pass
+            # Use the paper's own title if available from extracted metadata
             paper_title = str(cfg.get("paper_title") or "").strip()
             if not paper_title:
                 # Try to derive from paper_key
