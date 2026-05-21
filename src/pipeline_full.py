@@ -456,7 +456,7 @@ def parse_args() -> argparse.Namespace:
         "--execution-docker-build-timeout-sec",
         type=int,
         default=0,
-        help="Per-paper Docker image build timeout for execution; 0 uses the default.",
+        help="Per-paper Docker image build timeout for execution; 0 disables the timeout.",
     )
     p.add_argument(
         "--execution-no-docker",

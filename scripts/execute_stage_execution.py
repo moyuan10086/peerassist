@@ -32,12 +32,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--auto-tasks", action="store_true", help="Generate tasks.yaml from the repo/paper")
     p.add_argument("--auto-tasks-mode", choices=("smoke", "full"), default="smoke")
     p.add_argument("--auto-tasks-force", action="store_true")
-    p.add_argument("--paper-budget-sec", type=int, default=0, help="Soft per-paper execution budget")
+    p.add_argument(
+        "--paper-budget-sec",
+        type=int,
+        default=0,
+        help="Soft per-paper execution budget; 0 disables the budget",
+    )
     p.add_argument(
         "--docker-build-timeout-sec",
         type=int,
         default=0,
-        help="Per-paper Docker image build timeout; 0 uses the default",
+        help="Per-paper Docker image build timeout; 0 disables the timeout",
     )
     docker_group = p.add_mutually_exclusive_group()
     docker_group.add_argument("--docker", dest="docker_enabled", action="store_true", default=None)

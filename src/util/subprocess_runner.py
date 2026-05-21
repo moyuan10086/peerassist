@@ -30,13 +30,17 @@ def _tail(text: str, n: int = 2000) -> str:
 def run_command(
     cmd: list[str],
     cwd: str,
-    timeout_sec: int = 3600,
+    timeout_sec: int | None = 3600,
     env: dict[str, str] | None = None,
 ) -> CommandResult:
     start = time.time()
+    effective_timeout = None if timeout_sec is None or int(timeout_sec) <= 0 else int(timeout_sec)
     if is_verbose():
         try:
-            print(f"[execution][exec] cwd={cwd} timeout_sec={timeout_sec} cmd={' '.join(cmd)}", flush=True)
+            print(
+                f"[execution][exec] cwd={cwd} timeout_sec={effective_timeout} cmd={' '.join(cmd)}",
+                flush=True,
+            )
         except Exception:
             pass
     try:
@@ -47,7 +51,7 @@ def run_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_sec,
+            timeout=effective_timeout,
             env=env or os.environ.copy(),
             shell=False,
             check=False,
@@ -61,7 +65,7 @@ def run_command(
         err_raw = e.stderr or ""
         out = out_raw.decode("utf-8", errors="replace") if isinstance(out_raw, bytes) else str(out_raw)
         err_body = err_raw.decode("utf-8", errors="replace") if isinstance(err_raw, bytes) else str(err_raw)
-        err = f"TimeoutExpired: command exceeded timeout_sec={timeout_sec}"
+        err = f"TimeoutExpired: command exceeded timeout_sec={effective_timeout}"
         if err_body.strip():
             err = f"{err}\n{err_body}"
     except Exception as e:

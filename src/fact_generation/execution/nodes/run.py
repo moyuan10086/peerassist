@@ -307,8 +307,8 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 python_spec=python_spec,
                 timeout_sec=int(
                     cfg.get("docker_build_timeout_sec")
-                    or os.environ.get("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC")
-                    or 3600
+                    if cfg.get("docker_build_timeout_sec") not in (None, "")
+                    else os.environ.get("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC", "3600")
                 ),
             )
             if not ok_img:

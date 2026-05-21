@@ -68,9 +68,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-repos", type=int, default=5)
     p.add_argument("--max-attempts", type=int, default=1)
     p.add_argument("--auto-tasks-mode", choices=("smoke", "full"), default="smoke")
-    p.add_argument("--paper-budget-sec", type=int, default=900)
+    p.add_argument(
+        "--paper-budget-sec",
+        type=int,
+        default=0,
+        help="Soft per-paper budget for validation; 0 means no budget limit",
+    )
     p.add_argument("--clone-timeout-sec", type=int, default=600)
-    p.add_argument("--docker-build-timeout-sec", type=int, default=1800)
+    p.add_argument(
+        "--docker-build-timeout-sec",
+        type=int,
+        default=0,
+        help="Per-paper Docker image build timeout; 0 means no build timeout",
+    )
     p.add_argument("--no-llm", action="store_true")
     docker_group = p.add_mutually_exclusive_group()
     docker_group.add_argument("--docker", dest="docker_enabled", action="store_true", default=None)

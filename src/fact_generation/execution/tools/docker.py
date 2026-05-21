@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from util.run_layout import slugify_run_key
 from util.subprocess_runner import run_command
@@ -101,6 +102,9 @@ def _paper_dockerfile_text(*, python_image: str) -> str:
         "ARG PIP_EXTRA_INDEX_URL=\n"
         "ARG PIP_TRUSTED_HOST=\n"
         "ARG EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=\n"
+        "ARG HTTP_PROXY=\n"
+        "ARG HTTPS_PROXY=\n"
+        "ARG NO_PROXY=\n"
         "\n"
         "USER root\n"
         "RUN { echo '[global]'; \\\n"
@@ -120,7 +124,9 @@ def _paper_dockerfile_text(*, python_image: str) -> str:
         "\n"
         "COPY --chown=user ./deployment/requirements.txt requirements.txt\n"
         "COPY --chown=user ./deployment/install_deps.py deployment/install_deps.py\n"
-        "RUN python deployment/install_deps.py || echo install_deps_failed_continuing\n"
+        "RUN export HTTP_PROXY=\"$HTTP_PROXY\" HTTPS_PROXY=\"$HTTPS_PROXY\" NO_PROXY=\"$NO_PROXY\" \\\n"
+        " && export http_proxy=\"$HTTP_PROXY\" https_proxy=\"$HTTPS_PROXY\" no_proxy=\"$NO_PROXY\" \\\n"
+        " && python deployment/install_deps.py || echo install_deps_failed_continuing\n"
         "\n"
         "COPY --chown=user . /app\n"
     )
@@ -377,7 +383,87 @@ def _cfg_or_env(cfg: dict, cfg_key: str, *env_names: str) -> str:
     return ""
 
 
+def _docker_info_field(field: str) -> str:
+    try:
+        r = run_command(docker_cmd(["info", "--format", f"{{{{.{field}}}}}"]), cwd=str(_repo_root()), timeout_sec=15)
+        if r.returncode != 0:
+            return ""
+        value = (r.stdout or "").strip()
+        return "" if value in {"<no value>", "null", "None"} else value
+    except Exception:
+        return ""
+
+
+def _normalize_container_proxy(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return raw
+    host = (parts.hostname or "").lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return raw
+    netloc = "host.docker.internal"
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    if parts.username:
+        userinfo = parts.username
+        if parts.password:
+            userinfo = f"{userinfo}:{parts.password}"
+        netloc = f"{userinfo}@{netloc}"
+    return urlunsplit((parts.scheme or "http", netloc, parts.path, parts.query, parts.fragment))
+
+
+def _docker_proxy_env(cfg: dict | None = None) -> dict[str, str]:
+    cfg = cfg or {}
+    http_proxy = _cfg_or_env(
+        cfg,
+        "docker_http_proxy",
+        "EXECUTION_DOCKER_HTTP_PROXY",
+        "HTTP_PROXY",
+        "http_proxy",
+    )
+    https_proxy = _cfg_or_env(
+        cfg,
+        "docker_https_proxy",
+        "EXECUTION_DOCKER_HTTPS_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+    )
+    no_proxy = _cfg_or_env(
+        cfg,
+        "docker_no_proxy",
+        "EXECUTION_DOCKER_NO_PROXY",
+        "NO_PROXY",
+        "no_proxy",
+    )
+
+    if not http_proxy:
+        http_proxy = _docker_info_field("HTTPProxy")
+    if not https_proxy:
+        https_proxy = _docker_info_field("HTTPSProxy")
+    if not no_proxy:
+        no_proxy = _docker_info_field("NoProxy")
+
+    out: dict[str, str] = {}
+    http_proxy = _normalize_container_proxy(http_proxy)
+    https_proxy = _normalize_container_proxy(https_proxy)
+    if http_proxy:
+        out["HTTP_PROXY"] = http_proxy
+        out["http_proxy"] = http_proxy
+    if https_proxy:
+        out["HTTPS_PROXY"] = https_proxy
+        out["https_proxy"] = https_proxy
+    if no_proxy:
+        out["NO_PROXY"] = no_proxy
+        out["no_proxy"] = no_proxy
+    return out
+
+
 def _docker_build_args(cfg: dict) -> list[str]:
+    proxy_values = _docker_proxy_env(cfg)
     values = {
         "PIP_INDEX_URL": _cfg_or_env(cfg, "docker_pip_index_url", "EXECUTION_DOCKER_PIP_INDEX_URL", "PIP_INDEX_URL"),
         "PIP_EXTRA_INDEX_URL": _cfg_or_env(
@@ -389,6 +475,9 @@ def _docker_build_args(cfg: dict) -> list[str]:
         "EXECUTION_DOCKER_EXTRA_PIP_PACKAGES": _cfg_or_env(
             cfg, "docker_extra_pip_packages", "EXECUTION_DOCKER_EXTRA_PIP_PACKAGES"
         ),
+        "HTTP_PROXY": proxy_values.get("HTTP_PROXY", ""),
+        "HTTPS_PROXY": proxy_values.get("HTTPS_PROXY", ""),
+        "NO_PROXY": proxy_values.get("NO_PROXY", ""),
     }
     args: list[str] = []
     for key, value in values.items():
@@ -423,6 +512,8 @@ def docker_ensure_paper_image(
     python_image = _select_python_image(cfg, py_tag)
     dockerfile_text = _paper_dockerfile_text(python_image=python_image)
     install_deps_text = _paper_install_deps_py_text()
+    proxy_env = _docker_proxy_env(cfg)
+    proxy_env_hash = hashlib.sha256(repr(sorted(proxy_env.items())).encode("utf-8")).hexdigest()
     payload = (
         f"paper_key={paper_key}\npython_image={python_image}\npython_spec={python_spec}\n"
         f"req_sha256={hashlib.sha256(req_bytes).hexdigest()}\n"
@@ -431,6 +522,7 @@ def docker_ensure_paper_image(
         f"pip_extra_index_url={_cfg_or_env(cfg, 'docker_pip_extra_index_url', 'EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL', 'PIP_EXTRA_INDEX_URL')}\n"
         f"pip_trusted_host={_cfg_or_env(cfg, 'docker_pip_trusted_host', 'EXECUTION_DOCKER_PIP_TRUSTED_HOST', 'PIP_TRUSTED_HOST')}\n"
         f"extra_pip_packages={_cfg_or_env(cfg, 'docker_extra_pip_packages', 'EXECUTION_DOCKER_EXTRA_PIP_PACKAGES')}\n"
+        f"proxy_env_sha256={proxy_env_hash}\n"
         f"Dockerfile={dockerfile_text}\n"
     )
     image = _paper_image_tag(cfg=cfg, paper_key=paper_key, payload=payload)
@@ -490,6 +582,7 @@ def docker_run_paper_image(
     Commands execute using the image's default python environment.
     """
     env = env or {}
+    proxy_env = _docker_proxy_env({})
     run_dir_host = str(Path(run_dir_host).resolve())
     paper_root_host = str(Path(paper_root_host).resolve())
     run_dir_container = "/workspace/run_dir"
@@ -532,7 +625,8 @@ def docker_run_paper_image(
     )
     if mount_source:
         args[2:2] = ["-v", f"{paper_root_host}:{paper_root_container}"]
-    for k, v in env.items():
+    merged_env = {**proxy_env, **env}
+    for k, v in merged_env.items():
         if not k:
             continue
         args.extend(["-e", f"{k}={v}"])

@@ -262,8 +262,7 @@ class ExecutionOrchestrator:
         }
         if self.docker_enabled is not None:
             initial["config"]["docker_enabled"] = bool(self.docker_enabled)
-        if self.docker_build_timeout_sec > 0:
-            initial["config"]["docker_build_timeout_sec"] = self.docker_build_timeout_sec
+        initial["config"]["docker_build_timeout_sec"] = self.docker_build_timeout_sec
         final_state: State = await self._app.ainvoke(
             initial, config={"configurable": {"thread_id": "execution"}}
         )

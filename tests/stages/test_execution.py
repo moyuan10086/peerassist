@@ -17,7 +17,12 @@ import pytest
 from fact_generation.execution.nodes.plan import _merge_auto_baseline
 from fact_generation.execution.nodes.run import run_node
 from fact_generation.execution.tools.alignment import run_alignment
-from fact_generation.execution.tools.docker import _docker_build_args, _paper_install_deps_py_text
+from fact_generation.execution.tools.docker import (
+    _docker_build_args,
+    _normalize_container_proxy,
+    _paper_install_deps_py_text,
+    docker_run_paper_image,
+)
 from fact_generation.execution.tools.log_metrics import extract_metrics_from_text, write_task_metric_artifact
 from fact_generation.execution.tools.metrics import compute_check
 from fact_generation.execution.tools.paper_tables import extract_paper_metric_targets
@@ -271,9 +276,22 @@ def test_run_command_reports_timeout_explicitly(tmp_path) -> None:
     assert "TimeoutExpired" in result.stderr
 
 
+def test_run_command_zero_timeout_means_no_timeout(tmp_path) -> None:
+    result = run_command(
+        [sys.executable, "-c", "import time; time.sleep(0.1); print('ok')"],
+        cwd=str(tmp_path),
+        timeout_sec=0,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "ok"
+
+
 def test_docker_build_args_include_pip_index_and_extra_packages(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_DOCKER_PIP_INDEX_URL", "https://mirror.example/simple")
     monkeypatch.setenv("EXECUTION_DOCKER_PIP_TRUSTED_HOST", "mirror.example")
+    monkeypatch.setenv("EXECUTION_DOCKER_HTTP_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("EXECUTION_DOCKER_HTTPS_PROXY", "http://localhost:7897")
 
     args = _docker_build_args({"docker_extra_pip_packages": "numpy scikit-learn"})
 
@@ -281,6 +299,30 @@ def test_docker_build_args_include_pip_index_and_extra_packages(monkeypatch) -> 
     assert "--build-arg PIP_INDEX_URL=https://mirror.example/simple" in joined
     assert "--build-arg PIP_TRUSTED_HOST=mirror.example" in joined
     assert "--build-arg EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=numpy scikit-learn" in joined
+    assert "--build-arg HTTP_PROXY=http://host.docker.internal:7897" in joined
+    assert "--build-arg HTTPS_PROXY=http://host.docker.internal:7897" in joined
+
+
+def test_docker_runtime_injects_host_proxy(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("EXECUTION_DOCKER_HTTP_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("EXECUTION_DOCKER_HTTPS_PROXY", "http://localhost:7897")
+
+    cmd = docker_run_paper_image(
+        image="paper:test",
+        paper_root_host=str(tmp_path),
+        run_dir_host=str(tmp_path),
+        cwd_container="/app",
+        cmd=["python", "-V"],
+    )
+
+    joined = " ".join(cmd)
+    assert "-e HTTP_PROXY=http://host.docker.internal:7897" in joined
+    assert "-e HTTPS_PROXY=http://host.docker.internal:7897" in joined
+
+
+def test_normalize_container_proxy_rewrites_loopback() -> None:
+    assert _normalize_container_proxy("http://127.0.0.1:7897") == "http://host.docker.internal:7897"
+    assert _normalize_container_proxy("http://localhost:7897") == "http://host.docker.internal:7897"
 
 
 def test_docker_install_deps_installs_numpy_before_torch() -> None:

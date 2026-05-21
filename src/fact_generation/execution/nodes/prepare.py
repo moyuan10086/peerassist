@@ -813,10 +813,11 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
     state["config"] = cfg
 
     if not dry_run and bool(cfg.get("docker_enabled", True)):
+        docker_build_timeout_raw = cfg.get("docker_build_timeout_sec")
+        if docker_build_timeout_raw in (None, ""):
+            docker_build_timeout_raw = os.getenv("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC", "3600")
         docker_build_timeout = int(
-            cfg.get("docker_build_timeout_sec")
-            or os.getenv("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC")
-            or 3600
+            docker_build_timeout_raw
         )
         ok_img, img_or_msg = docker_ensure_paper_image(
             cfg,

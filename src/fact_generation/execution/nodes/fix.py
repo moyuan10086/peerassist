@@ -110,6 +110,13 @@ def _add_extra_pip_package(cfg: dict[str, Any], package: str) -> bool:
     return True
 
 
+def _docker_build_timeout(cfg: dict[str, Any]) -> int:
+    raw = cfg.get("docker_build_timeout_sec")
+    if raw in (None, ""):
+        raw = os.environ.get("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC", "3600")
+    return int(raw)
+
+
 def _torch_scatter_fallback_in_container_shell() -> str:
     """
     Inject a minimal `torch_scatter` python package into the current environment.
@@ -265,11 +272,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 paper_key=str(cfg.get("paper_key") or "paper"),
                 paper_root_host=str(Path(paper_root).resolve()),
                 python_spec=python_spec,
-                timeout_sec=int(
-                    cfg.get("docker_build_timeout_sec")
-                    or os.environ.get("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC")
-                    or 3600
-                ),
+                timeout_sec=_docker_build_timeout(cfg),
             )
             append_event(
                 run_dir,
@@ -310,7 +313,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
             paper_key=str(cfg.get("paper_key") or "paper"),
             paper_root_host=str(Path(paper_root).resolve()),
             python_spec=python_spec,
-            timeout_sec=3600,
+            timeout_sec=_docker_build_timeout(cfg),
         )
         if ok_img:
             docker_cmd = docker_run_paper_image(
@@ -437,7 +440,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                         paper_key=str(cfg.get("paper_key") or "paper"),
                         paper_root_host=str(Path(paper_root).resolve()),
                         python_spec=python_spec,
-                        timeout_sec=3600,
+                        timeout_sec=_docker_build_timeout(cfg),
                     )
                     if not ok_img:
                         continue
