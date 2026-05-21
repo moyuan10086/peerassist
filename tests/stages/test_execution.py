@@ -18,11 +18,13 @@ from fact_generation.execution.nodes.plan import _merge_auto_baseline
 from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
     _normalize_shell_script_line_endings,
+    _patch_api_placeholders_for_env,
 )
 from fact_generation.execution.nodes.run import _semantic_runtime_failure, run_node
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
     _docker_build_args,
+    _docker_env_passthrough,
     _normalize_container_proxy,
     _paper_install_deps_py_text,
     docker_run_paper_image,
@@ -337,6 +339,25 @@ def test_docker_runtime_injects_host_proxy(monkeypatch, tmp_path) -> None:
     assert "-e HTTPS_PROXY=http://host.docker.internal:7897" in joined
 
 
+def test_docker_runtime_passes_selected_env_names_without_values(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "secret-value")
+    monkeypatch.setenv("EXECUTION_DOCKER_ENV_PASSTHROUGH", "OPENAI_API_KEY,OPENAI_BASE_URL")
+
+    cmd = docker_run_paper_image(
+        image="paper:test",
+        paper_root_host=str(tmp_path),
+        run_dir_host=str(tmp_path),
+        cwd_container="/app",
+        cmd=["python", "-V"],
+        env_passthrough=_docker_env_passthrough({}),
+    )
+
+    joined = " ".join(cmd)
+    assert "-e OPENAI_API_KEY" in joined
+    assert "secret-value" not in joined
+    assert "OPENAI_BASE_URL" not in joined
+
+
 def test_normalize_container_proxy_rewrites_loopback() -> None:
     assert _normalize_container_proxy("http://127.0.0.1:7897") == "http://host.docker.internal:7897"
     assert _normalize_container_proxy("http://localhost:7897") == "http://host.docker.internal:7897"
@@ -454,6 +475,30 @@ def test_normalize_shell_script_line_endings(tmp_path) -> None:
 
     assert changed == 1
     assert script.read_bytes() == b"#!/bin/bash\nmkdir data\n"
+
+
+def test_patch_api_placeholders_reads_runtime_env_without_writing_secret(tmp_path) -> None:
+    script = tmp_path / "generate_response.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from openai import OpenAI",
+                "API_KEY = 'YOUR API-KEY'",
+                "BASE_URL = 'https://api.openai.com/v1'",
+                "MODEL_NAME = 'o3-mini'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    changed = _patch_api_placeholders_for_env(tmp_path)
+
+    text = script.read_text(encoding="utf-8")
+    assert changed == ["generate_response.py"]
+    assert "EXECUTION_OPENAI_API_KEY" in text
+    assert "EXECUTION_OPENAI_BASE_URL" in text
+    assert "EXECUTION_OPENAI_MODEL" in text
+    assert "sk-" not in text
 
 
 def test_anonymous_4open_repo_id_parses_repo_links() -> None:

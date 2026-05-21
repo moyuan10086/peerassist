@@ -11,7 +11,7 @@ from util.fs import ensure_dir, safe_relpath, write_text
 from util.recorder import append_event
 from util.subprocess_runner import persist_command_result, run_command
 
-from ..tools.docker import docker_ensure_paper_image, docker_run_paper_image
+from ..tools.docker import _docker_env_passthrough, docker_ensure_paper_image, docker_run_paper_image
 from ..tools.log_metrics import write_task_metric_artifact
 from ..tools.results_tables import maybe_summarize_metrics_tables
 
@@ -349,6 +349,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                     "EXECUTION_OUTPUT_DIR": f"/workspace/run_dir/outputs/{task_id}",
                     "EXECUTION_TASK_OUTPUT_DIR": f"/workspace/run_dir/outputs/{task_id}",
                 },
+                env_passthrough=_docker_env_passthrough(cfg),
                 gpus=str(cfg.get("docker_gpus") or os.environ.get("EXECUTION_DOCKER_GPUS") or "").strip()
                 or None,
                 shm_size=str(

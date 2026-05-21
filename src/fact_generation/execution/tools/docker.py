@@ -565,6 +565,30 @@ def docker_ensure_paper_image(
     return True, image
 
 
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _docker_env_passthrough(cfg: dict | None = None) -> list[str]:
+    cfg = cfg or {}
+    raw = str(
+        cfg.get("docker_env_passthrough") or os.environ.get("EXECUTION_DOCKER_ENV_PASSTHROUGH") or ""
+    ).strip()
+    if not raw:
+        return []
+    items = re.split(r"[\s,;]+", raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        name = item.strip()
+        if not name or name in seen or not _ENV_NAME_RE.match(name):
+            continue
+        if name not in os.environ:
+            continue
+        out.append(name)
+        seen.add(name)
+    return out
+
+
 def docker_run_paper_image(
     *,
     image: str,
@@ -573,6 +597,7 @@ def docker_run_paper_image(
     cwd_container: str,
     cmd: list[str],
     env: dict[str, str] | None = None,
+    env_passthrough: list[str] | None = None,
     gpus: str | None = None,
     shm_size: str | None = None,
     ipc: str | None = None,
@@ -630,5 +655,13 @@ def docker_run_paper_image(
         if not k:
             continue
         args.extend(["-e", f"{k}={v}"])
+    passthrough = env_passthrough if env_passthrough is not None else _docker_env_passthrough({})
+    explicit_env_names = set(merged_env)
+    for k in passthrough:
+        name = str(k or "").strip()
+        if not name or name in explicit_env_names or not _ENV_NAME_RE.match(name):
+            continue
+        args.extend(["-e", name])
+        explicit_env_names.add(name)
     args.extend([image, *cmd])
     return docker_cmd(args)

@@ -546,6 +546,107 @@ def _normalize_shell_script_line_endings(
     return changed
 
 
+_PY_LITERAL_ASSIGN_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<name>{name})\s*=\s*(?P<quote>['\"])(?P<value>.*?)(?P=quote)(?P<tail>\s*(?:#.*)?)$",
+    re.MULTILINE,
+)
+
+
+def _literal_assign_re(*names: str) -> re.Pattern[str]:
+    escaped = "|".join(re.escape(name) for name in names)
+    return re.compile(_PY_LITERAL_ASSIGN_RE.pattern.format(name=escaped), re.MULTILINE)
+
+
+def _env_fallback_expr(env_names: list[str], fallback: str) -> str:
+    parts = [f"__import__('os').environ.get({name!r})" for name in env_names]
+    parts.append(repr(fallback))
+    return " or ".join(parts)
+
+
+def _looks_like_api_key_placeholder(value: str) -> bool:
+    token = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    if not token:
+        return True
+    if token in {"yourapikey", "yourkey", "apikey", "api", "key"}:
+        return True
+    return token.startswith("your") and ("api" in token or "key" in token)
+
+
+def _patch_api_placeholders_for_env(root: Path, *, max_files: int = 300, max_bytes: int = 300_000) -> list[str]:
+    """
+    Patch copied paper-code snapshots that contain obvious API placeholders.
+
+    The patch never writes secrets. It only changes placeholder constants such
+    as ``API_KEY = 'YOUR_API_KEY'`` to read from runtime environment variables
+    first, preserving the original literal as a fallback for auditability.
+    """
+    if not root.exists() or not root.is_dir():
+        return []
+
+    key_re = _literal_assign_re("API_KEY", "OPENAI_API_KEY")
+    base_re = _literal_assign_re("BASE_URL", "OPENAI_BASE_URL")
+    model_re = _literal_assign_re("MODEL_NAME", "OPENAI_MODEL", "MODEL")
+    changed: list[str] = []
+    scanned = 0
+
+    for path in root.rglob("*.py"):
+        if scanned >= max_files:
+            break
+        scanned += 1
+        if ".git" in path.parts:
+            continue
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        patched_key = False
+
+        def repl_key(match: re.Match[str]) -> str:
+            nonlocal patched_key
+            value = match.group("value")
+            if not _looks_like_api_key_placeholder(value):
+                return match.group(0)
+            patched_key = True
+            expr = _env_fallback_expr(
+                ["EXECUTION_OPENAI_API_KEY", "OPENAI_API_KEY", "API_KEY", "LLM_API_KEY"],
+                value,
+            )
+            return f"{match.group('indent')}{match.group('name')} = {expr}{match.group('tail')}"
+
+        new_text = key_re.sub(repl_key, text)
+        if not patched_key:
+            continue
+
+        def repl_base(match: re.Match[str]) -> str:
+            expr = _env_fallback_expr(
+                ["EXECUTION_OPENAI_BASE_URL", "OPENAI_BASE_URL", "BASE_URL", "LLM_BASE_URL"],
+                match.group("value"),
+            )
+            return f"{match.group('indent')}{match.group('name')} = {expr}{match.group('tail')}"
+
+        def repl_model(match: re.Match[str]) -> str:
+            expr = _env_fallback_expr(
+                ["EXECUTION_OPENAI_MODEL", "OPENAI_MODEL", "MODEL", "LLM_MODEL"],
+                match.group("value"),
+            )
+            return f"{match.group('indent')}{match.group('name')} = {expr}{match.group('tail')}"
+
+        new_text = base_re.sub(repl_base, new_text)
+        new_text = model_re.sub(repl_model, new_text)
+        if new_text == text:
+            continue
+        try:
+            path.write_text(new_text, encoding="utf-8", errors="ignore")
+            changed.append(str(path.relative_to(root)).replace("\\", "/"))
+        except Exception:
+            continue
+
+    return changed
+
+
 def _ensure_default_baseline(baseline_path: Path) -> None:
     if baseline_path.exists():
         return
@@ -897,6 +998,13 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
             run_dir,
             "prepare_normalized_shell_scripts",
             {"count": normalized_scripts, "root": str(paper_root)},
+        )
+    api_placeholder_files = _patch_api_placeholders_for_env(paper_root)
+    if api_placeholder_files:
+        append_event(
+            run_dir,
+            "prepare_api_placeholders_env_patched",
+            {"count": len(api_placeholder_files), "files": api_placeholder_files[:50], "root": str(paper_root)},
         )
 
     prepared_md = _copy_prepared_extract(str(cfg.get("paper_extracted_dir") or ""), baseline_dir)

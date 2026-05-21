@@ -10,7 +10,7 @@ from util.fs import ensure_dir, write_text
 from util.recorder import append_event
 from util.subprocess_runner import persist_command_result, run_command
 
-from ..tools.docker import docker_ensure_paper_image, docker_run_paper_image
+from ..tools.docker import _docker_env_passthrough, docker_ensure_paper_image, docker_run_paper_image
 
 
 def _extract_missing_module(stderr: str) -> str | None:
@@ -323,6 +323,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 cwd_container="/app",
                 cmd=["bash", "-lc", shell],
                 env={},
+                env_passthrough=_docker_env_passthrough(cfg),
             )
             res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=900)
             persist_command_result(res, logs_dir, prefix=f"fix_torch_scatter_{attempt}")
@@ -454,6 +455,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                         cwd_container="/app",
                         cmd=["bash", "-lc", shell],
                         env={},
+                        env_passthrough=_docker_env_passthrough(cfg),
                     )
                     res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=timeout)
                 else:
