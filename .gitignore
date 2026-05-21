@@ -41,6 +41,15 @@ output/
 src/baseline/
 compare/
 
+# Local paper parsing / execution artifacts
+*.extracted.txt
+*.columns.txt
+_paper_pages/
+demos/**/_run_*/
+demos/**/execution/
+!demos/Graph/compgcn/execution/
+!demos/Graph/compgcn/execution/**
+
 # Codex CLI scratch placeholder
 .codex
 
