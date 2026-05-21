@@ -142,6 +142,10 @@ def _console_event_line(kind: str, data: dict[str, Any], run_dir: Path) -> str:
         rc = data.get("returncode")
         extra = f" | rc={rc}" if rc is not None else ""
         return f"[FAIL] Run stopped at {task}{extra}"
+    if kind == "run_inconclusive":
+        task = str(data.get("failed_task") or "task")
+        reason = str(data.get("semantic_failure") or data.get("reason") or "insufficient evidence")
+        return f"[WARN] Run inconclusive at {task} | {reason}"
     if kind == "run_ok":
         tasks = data.get("tasks") or []
         if isinstance(tasks, list):

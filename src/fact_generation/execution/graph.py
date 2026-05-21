@@ -36,6 +36,8 @@ def _compute_exit_status(state: State) -> str:
         return "skipped"
     if state.get("status") == "partial":
         return "partial"
+    if state.get("status") == "inconclusive":
+        return "inconclusive"
     if state.get("status") == "failed":
         return "failed"
     judge = state.get("judge", {}) or {}
@@ -112,6 +114,8 @@ def _route_after_plan(state: State) -> str:
 
 def _route_after_run(state: State) -> str:
     if state.get("status") == "partial":
+        return "finalize"
+    if state.get("status") == "inconclusive":
         return "finalize"
     if state.get("status") == "failed":
         return "fix"

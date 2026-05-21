@@ -130,6 +130,13 @@ def _judge_highlights(
         msg = str(run_result.get("message") or run_result.get("reason") or "").strip()
         if msg:
             notes.append(msg)
+    elif bool(run_result.get("inconclusive")) or run_result.get("semantic_failure") == "semantic_no_metrics":
+        label = "inconclusive"
+        failed_task = run_result.get("failed_task") or ""
+        if failed_task:
+            notes.append(
+                f"Task `{failed_task}` completed without machine-readable metrics needed for paper-claim comparison."
+            )
     elif not run_ok:
         label = "execution_failed"
         failed_task = run_result.get("failed_task") or ""
@@ -322,7 +329,7 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     md_lines.append(f"- Review verdict: **{judge_label}**")
     verdict_desc = {
         "verified": "All deterministic baseline checks passed within tolerance.",
-        "inconclusive": "Run succeeded but no/insufficient baseline checks to verify paper claims.",
+        "inconclusive": "Run lacks sufficient metric evidence to verify paper claims.",
         "deviated": "Run succeeded but some quantitative checks exceeded tolerance.",
         "execution_failed": "Task execution failed before producing sufficient evidence.",
     }
@@ -592,6 +599,8 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         coverage_gaps.append(
             "No paper-metric alignment data available (paper_extracted/tables/ or metric artifacts may be missing)."
         )
+    if isinstance(run_result, dict) and run_result.get("semantic_failure") == "semantic_no_metrics":
+        coverage_gaps.append("An eval/reproduction task completed without machine-readable metric evidence.")
     eval_tasks = [t for t in tasks if _task_family(t) == "eval"]
     if not eval_tasks:
         coverage_gaps.append("No evaluation tasks were defined or executed; only smoke/prepare tasks ran.")

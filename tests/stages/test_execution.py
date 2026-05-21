@@ -21,7 +21,12 @@ from fact_generation.execution.nodes.prepare import (
     _normalize_shell_script_line_endings,
     _patch_api_placeholders_for_env,
 )
-from fact_generation.execution.nodes.run import _resolve_host_python_cmd, _semantic_runtime_failure, run_node
+from fact_generation.execution.nodes.run import (
+    _effective_task_timeout,
+    _resolve_host_python_cmd,
+    _semantic_runtime_failure,
+    run_node,
+)
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
     _collect_repo_requirements_text,
@@ -162,6 +167,13 @@ def test_extract_metrics_from_json_log_line() -> None:
     assert metrics["loss"] == 0.12
 
 
+def test_extract_metrics_from_plain_log_without_expected_metrics() -> None:
+    metrics = extract_metrics_from_text("final report\nAccuracy: 94.3\nF1 = 93.4\n")
+
+    assert metrics["accuracy"] == 94.3
+    assert metrics["f1"] == 93.4
+
+
 def test_plan_auto_baseline_generates_checks_from_expected_metrics(tmp_path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -273,6 +285,96 @@ def test_run_node_extracts_metrics_from_task_logs(tmp_path) -> None:
     assert metrics["metrics"]["accuracy"] == 94.3
 
 
+def test_run_node_accepts_eval_metric_without_expected_metrics(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "eval_readme",
+                    "family": "eval",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "-c", "print('Accuracy: 94.3')"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    task_result = out["run_result"]["tasks"][0]
+    assert task_result["success"] is True
+    assert task_result["metric_artifact"] == "metrics/eval_readme_metrics.json"
+
+
+def test_run_node_marks_eval_without_metrics_inconclusive(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "eval_readme",
+                    "family": "eval",
+                    "cwd": "{paper_root}",
+                    "cmd": [
+                        "python",
+                        "-c",
+                        "print('Accumulated Accuracy Scores:\\n\\n-------------------------------------------------- Finished')",
+                    ],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    assert out["status"] == "inconclusive"
+    assert out["run_result"]["success"] is False
+    assert out["run_result"]["inconclusive"] is True
+    assert out["run_result"]["semantic_failure"] == "semantic_no_metrics"
+    assert out["run_result"]["tasks"][0]["semantic_failure"] == "semantic_no_metrics"
+
+
+def test_graph_exit_status_preserves_run_inconclusive() -> None:
+    from fact_generation.execution.graph import _compute_exit_status
+
+    assert _compute_exit_status({"status": "inconclusive", "run_result": {"success": False}}) == "inconclusive"
+
+
 def test_runtime_traceback_output_is_treated_as_failure() -> None:
     reason = _semantic_runtime_failure(
         stdout="",
@@ -342,6 +444,18 @@ def test_no_docker_python_tasks_use_current_interpreter() -> None:
 
     assert resolved[0] == sys.executable
     assert resolved[1:] == ["-V"]
+
+
+def test_task_timeout_can_be_disabled_by_env(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_TASK_TIMEOUT", "1")
+
+    assert _effective_task_timeout({"timeout_sec": 1}, {}) == 0
+
+
+def test_task_timeout_can_be_overridden_by_env(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_TASK_TIMEOUT_SEC", "0")
+
+    assert _effective_task_timeout({"timeout_sec": 1}, {}) == 0
 
 
 def test_run_command_reports_timeout_explicitly(tmp_path) -> None:
@@ -416,6 +530,27 @@ def test_docker_runtime_passes_selected_env_names_without_values(monkeypatch, tm
     assert "-e OPENAI_API_KEY" in joined
     assert "secret-value" not in joined
     assert "OPENAI_BASE_URL" not in joined
+
+
+def test_docker_runtime_passes_default_execution_llm_env_names(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("EXECUTION_OPENAI_API_KEY", "secret-value")
+    monkeypatch.setenv("EXECUTION_OPENAI_BASE_URL", "https://api.example/v1")
+    monkeypatch.setenv("EXECUTION_OPENAI_MODEL", "gpt-test")
+
+    cmd = docker_run_paper_image(
+        image="paper:test",
+        paper_root_host=str(tmp_path),
+        run_dir_host=str(tmp_path),
+        cwd_container="/app",
+        cmd=["python", "-V"],
+        env_passthrough=_docker_env_passthrough({}),
+    )
+
+    joined = " ".join(cmd)
+    assert "-e EXECUTION_OPENAI_API_KEY" in joined
+    assert "-e EXECUTION_OPENAI_BASE_URL" in joined
+    assert "-e EXECUTION_OPENAI_MODEL" in joined
+    assert "secret-value" not in joined
 
 
 def test_normalize_container_proxy_rewrites_loopback() -> None:

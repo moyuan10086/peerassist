@@ -832,12 +832,26 @@ def _docker_env_passthrough(cfg: dict | None = None) -> list[str]:
     raw = str(
         cfg.get("docker_env_passthrough") or os.environ.get("EXECUTION_DOCKER_ENV_PASSTHROUGH") or ""
     ).strip()
-    if not raw:
-        return []
+    default_names = [
+        "EXECUTION_MODEL_PROVIDER",
+        "MODEL_PROVIDER",
+        "EXECUTION_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "API_KEY",
+        "LLM_API_KEY",
+        "EXECUTION_OPENAI_BASE_URL",
+        "OPENAI_BASE_URL",
+        "BASE_URL",
+        "LLM_BASE_URL",
+        "EXECUTION_OPENAI_MODEL",
+        "OPENAI_MODEL",
+        "MODEL",
+        "LLM_MODEL",
+    ]
     items = re.split(r"[\s,;]+", raw)
     out: list[str] = []
     seen: set[str] = set()
-    for item in items:
+    for item in [*default_names, *items]:
         name = item.strip()
         if not name or name in seen or not _ENV_NAME_RE.match(name):
             continue

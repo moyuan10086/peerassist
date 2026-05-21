@@ -112,7 +112,30 @@ def extract_metrics_from_text(
         out.update(_collect_metrics_from_obj(obj))
 
     expected = expected_metrics or {}
-    for raw_key in expected:
+    candidates = list(expected)
+    if not candidates:
+        # A real eval/reproduction run may not have paper targets wired yet,
+        # but common metrics in logs are still useful evidence for alignment.
+        candidates = [
+            "accuracy",
+            "f1",
+            "precision",
+            "recall",
+            "auc",
+            "mrr",
+            "hits@1",
+            "hits@3",
+            "hits@10",
+            "bleu",
+            "rouge-l",
+            "rouge-1",
+            "rouge-2",
+            "mae",
+            "rmse",
+            "mse",
+            "perplexity",
+        ]
+    for raw_key in candidates:
         key = _metric_key(str(raw_key))
         if key in out:
             continue

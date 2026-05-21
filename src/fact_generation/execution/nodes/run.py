@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from util.recorder import append_event
 from util.subprocess_runner import persist_command_result, run_command
 
 from ..tools.docker import _docker_env_passthrough, docker_ensure_paper_image, docker_run_paper_image
-from ..tools.log_metrics import write_task_metric_artifact
+from ..tools.log_metrics import extract_metrics_from_text, write_task_metric_artifact
 from ..tools.results_tables import maybe_summarize_metrics_tables
 
 
@@ -143,6 +144,63 @@ def _semantic_runtime_failure(stdout: str, stderr: str) -> str:
     return ""
 
 
+def _task_family(task: dict[str, Any], task_id: str = "") -> str:
+    family = str(task.get("family") or "").strip().lower()
+    if family:
+        return family
+    ident = task_id.lower()
+    if ident.startswith("eval_") or ident.startswith("evaluate_"):
+        return "eval"
+    if ident.startswith("reproduce_") or ident.startswith("reproduction_"):
+        return "reproduce"
+    if ident.startswith("train_"):
+        return "train"
+    if ident.startswith("smoke_") or "smoke" in ident:
+        return "smoke"
+    return ""
+
+
+def _paper_targets_have_metrics(task: dict[str, Any]) -> bool:
+    targets = task.get("paper_targets")
+    if not isinstance(targets, list):
+        return False
+    return any(isinstance(t, dict) and isinstance(t.get("metrics"), dict) and bool(t["metrics"]) for t in targets)
+
+
+def _looks_like_empty_metric_summary(text: str) -> bool:
+    if not text:
+        return False
+    if re.search(r"(?is)accumulated\s+accuracy\s+scores\s*:\s*(?:\r?\n\s*)*(?:-+|finished|\Z)", text):
+        return True
+    return bool(re.search(r"(?is)accumulated\s+accuracy\s+scores\s*:\s*(?:\{\s*\}|\[\s*\])", text))
+
+
+def _semantic_metric_failure(
+    *,
+    task: dict[str, Any],
+    task_id: str,
+    stdout: str,
+    stderr: str,
+    metric_artifact: str,
+) -> str:
+    text = "\n".join([stdout or "", stderr or ""])
+    family = _task_family(task, task_id)
+    expected = task.get("expected_metrics") if isinstance(task.get("expected_metrics"), dict) else {}
+    metrics = extract_metrics_from_text(text, expected_metrics=expected)
+    empty_summary = _looks_like_empty_metric_summary(text)
+    if metric_artifact and metrics and not empty_summary:
+        return ""
+    has_metric_contract = bool(expected) or _paper_targets_have_metrics(task) or bool(
+        str(task.get("metric_artifact_path") or "").strip()
+    )
+    if has_metric_contract and (not metrics or empty_summary):
+        return "semantic_no_metrics"
+    if family in {"eval", "evaluate", "evaluation", "reproduce", "reproduction", "benchmark"}:
+        if not metrics or empty_summary:
+            return "semantic_no_metrics"
+    return ""
+
+
 def _resolve_host_python_cmd(cmd: list[str]) -> list[str]:
     if not cmd:
         return cmd
@@ -150,6 +208,27 @@ def _resolve_host_python_cmd(cmd: list[str]) -> list[str]:
     if first in {"python", "python3"}:
         return [sys.executable, *cmd[1:]]
     return cmd
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _effective_task_timeout(task: dict[str, Any], cfg: dict[str, Any]) -> int:
+    if _truthy_env("EXECUTION_DISABLE_TASK_TIMEOUT") or _truthy_env("FACTREVIEW_DISABLE_TASK_TIMEOUT"):
+        return 0
+    raw = cfg.get("task_timeout_sec")
+    if raw in (None, ""):
+        raw = os.environ.get("EXECUTION_TASK_TIMEOUT_SEC") or os.environ.get("FACTREVIEW_TASK_TIMEOUT_SEC")
+    if raw not in (None, ""):
+        try:
+            return max(int(raw), 0)
+        except Exception:
+            pass
+    try:
+        return max(int(task.get("timeout_sec") or 3600), 0)
+    except Exception:
+        return 3600
 
 
 def run_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -260,7 +339,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 str(x).replace("{paper_root}", pr).replace("{paper_dir}", pd).replace("{run_dir}", rd)
                 for x in cmd_raw
             ]
-        timeout_sec = int(task.get("timeout_sec") or 3600)
+        timeout_sec = _effective_task_timeout(task, cfg)
         if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
             item = _task_result_base(task, task_id)
             item.update({"success": False, "error": "invalid_cmd"})
@@ -414,8 +493,21 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 )
             except Exception:
                 metric_artifact = ""
+            metric_failure = _semantic_metric_failure(
+                task=task,
+                task_id=task_id,
+                stdout=res.stdout or "",
+                stderr=res.stderr or "",
+                metric_artifact=metric_artifact,
+            )
+            if metric_failure:
+                semantic_failure = metric_failure
+                ok = False
         if metric_artifact:
             item["metric_artifact"] = metric_artifact
+        item["success"] = ok
+        if semantic_failure:
+            item["semantic_failure"] = semantic_failure
         results.append(item)
         task_event = {
             "task": task_id,
@@ -434,7 +526,8 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
 
         if not ok:
             # stop at first failing task (simpler, deterministic); can be extended to continue.
-            state["status"] = "failed"
+            missing_metrics = semantic_failure == "semantic_no_metrics"
+            state["status"] = "inconclusive" if missing_metrics else "failed"
             failure_result = {
                 "success": False,
                 "failed_task": task_id,
@@ -447,11 +540,20 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 "stdout_tail": (res.stdout or "")[-2000:],
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
             }
+            if missing_metrics:
+                failure_result.update(
+                    {
+                        "inconclusive": True,
+                        "reason": "metric_evidence_missing",
+                        "tasks": results,
+                    }
+                )
             if semantic_failure:
                 failure_result["semantic_failure"] = semantic_failure
             state["run_result"] = failure_result
-            append_event(run_dir, "run_failed", state["run_result"])
-            state.setdefault("history", []).append({"kind": "run_failed", "data": state["run_result"]})
+            event_kind = "run_inconclusive" if missing_metrics else "run_failed"
+            append_event(run_dir, event_kind, state["run_result"])
+            state.setdefault("history", []).append({"kind": event_kind, "data": state["run_result"]})
             return state
 
         # Archive artifacts (optional per task)
