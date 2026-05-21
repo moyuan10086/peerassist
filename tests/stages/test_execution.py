@@ -21,7 +21,7 @@ from fact_generation.execution.nodes.prepare import (
     _normalize_shell_script_line_endings,
     _patch_api_placeholders_for_env,
 )
-from fact_generation.execution.nodes.run import _semantic_runtime_failure, run_node
+from fact_generation.execution.nodes.run import _resolve_host_python_cmd, _semantic_runtime_failure, run_node
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
     _collect_repo_requirements_text,
@@ -284,6 +284,13 @@ def test_runtime_traceback_output_is_treated_as_failure() -> None:
     )
 
     assert reason == "python_traceback_in_output"
+
+
+def test_no_docker_python_tasks_use_current_interpreter() -> None:
+    resolved = _resolve_host_python_cmd(["python", "-V"])
+
+    assert resolved[0] == sys.executable
+    assert resolved[1:] == ["-V"]
 
 
 def test_run_command_reports_timeout_explicitly(tmp_path) -> None:

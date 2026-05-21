@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +128,15 @@ def _semantic_runtime_failure(stdout: str, stderr: str) -> str:
         if token in text:
             return token.rstrip(":").lower()
     return ""
+
+
+def _resolve_host_python_cmd(cmd: list[str]) -> list[str]:
+    if not cmd:
+        return cmd
+    first = str(cmd[0] or "").strip().lower()
+    if first in {"python", "python3"}:
+        return [sys.executable, *cmd[1:]]
+    return cmd
 
 
 def run_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -361,7 +371,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             )
             res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=timeout_sec, env=env)
         else:
-            res = run_command(cmd=cmd, cwd=cwd, timeout_sec=timeout_sec, env=env)
+            res = run_command(cmd=_resolve_host_python_cmd(cmd), cwd=cwd, timeout_sec=timeout_sec, env=env)
         persist_command_result(res, logs_dir, prefix=f"{task_id}_attempt{attempt}")
         cmd_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_command.txt")
         stdout_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_stdout.log")
