@@ -222,6 +222,8 @@ def _command_to_argv(raw: str) -> list[str]:
         return ["bash", "-lc", s]
     if not parts:
         return []
+    if parts[0].endswith(".sh") or (parts[0].startswith("./") and parts[0].endswith(".sh")):
+        return ["bash", *parts]
     shell_features = any(token in s for token in ["&&", "||", "|", ";", "$(", "`", ">", "<"])
     if shell_features or parts[0] in {"cd", "export"}:
         return ["bash", "-lc", s]
@@ -339,8 +341,9 @@ def _build_generic_readme_tasks(readme_example_cmds: list[str], mode: str) -> li
         family = _command_family(raw)
         if family not in {"prepare", "train", "eval", "reproduce"}:
             continue
-        if family == "prepare" and tasks:
-            # Keep setup small; the default install task already covers requirements.
+        if family == "prepare":
+            # Prepare commands are handled by _build_repo_prepare_tasks so they
+            # can be ordered before training and de-duplicated with script files.
             continue
         task_id = f"{family}_readme_{idx}"
         if task_id in seen:
@@ -360,6 +363,68 @@ def _build_generic_readme_tasks(readme_example_cmds: list[str], mode: str) -> li
         )
         if len(tasks) >= 12:
             break
+    return tasks
+
+
+def _is_dependency_install_command(raw: str) -> bool:
+    s = (raw or "").strip().lower()
+    if not s:
+        return False
+    return any(
+        token in s
+        for token in [
+            "pip install",
+            "conda env",
+            "mamba env",
+            "micromamba env",
+            "environment.yml",
+            "requirements.txt",
+            "setup.py install",
+        ]
+    )
+
+
+def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    seen_cmds: set[str] = set()
+
+    def add_prepare(raw_cmd: str, raw_id: str) -> None:
+        cmd = re.sub(r"\s+", " ", (raw_cmd or "").strip())
+        if not cmd or cmd in seen_cmds:
+            return
+        seen_cmds.add(cmd)
+        tasks.append(
+            {
+                "id": f"prepare_{_safe_id_part(raw_id)}",
+                "family": "prepare",
+                "enabled": mode == "full",
+                "cwd": "{paper_root}",
+                "cmd": _command_to_argv(cmd),
+                "timeout_sec": 7200,
+                "use_conda": True,
+                "artifact_paths": ["data/**", "datasets/**", "processed/**", "preprocessed/**"],
+            }
+        )
+
+    for idx, raw in enumerate(readme_example_cmds, 1):
+        if _command_family(raw) != "prepare" or _is_dependency_install_command(raw):
+            continue
+        add_prepare(raw, f"readme_{idx}")
+
+    for rel in [
+        "setup.sh",
+        "preprocess.sh",
+        "prepare.sh",
+        "download.sh",
+        "scripts/setup.sh",
+        "scripts/preprocess.sh",
+        "scripts/prepare.sh",
+        "scripts/download.sh",
+    ]:
+        path = repo_root / rel
+        if path.exists() and path.is_file():
+            add_prepare(f"bash {rel.replace(os.sep, '/')}", rel)
+
     return tasks
 
 
@@ -582,6 +647,13 @@ def _finalize_tasks(
             task["metric_artifact_path"] = f"metrics/{task.get('id')}_metrics.json"
 
     existing_ids = {str(t.get("id") or "") for t in tasks if isinstance(t, dict)}
+    setup_tasks = _build_repo_prepare_tasks(repo_root, readme_example_cmds, mode)
+    for task in setup_tasks:
+        tid = str(task.get("id") or "")
+        if tid and tid not in existing_ids:
+            tasks.append(task)
+            existing_ids.add(tid)
+
     target_tasks = _build_target_reproduction_tasks(
         readme_example_cmds=readme_example_cmds,
         paper_metric_targets=paper_metric_targets or [],
@@ -683,7 +755,7 @@ def infer_tasks_heuristic(
                     "family": _command_family(examples[0]),
                     "enabled": False,
                     "cwd": "{paper_root}",
-                    "cmd": ["cmd", "/c", examples[0]] if os.name == "nt" else ["bash", "-lc", examples[0]],
+                    "cmd": _command_to_argv(examples[0]),
                     "timeout_sec": 3600,
                     "use_conda": True,
                     "artifact_paths": ["results/**", "logs/**"],

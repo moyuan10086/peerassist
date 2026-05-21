@@ -395,6 +395,36 @@ def _copy_prepared_extract(prepared_extract_dir: str, baseline_dir: Path) -> str
     return str(md.resolve()) if md.exists() else ""
 
 
+def _normalize_shell_script_line_endings(
+    root: Path, *, max_files: int = 200, max_bytes: int = 5_000_000
+) -> int:
+    if not root.exists() or not root.is_dir():
+        return 0
+    changed = 0
+    for path in root.rglob("*.sh"):
+        if changed >= max_files:
+            break
+        if ".git" in path.parts:
+            continue
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            data = path.read_bytes()
+        except Exception:
+            continue
+        if b"\r" not in data:
+            continue
+        normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if normalized == data:
+            continue
+        try:
+            path.write_bytes(normalized)
+            changed += 1
+        except Exception:
+            continue
+    return changed
+
+
 def _ensure_default_baseline(baseline_path: Path) -> None:
     if baseline_path.exists():
         return
@@ -714,6 +744,13 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
             append_event(run_dir, "prepare_clone_ok", {"repo_url": repo_url, "dest": str(source_dir)})
 
     _git_reset_if_possible(paper_root, logs_dir)
+    normalized_scripts = _normalize_shell_script_line_endings(paper_root)
+    if normalized_scripts:
+        append_event(
+            run_dir,
+            "prepare_normalized_shell_scripts",
+            {"count": normalized_scripts, "root": str(paper_root)},
+        )
 
     prepared_md = _copy_prepared_extract(str(cfg.get("paper_extracted_dir") or ""), baseline_dir)
     if prepared_md:

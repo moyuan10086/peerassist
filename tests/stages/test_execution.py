@@ -15,6 +15,7 @@ import sys
 import pytest
 
 from fact_generation.execution.nodes.plan import _merge_auto_baseline
+from fact_generation.execution.nodes.prepare import _normalize_shell_script_line_endings
 from fact_generation.execution.nodes.run import run_node
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
@@ -390,6 +391,37 @@ def test_heuristic_smoke_disables_readme_prepare_commands(tmp_path) -> None:
     prepare_tasks = [t for t in result.tasks if t.get("family") == "prepare"]
     assert prepare_tasks
     assert all(t.get("enabled") is False for t in prepare_tasks)
+
+
+def test_heuristic_full_adds_conventional_preprocess_before_training(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\npython run.py -score_func transe -opn sub\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "run.py").write_text("print('train')\n", encoding="utf-8")
+    (tmp_path / "preprocess.sh").write_text("mkdir -p data\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    ids = [str(t.get("id") or "") for t in result.tasks]
+    assert "prepare_preprocess_sh" in ids
+    assert any(t.get("id") == "train_transe_sub" for t in result.tasks)
+    assert ids.index("prepare_preprocess_sh") < ids.index("train_transe_sub")
+
+    prep = next(t for t in result.tasks if t.get("id") == "prepare_preprocess_sh")
+    assert prep.get("enabled") is True
+    assert prep.get("cmd") == ["bash", "preprocess.sh"]
+    assert not any((t.get("cmd") or [])[:2] == ["cmd", "/c"] for t in result.tasks)
+
+
+def test_normalize_shell_script_line_endings(tmp_path) -> None:
+    script = tmp_path / "preprocess.sh"
+    script.write_bytes(b"#!/bin/bash\r\nmkdir data\r\n")
+
+    changed = _normalize_shell_script_line_endings(tmp_path)
+
+    assert changed == 1
+    assert script.read_bytes() == b"#!/bin/bash\nmkdir data\n"
 
 
 def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:
