@@ -45,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--docker-gpus", type=str, default="", help="Value for docker run --gpus, e.g. all")
     p.add_argument("--docker-shm-size", type=str, default="", help="Value for docker run --shm-size")
     p.add_argument("--docker-ipc", type=str, default="", help="Value for docker run --ipc")
+    p.add_argument("--pip-index-url", type=str, default="", help="Docker build pip index URL")
+    p.add_argument("--pip-extra-index-url", type=str, default="", help="Docker build pip extra index URL")
+    p.add_argument("--pip-trusted-host", type=str, default="", help="Docker build pip trusted-host value")
     return p.parse_args()
 
 
@@ -64,6 +67,18 @@ def main() -> None:
         import os
 
         os.environ["EXECUTION_DOCKER_IPC"] = str(args.docker_ipc).strip()
+    if str(args.pip_index_url or "").strip():
+        import os
+
+        os.environ["EXECUTION_DOCKER_PIP_INDEX_URL"] = str(args.pip_index_url).strip()
+    if str(args.pip_extra_index_url or "").strip():
+        import os
+
+        os.environ["EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL"] = str(args.pip_extra_index_url).strip()
+    if str(args.pip_trusted_host or "").strip():
+        import os
+
+        os.environ["EXECUTION_DOCKER_PIP_TRUSTED_HOST"] = str(args.pip_trusted_host).strip()
     paper_key = str(args.paper_key or "").strip() or (
         infer_paper_key(args.paper_pdf) if str(args.paper_pdf or "").strip() else ""
     )

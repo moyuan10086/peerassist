@@ -78,6 +78,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--docker-gpus", type=str, default="")
     p.add_argument("--docker-shm-size", type=str, default="")
     p.add_argument("--docker-ipc", type=str, default="")
+    p.add_argument("--pip-index-url", type=str, default="")
+    p.add_argument("--pip-extra-index-url", type=str, default="")
+    p.add_argument("--pip-trusted-host", type=str, default="")
     return p.parse_args()
 
 
@@ -93,6 +96,9 @@ def main() -> None:
     _set_env_if_value("EXECUTION_DOCKER_GPUS", args.docker_gpus)
     _set_env_if_value("EXECUTION_DOCKER_SHM_SIZE", args.docker_shm_size)
     _set_env_if_value("EXECUTION_DOCKER_IPC", args.docker_ipc)
+    _set_env_if_value("EXECUTION_DOCKER_PIP_INDEX_URL", args.pip_index_url)
+    _set_env_if_value("EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL", args.pip_extra_index_url)
+    _set_env_if_value("EXECUTION_DOCKER_PIP_TRUSTED_HOST", args.pip_trusted_host)
     os.environ["EXECUTION_GIT_CLONE_TIMEOUT_SEC"] = str(int(args.clone_timeout_sec or 600))
 
     repos = [_parse_repo_spec(raw) for raw in args.repo] if args.repo else list(DEFAULT_REPOS)

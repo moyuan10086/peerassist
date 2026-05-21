@@ -55,6 +55,15 @@ def run_command(
         rc = proc.returncode
         out = proc.stdout or ""
         err = proc.stderr or ""
+    except subprocess.TimeoutExpired as e:
+        rc = 124
+        out_raw = e.stdout or ""
+        err_raw = e.stderr or ""
+        out = out_raw.decode("utf-8", errors="replace") if isinstance(out_raw, bytes) else str(out_raw)
+        err_body = err_raw.decode("utf-8", errors="replace") if isinstance(err_raw, bytes) else str(err_raw)
+        err = f"TimeoutExpired: command exceeded timeout_sec={timeout_sec}"
+        if err_body.strip():
+            err = f"{err}\n{err_body}"
     except Exception as e:
         # Never crash the workflow due to missing executables (WinError 2), permission issues, etc.
         rc = 127

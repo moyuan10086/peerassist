@@ -88,6 +88,28 @@ def _normalize_shell_for_conda_env(shell: str) -> str:
     return s
 
 
+def _pip_package_for_module(module: str) -> str:
+    module = str(module or "").strip()
+    if not module:
+        return ""
+    return _MODULE_TO_PIP.get(module, module.replace("_", "-"))
+
+
+def _add_extra_pip_package(cfg: dict[str, Any], package: str) -> bool:
+    package = str(package or "").strip()
+    if not package:
+        return False
+    raw = str(cfg.get("docker_extra_pip_packages") or os.getenv("EXECUTION_DOCKER_EXTRA_PIP_PACKAGES") or "")
+    existing = [x.strip() for x in raw.split() if x.strip()]
+    if package in existing:
+        return False
+    existing.append(package)
+    cfg["docker_extra_pip_packages"] = " ".join(existing)
+    # Force docker_ensure_paper_image to compute a fresh tag from the updated cfg.
+    cfg.pop("docker_paper_image", None)
+    return True
+
+
 def _torch_scatter_fallback_in_container_shell() -> str:
     """
     Inject a minimal `torch_scatter` python package into the current environment.
@@ -233,6 +255,38 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
     if missing:
         append_event(run_dir, "fix_missing_module", {"module": missing})
         state.setdefault("history", []).append({"kind": "fix_missing_module", "data": {"module": missing}})
+
+    if missing and docker_enabled and missing != "torch_scatter":
+        package = _pip_package_for_module(missing)
+        if _add_extra_pip_package(cfg, package):
+            state["config"] = cfg
+            ok_img, img_or_msg = docker_ensure_paper_image(
+                cfg,
+                paper_key=str(cfg.get("paper_key") or "paper"),
+                paper_root_host=str(Path(paper_root).resolve()),
+                python_spec=python_spec,
+                timeout_sec=int(
+                    cfg.get("docker_build_timeout_sec")
+                    or os.environ.get("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC")
+                    or 3600
+                ),
+            )
+            append_event(
+                run_dir,
+                "fix_rebuild_image_extra_pip",
+                {"ok": ok_img, "package": package, "detail": img_or_msg},
+            )
+            state.setdefault("history", []).append(
+                {
+                    "kind": "fix_rebuild_image_extra_pip",
+                    "data": {"ok": ok_img, "package": package, "detail": img_or_msg},
+                }
+            )
+            if ok_img:
+                cfg["docker_paper_image"] = img_or_msg
+                state["config"] = cfg
+                state["status"] = "running"
+                return state
 
     # Deterministic fix: missing torch_scatter.
     # Prefer installing in-container (wheel index), then fallback injection module. Avoid editing paper code.

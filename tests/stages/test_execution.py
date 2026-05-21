@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 
 import pytest
 
 from fact_generation.execution.nodes.plan import _merge_auto_baseline
 from fact_generation.execution.nodes.run import run_node
 from fact_generation.execution.tools.alignment import run_alignment
+from fact_generation.execution.tools.docker import _docker_build_args, _paper_install_deps_py_text
 from fact_generation.execution.tools.log_metrics import extract_metrics_from_text, write_task_metric_artifact
 from fact_generation.execution.tools.metrics import compute_check
 from fact_generation.execution.tools.paper_tables import extract_paper_metric_targets
 from fact_generation.execution.tools.task_infer import infer_tasks_heuristic
+from util.subprocess_runner import run_command
 
 
 def test_extracts_generic_paper_metric_table(tmp_path) -> None:
@@ -255,6 +258,35 @@ def test_run_node_extracts_metrics_from_task_logs(tmp_path) -> None:
     metrics = json.loads((run_dir / "artifacts" / task_result["metric_artifact"]).read_text())
     assert metrics["dataset"] == "CIFAR-10"
     assert metrics["metrics"]["accuracy"] == 94.3
+
+
+def test_run_command_reports_timeout_explicitly(tmp_path) -> None:
+    result = run_command(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        cwd=str(tmp_path),
+        timeout_sec=1,
+    )
+
+    assert result.returncode == 124
+    assert "TimeoutExpired" in result.stderr
+
+
+def test_docker_build_args_include_pip_index_and_extra_packages(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DOCKER_PIP_INDEX_URL", "https://mirror.example/simple")
+    monkeypatch.setenv("EXECUTION_DOCKER_PIP_TRUSTED_HOST", "mirror.example")
+
+    args = _docker_build_args({"docker_extra_pip_packages": "numpy scikit-learn"})
+
+    joined = " ".join(args)
+    assert "--build-arg PIP_INDEX_URL=https://mirror.example/simple" in joined
+    assert "--build-arg PIP_TRUSTED_HOST=mirror.example" in joined
+    assert "--build-arg EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=numpy scikit-learn" in joined
+
+
+def test_docker_install_deps_installs_numpy_before_torch() -> None:
+    text = _paper_install_deps_py_text()
+
+    assert text.index("if numpy_line:") < text.index("if torch_pin:")
 
 
 def test_heuristic_tasks_use_paper_targets_and_readme_commands(tmp_path) -> None:

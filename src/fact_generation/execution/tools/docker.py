@@ -97,10 +97,22 @@ def _paper_dockerfile_text(*, python_image: str) -> str:
     return (
         f"FROM {python_image}\n"
         "\n"
+        "ARG PIP_INDEX_URL=\n"
+        "ARG PIP_EXTRA_INDEX_URL=\n"
+        "ARG PIP_TRUSTED_HOST=\n"
+        "ARG EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=\n"
+        "\n"
         "USER root\n"
-        "RUN (id -u user >/dev/null 2>&1 || useradd -m -u 1000 user) && python -m pip install --upgrade pip\n"
+        "RUN { echo '[global]'; \\\n"
+        "      if [ -n \"$PIP_INDEX_URL\" ]; then echo \"index-url = $PIP_INDEX_URL\"; fi; \\\n"
+        "      if [ -n \"$PIP_EXTRA_INDEX_URL\" ]; then echo \"extra-index-url = $PIP_EXTRA_INDEX_URL\"; fi; \\\n"
+        "      if [ -n \"$PIP_TRUSTED_HOST\" ]; then echo \"trusted-host = $PIP_TRUSTED_HOST\"; fi; \\\n"
+        "    } > /etc/pip.conf \\\n"
+        " && (id -u user >/dev/null 2>&1 || useradd -m -u 1000 user) \\\n"
+        " && python -m pip install --upgrade pip\n"
         "USER user\n"
         'ENV PATH="/home/user/.local/bin:$PATH"\n'
+        "ENV EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=${EXECUTION_DOCKER_EXTRA_PIP_PACKAGES}\n"
         "ENTRYPOINT []\n"
         'CMD ["python"]\n'
         "\n"
@@ -120,6 +132,7 @@ def _paper_install_deps_py_text() -> str:
         "\n"
         "import os\n"
         "import re\n"
+        "import shlex\n"
         "import subprocess\n"
         "import sys\n"
         "from pathlib import Path\n"
@@ -265,16 +278,22 @@ def _paper_install_deps_py_text() -> str:
         "            continue\n"
         "        other_first.append(ln)\n"
         "\n"
-        "    if torch_pin:\n"
-        "        # Prefer CPU wheels for broad compatibility.\n"
-        "        rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', f'torch=={torch_pin}+cpu', '-f', 'https://download.pytorch.org/whl/torch_stable.html'])\n"
-        "        if rc != 0:\n"
-        "            rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', f'torch=={torch_pin}'])\n"
+        "    extra = shlex.split(os.getenv('EXECUTION_DOCKER_EXTRA_PIP_PACKAGES', '').strip())\n"
+        "    if extra:\n"
+        "        rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', *extra])\n"
         "        if rc != 0:\n"
         "            return rc\n"
         "\n"
         "    if numpy_line:\n"
         "        rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', numpy_line])\n"
+        "        if rc != 0:\n"
+        "            return rc\n"
+        "\n"
+        "    if torch_pin:\n"
+        "        # Prefer CPU wheels for broad compatibility.\n"
+        "        rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', f'torch=={torch_pin}+cpu', '-f', 'https://download.pytorch.org/whl/torch_stable.html'])\n"
+        "        if rc != 0:\n"
+        "            rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', f'torch=={torch_pin}'])\n"
         "        if rc != 0:\n"
         "            return rc\n"
         "\n"
@@ -347,6 +366,37 @@ def _paper_install_deps_py_text() -> str:
     )
 
 
+def _cfg_or_env(cfg: dict, cfg_key: str, *env_names: str) -> str:
+    value = str(cfg.get(cfg_key) or "").strip()
+    if value:
+        return value
+    for name in env_names:
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _docker_build_args(cfg: dict) -> list[str]:
+    values = {
+        "PIP_INDEX_URL": _cfg_or_env(cfg, "docker_pip_index_url", "EXECUTION_DOCKER_PIP_INDEX_URL", "PIP_INDEX_URL"),
+        "PIP_EXTRA_INDEX_URL": _cfg_or_env(
+            cfg, "docker_pip_extra_index_url", "EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL", "PIP_EXTRA_INDEX_URL"
+        ),
+        "PIP_TRUSTED_HOST": _cfg_or_env(
+            cfg, "docker_pip_trusted_host", "EXECUTION_DOCKER_PIP_TRUSTED_HOST", "PIP_TRUSTED_HOST"
+        ),
+        "EXECUTION_DOCKER_EXTRA_PIP_PACKAGES": _cfg_or_env(
+            cfg, "docker_extra_pip_packages", "EXECUTION_DOCKER_EXTRA_PIP_PACKAGES"
+        ),
+    }
+    args: list[str] = []
+    for key, value in values.items():
+        if value:
+            args.extend(["--build-arg", f"{key}={value}"])
+    return args
+
+
 def _paper_image_tag(*, cfg: dict, paper_key: str, payload: str) -> str:
     h = hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:12]
     return f"{_paper_image_prefix(cfg)}:{slugify_run_key(paper_key)}-{h}"
@@ -377,6 +427,10 @@ def docker_ensure_paper_image(
         f"paper_key={paper_key}\npython_image={python_image}\npython_spec={python_spec}\n"
         f"req_sha256={hashlib.sha256(req_bytes).hexdigest()}\n"
         f"install_deps_sha256={hashlib.sha256(install_deps_text.encode('utf-8', errors='ignore')).hexdigest()}\n"
+        f"pip_index_url={_cfg_or_env(cfg, 'docker_pip_index_url', 'EXECUTION_DOCKER_PIP_INDEX_URL', 'PIP_INDEX_URL')}\n"
+        f"pip_extra_index_url={_cfg_or_env(cfg, 'docker_pip_extra_index_url', 'EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL', 'PIP_EXTRA_INDEX_URL')}\n"
+        f"pip_trusted_host={_cfg_or_env(cfg, 'docker_pip_trusted_host', 'EXECUTION_DOCKER_PIP_TRUSTED_HOST', 'PIP_TRUSTED_HOST')}\n"
+        f"extra_pip_packages={_cfg_or_env(cfg, 'docker_extra_pip_packages', 'EXECUTION_DOCKER_EXTRA_PIP_PACKAGES')}\n"
         f"Dockerfile={dockerfile_text}\n"
     )
     image = _paper_image_tag(cfg=cfg, paper_key=paper_key, payload=payload)
@@ -409,7 +463,7 @@ def docker_ensure_paper_image(
         return False, f"write_dockerfile_failed: {dockerfile_path}"
 
     build = run_command(
-        docker_cmd(["build", "-t", image, "-f", str(dockerfile_path), "."]),
+        docker_cmd(["build", *_docker_build_args(cfg), "-t", image, "-f", str(dockerfile_path), "."]),
         cwd=str(pr),
         timeout_sec=timeout_sec,
     )

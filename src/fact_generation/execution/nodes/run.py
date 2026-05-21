@@ -386,6 +386,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 "success": ok,
                 "returncode": res.returncode,
                 "duration_sec": res.duration_sec,
+                "timeout_sec": timeout_sec,
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
             },
         )
