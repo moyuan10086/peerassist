@@ -293,6 +293,78 @@ def test_heuristic_tasks_use_paper_targets_and_readme_commands(tmp_path) -> None
     assert all(t.get("metric_artifact_path") for t in target_tasks)
 
 
+def test_heuristic_tasks_do_not_install_missing_requirements(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("# Tiny repo\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    assert not any(t.get("id") == "install_deps" for t in result.tasks)
+    assert any(t.get("id") == "repo_smoke" for t in result.tasks)
+
+
+def test_heuristic_smoke_disables_readme_prepare_commands(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\npip install -r requirements.txt\npython main.py --help\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "requirements.txt").write_text("tensorflow-gpu==1.14.0\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    prepare_tasks = [t for t in result.tasks if t.get("family") == "prepare"]
+    assert prepare_tasks
+    assert all(t.get("enabled") is False for t in prepare_tasks)
+
+
+def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:
+    from fact_generation.execution.stage_runner import run_execution_stage
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Tiny repo\n", encoding="utf-8")
+    (repo / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = run_execution_stage(
+        run_dir=tmp_path / "run",
+        paper_key="tiny_repo",
+        paper_root=str(repo),
+        no_pdf_extract=True,
+        no_llm=True,
+        auto_tasks=True,
+        auto_tasks_force=True,
+        docker_enabled=False,
+        max_attempts=1,
+    )
+
+    assert result.status in {"ok", "inconclusive"}
+    assert (tmp_path / "run" / "stages" / "fact_generation" / "execution" / "execution.json").exists()
+
+
+def test_explicit_source_does_not_load_same_key_demo_fixture(tmp_path) -> None:
+    from fact_generation.execution.stage_runner import run_execution_stage
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Tiny repo\n", encoding="utf-8")
+    (repo / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = run_execution_stage(
+        run_dir=tmp_path / "run",
+        paper_key="compgcn",
+        paper_root=str(repo),
+        no_pdf_extract=True,
+        no_llm=True,
+        auto_tasks=True,
+        auto_tasks_force=True,
+        docker_enabled=False,
+        max_attempts=1,
+    )
+
+    assert result.status == "inconclusive"
+
+
 @pytest.mark.requires_docker
 def test_docker_daemon_is_available_for_execution_stage() -> None:
     # Smoke check that an environment claiming to be Docker-capable actually

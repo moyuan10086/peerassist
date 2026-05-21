@@ -305,7 +305,11 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 paper_key=str(cfg.get("paper_key") or "paper"),
                 paper_root_host=pr_host,
                 python_spec=python_spec,
-                timeout_sec=3600,
+                timeout_sec=int(
+                    cfg.get("docker_build_timeout_sec")
+                    or os.environ.get("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC")
+                    or 3600
+                ),
             )
             if not ok_img:
                 state["status"] = "failed"

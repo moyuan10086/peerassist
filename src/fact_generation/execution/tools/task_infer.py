@@ -350,7 +350,7 @@ def _build_generic_readme_tasks(readme_example_cmds: list[str], mode: str) -> li
             {
                 "id": task_id,
                 "family": family,
-                "enabled": bool(mode == "full" or family == "prepare"),
+                "enabled": mode == "full",
                 "cwd": "{paper_root}",
                 "cmd": _command_to_argv(raw),
                 "timeout_sec": 86400 if family == "train" else 7200,
@@ -616,22 +616,26 @@ def infer_tasks_heuristic(
 ) -> InferResult:
     root = Path(repo_root)
     readme = _read_optional(root / "README.md")
-    req = _read_optional(root / "requirements.txt", max_chars=8000)
+    requirements_path = root / "requirements.txt"
+    requirements_present = requirements_path.exists()
     entrypoints = _guess_entrypoints(root)
     examples = _extract_example_commands_from_readme(readme)
     datasets = _detect_benchmark_datasets(root)
 
     # Default install step. We keep it lightweight and let the framework's prepare/fix deal with stdlib-in-req.
-    tasks: list[dict[str, Any]] = [
-        {
-            "id": "install_deps",
-            "family": "prepare",
-            "cwd": "{paper_root}",
-            "cmd": ["python", "-m", "pip", "install", "-r", "{paper_root}/requirements.txt"],
-            "timeout_sec": 3600,
-            "use_conda": True,
-        }
-    ]
+    tasks: list[dict[str, Any]] = []
+    if requirements_present:
+        tasks.append(
+            {
+                "id": "install_deps",
+                "family": "prepare",
+                "cwd": "{paper_root}",
+                "cmd": ["python", "-m", "pip", "install", "-r", "{paper_root}/requirements.txt"],
+                "timeout_sec": 3600,
+                "use_conda": True,
+                "enabled": mode == "full",
+            }
+        )
 
     # Smoke: check --help for a chosen entrypoint.
     ep = entrypoints[0] if entrypoints else ""
@@ -699,7 +703,7 @@ def infer_tasks_heuristic(
         "entrypoints": entrypoints,
         "datasets_detected": datasets,
         "readme_has_content": bool(readme.strip()),
-        "requirements_present": bool(req.strip()),
+        "requirements_present": requirements_present,
         "readme_example_cmds": examples,
         "paper_metric_targets_count": len(paper_metric_targets or []),
     }

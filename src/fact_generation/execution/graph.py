@@ -171,6 +171,9 @@ class ExecutionOrchestrator:
         paper_extracted_dir: str = "",
         run_dir: str = "",
         paper_budget_sec: int = 0,
+        docker_enabled: bool | None = None,
+        docker_build_timeout_sec: int = 0,
+        paper_repo_url: str = "",
     ) -> None:
         self.run_root = run_root
         self.max_attempts = max_attempts
@@ -188,6 +191,9 @@ class ExecutionOrchestrator:
         self.paper_extracted_dir = paper_extracted_dir
         self.run_dir = run_dir
         self.paper_budget_sec = int(paper_budget_sec or 0)
+        self.docker_enabled = docker_enabled
+        self.docker_build_timeout_sec = int(docker_build_timeout_sec or 0)
+        self.paper_repo_url = paper_repo_url
 
         self._workflow = self._build_workflow()
         self._app = self._workflow.compile()
@@ -219,7 +225,9 @@ class ExecutionOrchestrator:
         baseline_path: str,
         local_source_path: str = "",
         no_pdf_extract: bool = False,
+        paper_repo_url: str = "",
     ) -> dict[str, Any]:
+        paper_repo_url = str(paper_repo_url or self.paper_repo_url or "").strip()
         initial: State = {
             "status": "running",
             "attempt": 0,
@@ -228,6 +236,7 @@ class ExecutionOrchestrator:
                 "paper_root": paper_root,
                 "paper_pdf": paper_pdf,
                 "paper_key": paper_key,
+                "paper_repo_url": paper_repo_url,
                 "tasks_path": tasks_path,
                 "baseline_path": baseline_path,
                 "local_source_path": local_source_path,
@@ -251,6 +260,10 @@ class ExecutionOrchestrator:
             },
             "history": [],
         }
+        if self.docker_enabled is not None:
+            initial["config"]["docker_enabled"] = bool(self.docker_enabled)
+        if self.docker_build_timeout_sec > 0:
+            initial["config"]["docker_build_timeout_sec"] = self.docker_build_timeout_sec
         final_state: State = await self._app.ainvoke(
             initial, config={"configurable": {"thread_id": "execution"}}
         )

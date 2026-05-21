@@ -553,7 +553,16 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
         {"kind": "prepare_start", "data": {"paper_key": paper_key, "paper_pdf": paper_pdf}}
     )
 
-    demo_dir = _configured_demo_dir(paper_key)
+    explicit_source_requested = bool(
+        paper_root_in or local_source_path or str(cfg.get("paper_repo_url") or "").strip()
+    )
+    use_demo_fixture = (
+        str(cfg.get("use_demo_fixture") or os.getenv("EXECUTION_USE_DEMO_FIXTURE") or "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "y", "on"}
+    )
+    demo_dir = _configured_demo_dir(paper_key) if ((not explicit_source_requested) or use_demo_fixture) else None
     baseline_dir = (
         Path(str(cfg.get("baseline_dir") or "")).resolve()
         if str(cfg.get("baseline_dir") or "").strip()
@@ -670,9 +679,27 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
             ensure_dir(source_dir.parent)
             if source_dir.exists():
                 shutil.rmtree(source_dir, ignore_errors=True)
-            clone_cmd = ["git", "clone", "--depth", "1", repo_url, str(source_dir)]
-            res = run_command(cmd=clone_cmd, cwd=str(baseline_dir), timeout_sec=3600)
+            use_blob_filter = str(
+                cfg.get("git_clone_filter_blob_none")
+                or os.getenv("EXECUTION_GIT_CLONE_FILTER_BLOB_NONE")
+                or "1"
+            ).strip().lower() not in {"0", "false", "no", "off"}
+            clone_cmd = ["git", "clone", "--depth", "1"]
+            if use_blob_filter:
+                clone_cmd.extend(["--filter", "blob:none"])
+            clone_cmd.extend([repo_url, str(source_dir)])
+            clone_timeout = int(
+                cfg.get("git_clone_timeout_sec")
+                or os.getenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC")
+                or 3600
+            )
+            res = run_command(cmd=clone_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
             persist_command_result(res, logs_dir, prefix="clone")
+            if res.returncode != 0 and use_blob_filter:
+                shutil.rmtree(source_dir, ignore_errors=True)
+                fallback_cmd = ["git", "clone", "--depth", "1", repo_url, str(source_dir)]
+                res = run_command(cmd=fallback_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
+                persist_command_result(res, logs_dir, prefix="clone_fallback_depth_only")
             if res.returncode != 0:
                 msg = "git_clone_failed"
                 append_event(
@@ -786,12 +813,17 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
     state["config"] = cfg
 
     if not dry_run and bool(cfg.get("docker_enabled", True)):
+        docker_build_timeout = int(
+            cfg.get("docker_build_timeout_sec")
+            or os.getenv("EXECUTION_DOCKER_BUILD_TIMEOUT_SEC")
+            or 3600
+        )
         ok_img, img_or_msg = docker_ensure_paper_image(
             cfg,
             paper_key=paper_key,
             paper_root_host=str(paper_root),
             python_spec=python_spec,
-            timeout_sec=3600,
+            timeout_sec=docker_build_timeout,
         )
         if not ok_img:
             err = "docker_paper_image_build_failed"

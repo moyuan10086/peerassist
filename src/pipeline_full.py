@@ -9,10 +9,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import run_stats
 from common.config import get_settings
 from common.env import load_env_file
 from common.pipeline_context import execution_stage_dir, init_full_pipeline_context
-from common import run_stats
 from fact_generation.execution.stage_runner import run_execution_stage
 from fact_generation.positioning.stage_runner import run_positioning_stage
 from fact_generation.refcheck.stage_runner import run_refcheck_stage
@@ -239,6 +239,13 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 max_attempts=int(args.max_attempts),
                 no_pdf_extract=bool(args.no_pdf_extract),
+                no_llm=bool(getattr(args, "execution_no_llm", False)),
+                auto_tasks=bool(getattr(args, "execution_auto_tasks", False)),
+                auto_tasks_mode=str(getattr(args, "execution_auto_tasks_mode", "smoke") or "smoke"),
+                auto_tasks_force=bool(getattr(args, "execution_auto_tasks_force", False)),
+                paper_budget_sec=int(getattr(args, "execution_paper_budget_sec", 0) or 0),
+                docker_enabled=False if bool(getattr(args, "execution_no_docker", False)) else None,
+                docker_build_timeout_sec=int(getattr(args, "execution_docker_build_timeout_sec", 0) or 0),
             ),
             stats_module="execution",
         )
@@ -422,6 +429,44 @@ def parse_args() -> argparse.Namespace:
         "--no-pdf-extract",
         action="store_true",
         help="Pass through to external execution stage (skip MinerU in execution prepare).",
+    )
+    p.add_argument(
+        "--execution-auto-tasks",
+        action="store_true",
+        help="Let execution infer tasks.yaml from the repository/paper instead of requiring a fixture.",
+    )
+    p.add_argument(
+        "--execution-auto-tasks-mode",
+        choices=("smoke", "full"),
+        default="smoke",
+        help="Task inference mode for execution auto-tasks.",
+    )
+    p.add_argument(
+        "--execution-auto-tasks-force",
+        action="store_true",
+        help="Regenerate inferred execution tasks even when a tasks.yaml already exists.",
+    )
+    p.add_argument(
+        "--execution-paper-budget-sec",
+        type=int,
+        default=0,
+        help="Soft per-paper budget for execution tasks; 0 disables the budget.",
+    )
+    p.add_argument(
+        "--execution-docker-build-timeout-sec",
+        type=int,
+        default=0,
+        help="Per-paper Docker image build timeout for execution; 0 uses the default.",
+    )
+    p.add_argument(
+        "--execution-no-docker",
+        action="store_true",
+        help="Run execution tasks on the host Python environment instead of Docker.",
+    )
+    p.add_argument(
+        "--execution-no-llm",
+        action="store_true",
+        help="Disable LLM-assisted execution task inference/fixes.",
     )
     p.add_argument(
         "--cutoff-date",

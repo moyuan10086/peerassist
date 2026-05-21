@@ -45,23 +45,29 @@ def _archive_prior_current_dir(*, stage_root: Path, current_dir: Path) -> None:
 async def _run_orchestrator_async(
     *,
     run_root: Path,
-    paper_pdf: Path,
+    paper_pdf: Path | None,
     paper_key: str,
     max_attempts: int,
     no_pdf_extract: bool,
+    paper_root: str = "",
+    paper_repo_url: str = "",
     paper_extracted_dir: str = "",
     execution_run_dir: Path | None = None,
     enable_refcheck: bool = False,
+    no_llm: bool = False,
     auto_tasks: bool = False,
     auto_tasks_mode: str = "smoke",
     auto_tasks_force: bool = False,
     paper_budget_sec: int = 0,
+    docker_enabled: bool | None = None,
+    docker_build_timeout_sec: int = 0,
 ) -> dict[str, Any]:
     from fact_generation.execution.graph import ExecutionOrchestrator
 
     orchestrator = ExecutionOrchestrator(
         run_root=str(run_root),
         max_attempts=max_attempts,
+        no_llm=no_llm,
         enable_refcheck=enable_refcheck,
         paper_extracted_dir=str(paper_extracted_dir or ""),
         run_dir=str(execution_run_dir or ""),
@@ -69,15 +75,19 @@ async def _run_orchestrator_async(
         auto_tasks_mode=auto_tasks_mode,
         auto_tasks_force=auto_tasks_force,
         paper_budget_sec=paper_budget_sec,
+        docker_enabled=docker_enabled,
+        docker_build_timeout_sec=docker_build_timeout_sec,
+        paper_repo_url=paper_repo_url,
     )
     return await orchestrator.run(
-        paper_root="",
-        paper_pdf=str(paper_pdf),
+        paper_root=str(paper_root or ""),
+        paper_pdf=str(paper_pdf or ""),
         paper_key=paper_key,
         tasks_path="",
         baseline_path="",
         local_source_path="",
         no_pdf_extract=no_pdf_extract,
+        paper_repo_url=paper_repo_url,
     )
 
 
@@ -86,26 +96,38 @@ def run_execution_stage(
     run_dir: Path,
     paper_pdf: Path | None = None,
     paper_key: str | None = None,
+    paper_root: str = "",
+    paper_repo_url: str = "",
     paper_extracted_dir: str = "",
     max_attempts: int = 5,
     no_pdf_extract: bool = False,
     enable_refcheck: bool | None = None,
+    no_llm: bool = False,
     auto_tasks: bool = False,
     auto_tasks_mode: str = "smoke",
     auto_tasks_force: bool = False,
     paper_budget_sec: int = 0,
+    docker_enabled: bool | None = None,
+    docker_build_timeout_sec: int = 0,
 ) -> StageResult:
     ensure_full_pipeline_context(run_dir=run_dir, allow_standalone=True, stage="execution")
     bridge = load_bridge_state(run_dir)
     resolved_pdf = paper_pdf.resolve() if paper_pdf else (bridge.paper_pdf if bridge else None)
     resolved_key = (paper_key or "").strip() or (bridge.paper_key if bridge else "")
+    source_hint = str(paper_root or paper_repo_url or "").strip()
 
-    if resolved_pdf is None or not resolved_pdf.exists():
+    if (resolved_pdf is None or not resolved_pdf.exists()) and not source_hint:
         raise FileNotFoundError(
             "paper_pdf is required for execution stage when bridge state is missing or invalid."
         )
     if not resolved_key:
-        resolved_key = resolved_pdf.stem.strip() or "paper"
+        if resolved_pdf is not None:
+            resolved_key = resolved_pdf.stem.strip()
+        elif paper_root:
+            resolved_key = Path(paper_root).resolve().name
+        elif paper_repo_url:
+            resolved_key = str(paper_repo_url).rstrip("/").split("/")[-1].replace(".git", "")
+        resolved_key = resolved_key or "paper"
 
     stage_root = execution_stage_dir(run_dir)
     stage_root.mkdir(parents=True, exist_ok=True)
@@ -125,15 +147,20 @@ def run_execution_stage(
             run_root=stage_run_root,
             paper_pdf=resolved_pdf,
             paper_key=resolved_key,
+            paper_root=paper_root,
+            paper_repo_url=paper_repo_url,
             paper_extracted_dir=str(paper_extracted_dir or ""),
             execution_run_dir=execution_run_dir,
             max_attempts=max_attempts,
             no_pdf_extract=no_pdf_extract,
             enable_refcheck=resolved_refcheck,
+            no_llm=no_llm,
             auto_tasks=auto_tasks,
             auto_tasks_mode=auto_tasks_mode,
             auto_tasks_force=auto_tasks_force,
             paper_budget_sec=paper_budget_sec,
+            docker_enabled=docker_enabled,
+            docker_build_timeout_sec=docker_build_timeout_sec,
         )
     )
 
@@ -147,9 +174,7 @@ def run_execution_stage(
     stage_status: ExecutionStageStatus = "failed"
     if exit_status == "success":
         stage_status = "ok"
-    elif exit_status == "inconclusive":
-        stage_status = "inconclusive"
-    elif exit_status == "partial":
+    elif exit_status in {"inconclusive", "partial"}:
         stage_status = "inconclusive"
     elif exit_status == "skipped":
         stage_status = "skipped"
@@ -165,7 +190,7 @@ def run_execution_stage(
 
     payload = ExecutionPayload(
         paper_key=resolved_key,
-        paper_pdf=str(resolved_pdf),
+        paper_pdf=str(resolved_pdf or ""),
         status=stage_status,
         success=bool(run_result.get("success")),
         exit_status=exit_status,

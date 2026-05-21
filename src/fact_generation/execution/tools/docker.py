@@ -440,7 +440,7 @@ def docker_run_paper_image(
     paper_root_host = str(Path(paper_root_host).resolve())
     run_dir_container = "/workspace/run_dir"
     paper_root_container = "/app"
-    mount_source = str(os.getenv("EXECUTION_DOCKER_MOUNT_SOURCE", "0")).strip().lower() in {
+    mount_source = str(os.getenv("EXECUTION_DOCKER_MOUNT_SOURCE", "1")).strip().lower() in {
         "1",
         "true",
         "yes",
