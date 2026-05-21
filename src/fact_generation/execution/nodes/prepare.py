@@ -4,8 +4,12 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
 
 from preprocessing.parse.mineru import extract_with_mineru, mineru_available
 from util.fs import copy_file_if_exists, ensure_dir, write_text
@@ -395,6 +399,123 @@ def _copy_prepared_extract(prepared_extract_dir: str, baseline_dir: Path) -> str
     return str(md.resolve()) if md.exists() else ""
 
 
+def _anonymous_4open_repo_id(raw_url: str) -> str:
+    try:
+        parsed = urlparse(str(raw_url or "").strip())
+    except Exception:
+        return ""
+    if parsed.netloc.lower() != "anonymous.4open.science":
+        return ""
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0] not in {"r", "repository"}:
+        return ""
+    return parts[1].strip()
+
+
+def _anonymous_4open_get_json(path: str, timeout_sec: int = 60) -> Any:
+    url = "https://anonymous.4open.science" + path
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = Request(url, headers={"User-Agent": "FactReview execution"})
+            with urlopen(req, timeout=timeout_sec) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="replace"))
+        except HTTPError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
+
+
+def _anonymous_4open_get_bytes(path: str, timeout_sec: int = 120) -> bytes:
+    url = "https://anonymous.4open.science" + path
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = Request(url, headers={"User-Agent": "FactReview execution"})
+            with urlopen(req, timeout=timeout_sec) as resp:
+                return resp.read()
+        except HTTPError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
+
+
+def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> dict[str, Any]:
+    repo_id = _anonymous_4open_repo_id(raw_url)
+    if not repo_id:
+        raise ValueError("not_anonymous_4open_url")
+
+    repo_q = quote(repo_id, safe="")
+    try:
+        options = _anonymous_4open_get_json(f"/api/repo/{repo_q}/options")
+    except HTTPError as exc:
+        raise RuntimeError(f"anonymous_4open_options_http_{exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"anonymous_4open_options_unavailable: {exc}") from exc
+    if not isinstance(options, dict):
+        raise RuntimeError("anonymous_4open_options_invalid")
+
+    last_update = str(options.get("lastUpdateDate") or "")
+    downloaded: list[str] = []
+    visited: set[str] = set()
+
+    def list_dir(rel_dir: str) -> list[dict[str, Any]]:
+        if rel_dir in visited:
+            return []
+        visited.add(rel_dir)
+        path_q = quote(rel_dir, safe="")
+        version_q = quote(last_update, safe="")
+        data = _anonymous_4open_get_json(f"/api/repo/{repo_q}/files/?path={path_q}&v={version_q}")
+        return data if isinstance(data, list) else []
+
+    def walk(rel_dir: str) -> None:
+        for item in list_dir(rel_dir):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            parent = str(item.get("path") or rel_dir or "").replace("\\", "/").strip("/")
+            rel = f"{parent}/{name}".strip("/")
+            if not rel or rel.startswith("../") or "/../" in rel or Path(rel).is_absolute():
+                continue
+            size = item.get("size")
+            sha = str(item.get("sha") or "")
+            if sha and size is not None:
+                rel_q = quote(rel, safe="/")
+                version_q = quote(sha, safe="")
+                blob = _anonymous_4open_get_bytes(f"/api/repo/{repo_q}/file/{rel_q}?v={version_q}")
+                out_path = dest / rel
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(blob)
+                downloaded.append(rel)
+            else:
+                walk(rel)
+
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    walk("")
+    if not downloaded:
+        raise RuntimeError("anonymous_4open_no_files_downloaded")
+    manifest = {
+        "source": raw_url,
+        "repo_id": repo_id,
+        "files": len(downloaded),
+        "last_update": last_update,
+    }
+    write_text(logs_dir / "anonymous_4open_download.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    return manifest
+
+
 def _normalize_shell_script_line_endings(
     root: Path, *, max_files: int = 200, max_bytes: int = 5_000_000
 ) -> int:
@@ -709,39 +830,65 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
             ensure_dir(source_dir.parent)
             if source_dir.exists():
                 shutil.rmtree(source_dir, ignore_errors=True)
-            use_blob_filter = str(
-                cfg.get("git_clone_filter_blob_none")
-                or os.getenv("EXECUTION_GIT_CLONE_FILTER_BLOB_NONE")
-                or "1"
-            ).strip().lower() not in {"0", "false", "no", "off"}
-            clone_cmd = ["git", "clone", "--depth", "1"]
-            if use_blob_filter:
-                clone_cmd.extend(["--filter", "blob:none"])
-            clone_cmd.extend([repo_url, str(source_dir)])
-            clone_timeout = int(
-                cfg.get("git_clone_timeout_sec")
-                or os.getenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC")
-                or 3600
-            )
-            res = run_command(cmd=clone_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
-            persist_command_result(res, logs_dir, prefix="clone")
-            if res.returncode != 0 and use_blob_filter:
-                shutil.rmtree(source_dir, ignore_errors=True)
-                fallback_cmd = ["git", "clone", "--depth", "1", repo_url, str(source_dir)]
-                res = run_command(cmd=fallback_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
-                persist_command_result(res, logs_dir, prefix="clone_fallback_depth_only")
-            if res.returncode != 0:
-                msg = "git_clone_failed"
+            anonymous_4open_id = _anonymous_4open_repo_id(repo_url)
+            if anonymous_4open_id:
+                try:
+                    manifest = _download_anonymous_4open_repo(repo_url, source_dir, logs_dir)
+                except Exception as exc:
+                    msg = f"anonymous_4open_download_failed: {type(exc).__name__}: {exc}"
+                    append_event(
+                        run_dir,
+                        "prepare_error",
+                        {"error": msg, "repo_url": repo_url, "repo_id": anonymous_4open_id},
+                    )
+                    state.setdefault("history", []).append(
+                        {"kind": "prepare_error", "data": {"error": msg, "repo_url": repo_url}}
+                    )
+                    state["status"] = "failed"
+                    return state
+                cfg["paper_repo_url"] = repo_url
                 append_event(
-                    run_dir, "prepare_error", {"error": msg, "repo_url": repo_url, "rc": res.returncode}
+                    run_dir,
+                    "prepare_anonymous_4open_download_ok",
+                    {"repo_url": repo_url, "dest": str(source_dir), **manifest},
                 )
-                state.setdefault("history", []).append(
-                    {"kind": "prepare_error", "data": {"error": msg, "repo_url": repo_url}}
+                need_clone = False
+            if not need_clone:
+                pass
+            else:
+                use_blob_filter = str(
+                    cfg.get("git_clone_filter_blob_none")
+                    or os.getenv("EXECUTION_GIT_CLONE_FILTER_BLOB_NONE")
+                    or "1"
+                ).strip().lower() not in {"0", "false", "no", "off"}
+                clone_cmd = ["git", "clone", "--depth", "1"]
+                if use_blob_filter:
+                    clone_cmd.extend(["--filter", "blob:none"])
+                clone_cmd.extend([repo_url, str(source_dir)])
+                clone_timeout = int(
+                    cfg.get("git_clone_timeout_sec")
+                    or os.getenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC")
+                    or 3600
                 )
-                state["status"] = "failed"
-                return state
-            cfg["paper_repo_url"] = repo_url
-            append_event(run_dir, "prepare_clone_ok", {"repo_url": repo_url, "dest": str(source_dir)})
+                res = run_command(cmd=clone_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
+                persist_command_result(res, logs_dir, prefix="clone")
+                if res.returncode != 0 and use_blob_filter:
+                    shutil.rmtree(source_dir, ignore_errors=True)
+                    fallback_cmd = ["git", "clone", "--depth", "1", repo_url, str(source_dir)]
+                    res = run_command(cmd=fallback_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
+                    persist_command_result(res, logs_dir, prefix="clone_fallback_depth_only")
+                if res.returncode != 0:
+                    msg = "git_clone_failed"
+                    append_event(
+                        run_dir, "prepare_error", {"error": msg, "repo_url": repo_url, "rc": res.returncode}
+                    )
+                    state.setdefault("history", []).append(
+                        {"kind": "prepare_error", "data": {"error": msg, "repo_url": repo_url}}
+                    )
+                    state["status"] = "failed"
+                    return state
+                cfg["paper_repo_url"] = repo_url
+                append_event(run_dir, "prepare_clone_ok", {"repo_url": repo_url, "dest": str(source_dir)})
 
     _git_reset_if_possible(paper_root, logs_dir)
     normalized_scripts = _normalize_shell_script_line_endings(paper_root)

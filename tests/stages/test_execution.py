@@ -15,7 +15,10 @@ import sys
 import pytest
 
 from fact_generation.execution.nodes.plan import _merge_auto_baseline
-from fact_generation.execution.nodes.prepare import _normalize_shell_script_line_endings
+from fact_generation.execution.nodes.prepare import (
+    _anonymous_4open_repo_id,
+    _normalize_shell_script_line_endings,
+)
 from fact_generation.execution.nodes.run import run_node
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
@@ -414,6 +417,22 @@ def test_heuristic_full_adds_conventional_preprocess_before_training(tmp_path) -
     assert not any((t.get("cmd") or [])[:2] == ["cmd", "/c"] for t in result.tasks)
 
 
+def test_heuristic_infers_cwd_for_unique_readme_script(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\npython generate_response.py\n```\n",
+        encoding="utf-8",
+    )
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    (scripts / "generate_response.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_1")
+    assert task.get("cwd") == "{paper_root}/Scripts"
+    assert task.get("cmd") == ["python", "generate_response.py"]
+
+
 def test_normalize_shell_script_line_endings(tmp_path) -> None:
     script = tmp_path / "preprocess.sh"
     script.write_bytes(b"#!/bin/bash\r\nmkdir data\r\n")
@@ -422,6 +441,15 @@ def test_normalize_shell_script_line_endings(tmp_path) -> None:
 
     assert changed == 1
     assert script.read_bytes() == b"#!/bin/bash\nmkdir data\n"
+
+
+def test_anonymous_4open_repo_id_parses_repo_links() -> None:
+    assert (
+        _anonymous_4open_repo_id("https://anonymous.4open.science/r/FMP-AD84/README.md")
+        == "FMP-AD84"
+    )
+    assert _anonymous_4open_repo_id("https://anonymous.4open.science/repository/BMAS-AAD0") == "BMAS-AAD0"
+    assert _anonymous_4open_repo_id("https://github.com/mainlp/explaind") == ""
 
 
 def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:

@@ -230,6 +230,33 @@ def _command_to_argv(raw: str) -> list[str]:
     return parts
 
 
+def _infer_cwd_for_command(repo_root: Path, cmd: list[str]) -> str:
+    if len(cmd) < 2:
+        return "{paper_root}"
+    executable = cmd[0].lower()
+    script = ""
+    if (executable in {"python", "python3"} and cmd[1].endswith(".py")) or (
+        executable in {"bash", "sh"} and cmd[1].endswith(".sh")
+    ):
+        script = cmd[1]
+    if not script or "/" in script or "\\" in script:
+        return "{paper_root}"
+    if (repo_root / script).exists():
+        return "{paper_root}"
+    try:
+        matches = [
+            p
+            for p in repo_root.rglob(script)
+            if p.is_file() and ".git" not in p.parts and "deployment" not in p.parts
+        ]
+    except Exception:
+        matches = []
+    if len(matches) != 1:
+        return "{paper_root}"
+    rel_parent = matches[0].parent.relative_to(repo_root).as_posix()
+    return "{paper_root}" if rel_parent == "." else f"{{paper_root}}/{rel_parent}"
+
+
 def _command_family(raw: str) -> str:
     s = (raw or "").lower()
     if any(tok in s for tok in ["pip install", "conda env", "mamba env", "environment.yml", "requirements.txt"]):
@@ -282,6 +309,7 @@ def _target_claims(target: dict[str, Any]) -> list[str]:
 
 def _build_target_reproduction_tasks(
     *,
+    repo_root: Path,
     readme_example_cmds: list[str],
     paper_metric_targets: list[dict[str, Any]],
     mode: str,
@@ -301,6 +329,7 @@ def _build_target_reproduction_tasks(
             continue
         scored.sort(key=lambda item: item[0], reverse=True)
         score, raw_cmd = scored[0]
+        cmd = _command_to_argv(raw_cmd)
         ident = _target_identity(target)
         family = _command_family(raw_cmd)
         task_id = f"{family}_{ident}"
@@ -312,8 +341,8 @@ def _build_target_reproduction_tasks(
                 "id": task_id,
                 "family": family,
                 "enabled": mode == "full",
-                "cwd": "{paper_root}",
-                "cmd": _command_to_argv(raw_cmd),
+                "cwd": _infer_cwd_for_command(repo_root, cmd),
+                "cmd": cmd,
                 "timeout_sec": 86400 if family == "train" else 7200,
                 "use_conda": True,
                 "artifact_paths": ["metrics/**", "results/**", "outputs/**", "logs/**", "checkpoints/**"],
@@ -334,7 +363,7 @@ def _build_target_reproduction_tasks(
     return tasks
 
 
-def _build_generic_readme_tasks(readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
+def _build_generic_readme_tasks(repo_root: Path, readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     seen: set[str] = set()
     for idx, raw in enumerate(readme_example_cmds, 1):
@@ -349,13 +378,14 @@ def _build_generic_readme_tasks(readme_example_cmds: list[str], mode: str) -> li
         if task_id in seen:
             continue
         seen.add(task_id)
+        cmd = _command_to_argv(raw)
         tasks.append(
             {
                 "id": task_id,
                 "family": family,
                 "enabled": mode == "full",
-                "cwd": "{paper_root}",
-                "cmd": _command_to_argv(raw),
+                "cwd": _infer_cwd_for_command(repo_root, cmd),
+                "cmd": cmd,
                 "timeout_sec": 86400 if family == "train" else 7200,
                 "use_conda": True,
                 "artifact_paths": ["metrics/**", "results/**", "outputs/**", "logs/**", "checkpoints/**"],
@@ -655,6 +685,7 @@ def _finalize_tasks(
             existing_ids.add(tid)
 
     target_tasks = _build_target_reproduction_tasks(
+        repo_root=repo_root,
         readme_example_cmds=readme_example_cmds,
         paper_metric_targets=paper_metric_targets or [],
         mode=mode,
@@ -665,7 +696,7 @@ def _finalize_tasks(
             tasks.append(task)
             existing_ids.add(tid)
 
-    generic_tasks = _build_generic_readme_tasks(readme_example_cmds, mode=mode)
+    generic_tasks = _build_generic_readme_tasks(repo_root, readme_example_cmds, mode=mode)
     for task in generic_tasks:
         tid = str(task.get("id") or "")
         if tid and tid not in existing_ids:
@@ -749,13 +780,14 @@ def infer_tasks_heuristic(
     # Full: propose heavier commands but disable them by default.
     if mode == "full":
         if examples:
+            example_cmd = _command_to_argv(examples[0])
             tasks.append(
                 {
                     "id": "readme_example_1",
                     "family": _command_family(examples[0]),
                     "enabled": False,
-                    "cwd": "{paper_root}",
-                    "cmd": _command_to_argv(examples[0]),
+                    "cwd": _infer_cwd_for_command(root, example_cmd),
+                    "cmd": example_cmd,
                     "timeout_sec": 3600,
                     "use_conda": True,
                     "artifact_paths": ["results/**", "logs/**"],
