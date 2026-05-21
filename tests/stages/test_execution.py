@@ -17,12 +17,14 @@ import pytest
 from fact_generation.execution.nodes.plan import _merge_auto_baseline
 from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
+    _infer_python_spec_from_repo,
     _normalize_shell_script_line_endings,
     _patch_api_placeholders_for_env,
 )
 from fact_generation.execution.nodes.run import _semantic_runtime_failure, run_node
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
+    _collect_repo_requirements_text,
     _docker_build_args,
     _docker_env_passthrough,
     _normalize_container_proxy,
@@ -475,6 +477,40 @@ def test_normalize_shell_script_line_endings(tmp_path) -> None:
 
     assert changed == 1
     assert script.read_bytes() == b"#!/bin/bash\nmkdir data\n"
+
+
+def test_collect_repo_requirements_uses_readme_and_imports(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "\n".join(
+            [
+                "## Python Packages",
+                "* pytorch==1.12.1",
+                "* dgl==1.0.1+cu113",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "\n".join(
+            [
+                "import numpy as np",
+                "import torch",
+                "from sklearn.metrics import accuracy_score",
+                "from utils import local_helper",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "utils.py").write_text("def local_helper(): pass\n", encoding="utf-8")
+
+    req_text = _collect_repo_requirements_text(tmp_path)
+
+    assert "torch==1.12.1" in req_text
+    assert "dgl==1.0.1" in req_text
+    assert "numpy" in req_text
+    assert "scikit-learn" in req_text
+    assert "utils" not in req_text
+    assert _infer_python_spec_from_repo(tmp_path) == "3.10"
 
 
 def test_patch_api_placeholders_reads_runtime_env_without_writing_secret(tmp_path) -> None:

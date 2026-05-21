@@ -18,7 +18,7 @@ from util.recorder import append_event
 from util.run_layout import build_run_dir, ensure_run_subdirs, make_run_id, slugify_run_key
 from util.subprocess_runner import persist_command_result, run_command
 
-from ..tools.docker import docker_ensure_paper_image, docker_strategy
+from ..tools.docker import _collect_repo_requirements_text, docker_ensure_paper_image, docker_strategy
 
 
 def _repo_root() -> Path:
@@ -121,17 +121,40 @@ def _parse_requirements_pins(req_text: str) -> dict[str, str]:
     return pins
 
 
-def _infer_python_spec_from_requirements(req_path: Path) -> str:
-    txt = _read_text(req_path) if req_path.exists() else ""
+def _infer_python_spec_from_requirements_text(txt: str) -> str:
     pins = _parse_requirements_pins(txt)
     torch_ver = pins.get("torch") or pins.get("pytorch") or ""
     if torch_ver.startswith("1.4.") or torch_ver == "1.4.0":
         return "3.7"
+    if torch_ver.startswith(
+        (
+            "1.8.",
+            "1.9.",
+            "1.10.",
+            "1.11.",
+            "1.12.",
+            "1.13.",
+        )
+    ):
+        return "3.10"
     # Conservative: old numpy pins often imply Python <= 3.7 for many research repos.
     numpy_ver = pins.get("numpy") or ""
     if numpy_ver.startswith("1.16.") or numpy_ver.startswith("1.17."):
         return "3.7"
     return "3.11"
+
+
+def _infer_python_spec_from_requirements(req_path: Path) -> str:
+    txt = _read_text(req_path) if req_path.exists() else ""
+    return _infer_python_spec_from_requirements_text(txt)
+
+
+def _infer_python_spec_from_repo(repo_root: Path) -> str:
+    try:
+        txt = _collect_repo_requirements_text(repo_root)
+    except Exception:
+        txt = ""
+    return _infer_python_spec_from_requirements_text(txt)
 
 
 _GITHUB_URL_PATTERN = re.compile(
@@ -1076,7 +1099,7 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
 
     python_spec = str(cfg.get("python_spec") or os.getenv("EXECUTION_PYTHON_SPEC") or "").strip()
     if not python_spec:
-        python_spec = _infer_python_spec_from_requirements(paper_root / "requirements.txt")
+        python_spec = _infer_python_spec_from_repo(paper_root)
     cfg["python_spec"] = python_spec
     docker_enabled_raw = cfg.get("docker_enabled", os.getenv("EXECUTION_DOCKER_ENABLED", "true"))
     cfg["docker_enabled"] = str(docker_enabled_raw).strip().lower() not in {

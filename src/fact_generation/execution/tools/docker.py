@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import re
@@ -86,6 +87,197 @@ def _select_python_image(cfg: dict, py_tag: str) -> str:
             return candidate
 
     return preferred
+
+
+_IMPORT_TO_PIP = {
+    "cv2": "opencv-python",
+    "datasets": "datasets",
+    "dgl": "dgl",
+    "faiss": "faiss-cpu",
+    "matplotlib": "matplotlib",
+    "networkx": "networkx",
+    "numpy": "numpy",
+    "openai": "openai",
+    "pandas": "pandas",
+    "PIL": "pillow",
+    "scipy": "scipy",
+    "seaborn": "seaborn",
+    "sentence_transformers": "sentence-transformers",
+    "sklearn": "scikit-learn",
+    "spacy": "spacy",
+    "torch": "torch",
+    "torch_geometric": "torch-geometric",
+    "torch_scatter": "torch-scatter",
+    "torch_sparse": "torch-sparse",
+    "tqdm": "tqdm",
+    "transformers": "transformers",
+    "yaml": "pyyaml",
+}
+
+_README_DEP_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"(?P<name>pytorch|torch|dgl|numpy|scipy|sklearn|scikit-learn|pandas|"
+    r"torch[-_]?geometric|torch[-_]?sparse|torch[-_]?scatter|opencv-python|cv2|"
+    r"tqdm|networkx|transformers|datasets|openai|matplotlib|seaborn)"
+    r"\s*(?P<op>==|>=|<=|~=|>|<)?\s*(?P<version>[A-Za-z0-9_.+*-]+)?",
+    flags=re.IGNORECASE,
+)
+
+
+def _read_text_limited(path: Path, max_bytes: int = 500_000) -> str:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return ""
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="ignore")
+
+
+def _canonical_package_name(raw: str) -> str:
+    name = str(raw or "").strip().lower().replace("_", "-")
+    aliases = {
+        "pytorch": "torch",
+        "cv2": "opencv-python",
+        "pil": "pillow",
+        "sklearn": "scikit-learn",
+        "yaml": "pyyaml",
+    }
+    return aliases.get(name, name)
+
+
+def _requirement_key(line: str) -> str:
+    token = str(line or "").strip()
+    if not token or token.startswith(("-", "#")):
+        return ""
+    name = re.split(r"\s*(?:==|>=|<=|~=|>|<|;|\[)", token, maxsplit=1)[0].strip()
+    return _canonical_package_name(name)
+
+
+def _normalise_dependency_line(name: str, op: str = "", version: str = "") -> str:
+    pkg = _canonical_package_name(name)
+    op = str(op or "").strip()
+    version = str(version or "").strip().rstrip(".,;)")
+    if pkg == "dgl" and "+cu" in version:
+        # DGL CUDA local-version wheels need a custom find-links URL. Use the
+        # base version as a portable first pass; runtime can still request GPU.
+        version = version.split("+", 1)[0]
+    if op and version and "*" not in version:
+        return f"{pkg}{op}{version}"
+    return pkg
+
+
+def _dedupe_requirement_lines(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: dict[str, int] = {}
+    for raw in lines:
+        line = str(raw or "").strip()
+        if not line or line.startswith("#"):
+            continue
+        key = _requirement_key(line)
+        if not key:
+            if line not in out:
+                out.append(line)
+            continue
+        if key in seen:
+            # Prefer pinned/specified requirements over bare import-derived names.
+            old = out[seen[key]]
+            old_specific = any(op in old for op in ("==", ">=", "<=", "~=", ">", "<"))
+            new_specific = any(op in line for op in ("==", ">=", "<=", "~=", ">", "<"))
+            if new_specific and not old_specific:
+                out[seen[key]] = line
+            continue
+        seen[key] = len(out)
+        out.append(line)
+    return out
+
+
+def _read_requirement_file_lines(repo_root: Path) -> list[str]:
+    lines: list[str] = []
+    candidates = []
+    for pattern in ("requirements*.txt", "environment*.yml", "environment*.yaml"):
+        candidates.extend(repo_root.glob(pattern))
+    for path in sorted(candidates):
+        if path.parent != repo_root or not path.is_file():
+            continue
+        text = _read_text_limited(path)
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if path.suffix.lower() in {".yml", ".yaml"}:
+                m = re.match(r"^\s*-\s*([A-Za-z0-9_.-]+)\s*([<>=~!]{1,2})?\s*([A-Za-z0-9_.+*-]+)?", raw)
+                if not m:
+                    continue
+                line = _normalise_dependency_line(m.group(1), m.group(2) or "", m.group(3) or "")
+            lines.append(line)
+    return lines
+
+
+def _readme_requirement_lines(repo_root: Path) -> list[str]:
+    lines: list[str] = []
+    candidates = list(repo_root.glob("README*")) + list(repo_root.glob("INSTALL*"))
+    for path in sorted(p for p in candidates if p.is_file()):
+        text = _read_text_limited(path)
+        if not text:
+            continue
+        for m in _README_DEP_RE.finditer(text):
+            name = m.group("name") or ""
+            op = m.group("op") or ""
+            version = m.group("version") or ""
+            lines.append(_normalise_dependency_line(name, op, version))
+    return lines
+
+
+def _local_python_modules(repo_root: Path) -> set[str]:
+    local = {p.stem for p in repo_root.glob("*.py") if p.is_file()}
+    for p in repo_root.iterdir() if repo_root.exists() else []:
+        if p.is_dir() and (p / "__init__.py").exists():
+            local.add(p.name)
+    return local
+
+
+def _import_requirement_lines(repo_root: Path, *, max_files: int = 500, max_bytes: int = 300_000) -> list[str]:
+    if not repo_root.exists():
+        return []
+    local = _local_python_modules(repo_root)
+    found: set[str] = set()
+    scanned = 0
+    skip_parts = {".git", "__pycache__", "deployment", "outputs", "logs", "results", "checkpoints"}
+    for path in repo_root.rglob("*.py"):
+        if scanned >= max_files:
+            break
+        if any(part in skip_parts for part in path.parts):
+            continue
+        scanned += 1
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names.extend(alias.name.split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.append(node.module.split(".", 1)[0])
+            for name in names:
+                if name in local:
+                    continue
+                pkg = _IMPORT_TO_PIP.get(name)
+                if pkg:
+                    found.add(pkg)
+    return sorted(found)
+
+
+def _collect_repo_requirements_text(repo_root: Path) -> str:
+    lines = []
+    lines.extend(_read_requirement_file_lines(repo_root))
+    lines.extend(_readme_requirement_lines(repo_root))
+    lines.extend(_import_requirement_lines(repo_root))
+    deduped = _dedupe_requirement_lines(lines)
+    return "\n".join(deduped) + ("\n" if deduped else "")
 
 
 def _paper_dockerfile_text(*, python_image: str) -> str:
@@ -309,10 +501,17 @@ def _paper_install_deps_py_text() -> str:
         "        rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', '-r', str(tmp)])\n"
         "        if rc != 0:\n"
         "            return rc\n"
+        "    rest_failed = []\n"
         "    if rest_lines:\n"
-        "        rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', '-r', 'requirements.codegen.rest.txt'])\n"
-        "        if rc != 0:\n"
-        "            return rc\n"
+        "        for dep in rest_lines:\n"
+        "            dep = dep.strip()\n"
+        "            if not dep or dep.startswith(('-', '--')):\n"
+        "                continue\n"
+        "            rc = _run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--upgrade', *shlex.split(dep)])\n"
+        "            if rc != 0:\n"
+        "                rest_failed.append(dep)\n"
+        "        if rest_failed:\n"
+        "            print('install_deps_rest_failed_continuing', rest_failed)\n"
         "\n"
         "    if scatter_requested:\n"
         "        # Try a wheel index matched to torch version and (cpu/cu) when available.\n"
@@ -501,11 +700,13 @@ def docker_ensure_paper_image(
     pr = Path(paper_root_host).resolve()
     if not pr.exists():
         return False, f"paper_root_not_found: {pr}"
-    req = pr / "requirements.txt"
-
-    # Build tag is derived from dockerfile template + requirements hash + python_spec.
+    # Build tag is derived from dockerfile template + synthesized requirements
+    # hash + python_spec. Many research repos document deps only in README or
+    # rely on implicit lab environments, so root requirements.txt alone is too
+    # weak for reproducibility.
     try:
-        req_bytes = req.read_bytes() if req.exists() else b""
+        req_text = _collect_repo_requirements_text(pr)
+        req_bytes = req_text.encode("utf-8", errors="ignore")
     except Exception:
         req_bytes = b""
     py_tag = _normalize_python_spec_for_image(python_spec)
