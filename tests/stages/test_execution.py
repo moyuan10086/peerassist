@@ -371,6 +371,14 @@ def test_docker_install_deps_installs_numpy_before_torch() -> None:
     assert text.index("if numpy_line:") < text.index("if torch_pin:")
 
 
+def test_docker_install_deps_clears_old_torch_execstack() -> None:
+    text = _paper_install_deps_py_text()
+
+    assert "def _clear_torch_executable_stack()" in text
+    assert "PT_GNU_STACK" in text
+    assert "torch_execstack_cleared" in text
+
+
 def test_heuristic_tasks_use_paper_targets_and_readme_commands(tmp_path) -> None:
     (tmp_path / "README.md").write_text(
         "\n".join(
