@@ -114,6 +114,21 @@ def _task_result_base(task: dict[str, Any], task_id: str) -> dict[str, Any]:
     return out
 
 
+def _semantic_runtime_failure(stdout: str, stderr: str) -> str:
+    text = f"{stdout or ''}\n{stderr or ''}"
+    if "Traceback (most recent call last):" in text:
+        return "python_traceback_in_output"
+    for token in [
+        "ModuleNotFoundError:",
+        "ImportError:",
+        "FileNotFoundError:",
+        "SyntaxError:",
+    ]:
+        if token in text:
+            return token.rstrip(":").lower()
+    return ""
+
+
 def run_node(state: dict[str, Any]) -> dict[str, Any]:
     # Soft wall-clock budget: short-circuit before launching another batch of
     # tasks if the per-paper budget is already exhausted.
@@ -350,7 +365,8 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         cmd_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_command.txt")
         stdout_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_stdout.log")
         stderr_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_stderr.log")
-        ok = res.returncode == 0
+        semantic_failure = _semantic_runtime_failure(res.stdout or "", res.stderr or "")
+        ok = res.returncode == 0 and not semantic_failure
         item = _task_result_base(task, task_id)
         item.update(
             {
@@ -360,6 +376,8 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
             }
         )
+        if semantic_failure:
+            item["semantic_failure"] = semantic_failure
         metric_artifact = ""
         if ok:
             try:

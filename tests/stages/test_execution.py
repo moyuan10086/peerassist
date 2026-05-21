@@ -19,7 +19,7 @@ from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
     _normalize_shell_script_line_endings,
 )
-from fact_generation.execution.nodes.run import run_node
+from fact_generation.execution.nodes.run import _semantic_runtime_failure, run_node
 from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
     _docker_build_args,
@@ -267,6 +267,19 @@ def test_run_node_extracts_metrics_from_task_logs(tmp_path) -> None:
     metrics = json.loads((run_dir / "artifacts" / task_result["metric_artifact"]).read_text())
     assert metrics["dataset"] == "CIFAR-10"
     assert metrics["metrics"]["accuracy"] == 94.3
+
+
+def test_runtime_traceback_output_is_treated_as_failure() -> None:
+    reason = _semantic_runtime_failure(
+        stdout="",
+        stderr=(
+            "Traceback (most recent call last):\n"
+            '  File "/app/main.py", line 1, in <module>\n'
+            "ModuleNotFoundError: No module named 'numpy'\n"
+        ),
+    )
+
+    assert reason == "python_traceback_in_output"
 
 
 def test_run_command_reports_timeout_explicitly(tmp_path) -> None:
