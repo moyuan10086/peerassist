@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -237,6 +238,64 @@ def _extract_repo_urls_from_pdf(
     return deduped
 
 
+_RECURSIVE_COPY_IGNORED = {
+    ".git",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "wandb",
+    # MinerU image dumps are not consumed downstream and can create very deep
+    # paths inside execution run directories on Windows.
+    "mineru_assets",
+}
+
+_ROOT_GENERATED_COPY_IGNORED = {
+    "runs",
+    "outputs",
+    "output",
+    "checkpoints",
+    "checkpoint",
+    "logs",
+    "log",
+}
+
+
+def _robocopy_tree(src: Path, dst: Path) -> bool:
+    """Copy a source tree with robocopy on Windows."""
+    if os.name != "nt":
+        return False
+    robocopy = shutil.which("robocopy")
+    if not robocopy:
+        return False
+
+    ensure_dir(dst)
+    cmd = [
+        robocopy,
+        str(src),
+        str(dst),
+        "/E",
+        "/COPY:DAT",
+        "/DCOPY:DAT",
+        "/R:1",
+        "/W:1",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NJS",
+        "/NP",
+    ]
+    ignored_dirs = sorted(_RECURSIVE_COPY_IGNORED | _ROOT_GENERATED_COPY_IGNORED)
+    if ignored_dirs:
+        cmd.extend(["/XD", *ignored_dirs])
+    cmd.extend(["/XF", "*.pyc", ".DS_Store"])
+    result = subprocess.run(cmd, capture_output=True, text=True, errors="ignore")
+    if result.returncode <= 7:
+        return True
+    msg = "\n".join(x for x in [result.stdout.strip(), result.stderr.strip()] if x)
+    raise RuntimeError(f"robocopy_failed exit_code={result.returncode}: {msg[:2000]}")
+
+
 def _copy_tree(src: Path, dst: Path) -> None:
     """
     Copy src -> dst in a Windows-friendly way.
@@ -251,11 +310,15 @@ def _copy_tree(src: Path, dst: Path) -> None:
         except Exception:
             # Best-effort fallback: merge into existing dir (Python 3.8+).
             try:
+                if _robocopy_tree(src, dst):
+                    return
                 shutil.copytree(src, dst, ignore=_copy_ignore_patterns(src), dirs_exist_ok=True)
                 return
             except Exception:
                 # Re-raise the original intent: caller will record copy_source_failed.
                 raise
+    if _robocopy_tree(src, dst):
+        return
     shutil.copytree(src, dst, ignore=_copy_ignore_patterns(src), dirs_exist_ok=True)
 
 
@@ -573,11 +636,20 @@ _PY_LITERAL_ASSIGN_RE = re.compile(
     r"^(?P<indent>\s*)(?P<name>{name})\s*=\s*(?P<quote>['\"])(?P<value>.*?)(?P=quote)(?P<tail>\s*(?:#.*)?)$",
     re.MULTILINE,
 )
+_SH_LITERAL_ASSIGN_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<export>export\s+)?(?P<name>{name})\s*=\s*(?P<quote>['\"])(?P<value>.*?)(?P=quote)(?P<tail>\s*(?:#.*)?)$",
+    re.MULTILINE,
+)
 
 
 def _literal_assign_re(*names: str) -> re.Pattern[str]:
     escaped = "|".join(re.escape(name) for name in names)
     return re.compile(_PY_LITERAL_ASSIGN_RE.pattern.format(name=escaped), re.MULTILINE)
+
+
+def _shell_literal_assign_re(*names: str) -> re.Pattern[str]:
+    escaped = "|".join(re.escape(name) for name in names)
+    return re.compile(_SH_LITERAL_ASSIGN_RE.pattern.format(name=escaped), re.MULTILINE)
 
 
 def _env_fallback_expr(env_names: list[str], fallback: str) -> str:
@@ -586,11 +658,18 @@ def _env_fallback_expr(env_names: list[str], fallback: str) -> str:
     return " or ".join(parts)
 
 
+def _shell_env_fallback_expr(env_names: list[str], fallback: str) -> str:
+    expr = fallback
+    for name in reversed(env_names):
+        expr = f"${{{name}:-{expr}}}"
+    return f'"{expr}"'
+
+
 def _looks_like_api_key_placeholder(value: str) -> bool:
     token = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
     if not token:
         return True
-    if token in {"yourapikey", "yourkey", "apikey", "api", "key"}:
+    if token in {"yourapikey", "yourkey", "apikey", "api", "key", "xxx", "empty", "changeme", "none", "null"}:
         return True
     return token.startswith("your") and ("api" in token or "key" in token)
 
@@ -606,13 +685,17 @@ def _patch_api_placeholders_for_env(root: Path, *, max_files: int = 300, max_byt
     if not root.exists() or not root.is_dir():
         return []
 
-    key_re = _literal_assign_re("API_KEY", "OPENAI_API_KEY")
-    base_re = _literal_assign_re("BASE_URL", "OPENAI_BASE_URL")
-    model_re = _literal_assign_re("MODEL_NAME", "OPENAI_MODEL", "MODEL")
+    key_re = _literal_assign_re("API_KEY", "OPENAI_API_KEY", "api_key", "openai_api_key")
+    base_re = _literal_assign_re("BASE_URL", "OPENAI_BASE_URL", "base_url", "api_base", "openai_api_base")
+    model_re = _literal_assign_re("MODEL_NAME", "OPENAI_MODEL", "MODEL", "model_name")
+    sh_key_re = _shell_literal_assign_re("API_KEY", "OPENAI_API_KEY")
+    sh_base_re = _shell_literal_assign_re("BASE_URL", "OPENAI_BASE_URL")
+    sh_model_re = _shell_literal_assign_re("MODEL_NAME", "OPENAI_MODEL", "MODEL")
     changed: list[str] = []
     scanned = 0
 
-    for path in root.rglob("*.py"):
+    candidates = list(root.rglob("*.py")) + list(root.rglob("*.sh"))
+    for path in candidates:
         if scanned >= max_files:
             break
         scanned += 1
@@ -626,6 +709,52 @@ def _patch_api_placeholders_for_env(root: Path, *, max_files: int = 300, max_byt
             continue
 
         patched_key = False
+
+        if path.suffix.lower() == ".sh":
+
+            def repl_sh_key(match: re.Match[str]) -> str:
+                nonlocal patched_key
+                value = match.group("value")
+                if not _looks_like_api_key_placeholder(value):
+                    return match.group(0)
+                patched_key = True
+                expr = _shell_env_fallback_expr(
+                    ["EXECUTION_OPENAI_API_KEY", "OPENAI_API_KEY", "API_KEY", "LLM_API_KEY"],
+                    value,
+                )
+                export = match.group("export") or ""
+                return f"{match.group('indent')}{export}{match.group('name')}={expr}{match.group('tail')}"
+
+            new_text = sh_key_re.sub(repl_sh_key, text)
+            if not patched_key:
+                continue
+
+            def repl_sh_base(match: re.Match[str]) -> str:
+                expr = _shell_env_fallback_expr(
+                    ["EXECUTION_OPENAI_BASE_URL", "OPENAI_BASE_URL", "BASE_URL", "LLM_BASE_URL"],
+                    match.group("value"),
+                )
+                export = match.group("export") or ""
+                return f"{match.group('indent')}{export}{match.group('name')}={expr}{match.group('tail')}"
+
+            def repl_sh_model(match: re.Match[str]) -> str:
+                expr = _shell_env_fallback_expr(
+                    ["EXECUTION_OPENAI_MODEL", "OPENAI_MODEL", "MODEL", "LLM_MODEL"],
+                    match.group("value"),
+                )
+                export = match.group("export") or ""
+                return f"{match.group('indent')}{export}{match.group('name')}={expr}{match.group('tail')}"
+
+            new_text = sh_base_re.sub(repl_sh_base, new_text)
+            new_text = sh_model_re.sub(repl_sh_model, new_text)
+            if new_text == text:
+                continue
+            try:
+                path.write_text(new_text, encoding="utf-8", errors="ignore")
+                changed.append(str(path.relative_to(root)).replace("\\", "/"))
+            except Exception:
+                continue
+            continue
 
         def repl_key(match: re.Match[str]) -> str:
             nonlocal patched_key

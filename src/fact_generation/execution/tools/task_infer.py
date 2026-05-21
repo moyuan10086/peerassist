@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -39,6 +40,8 @@ def _guess_entrypoints(repo_root: Path) -> list[str]:
         "evaluate.py",
         "test.py",
         "main.py",
+        "working_main_system.py",
+        "experiment.py",
         "app.py",
     ]
     out: list[str] = []
@@ -49,17 +52,47 @@ def _guess_entrypoints(repo_root: Path) -> list[str]:
         for p in sorted(repo_root.rglob("*.py")):
             rel = p.relative_to(repo_root)
             parts = set(rel.parts)
-            if any(x in parts for x in {".git", "__pycache__", "site-packages", "build", "dist"}):
+            if any(
+                x in parts
+                for x in {
+                    ".git",
+                    ".idea",
+                    "__MACOSX",
+                    "__pycache__",
+                    "site-packages",
+                    "build",
+                    "dist",
+                    "transformers",
+                    "simpletransformers",
+                }
+            ):
                 continue
-            if len(rel.parts) > 3:
+            if len(rel.parts) > 5:
                 continue
             name = p.name.lower()
-            if name in {"train.py", "eval.py", "evaluate.py", "test.py", "run.py", "main.py"}:
+            if name in {
+                "train.py",
+                "eval.py",
+                "evaluate.py",
+                "test.py",
+                "run.py",
+                "main.py",
+                "working_main_system.py",
+                "experiment.py",
+            } or any(tok in name for tok in ["train", "eval", "experiment", "pipeline", "inference"]):
                 s = str(rel).replace("\\", "/")
                 if s not in out:
                     out.append(s)
             if len(out) >= 12:
                 break
+    if not out:
+        top_level_py = sorted(
+            p
+            for p in repo_root.glob("*.py")
+            if p.is_file() and not p.name.startswith(".") and p.name != "__init__.py"
+        )
+        if len(top_level_py) == 1:
+            out.append(top_level_py[0].name)
     return out
 
 
@@ -93,10 +126,24 @@ def _join_continuations(lines: list[str]) -> list[str]:
     return out
 
 
+def _first_command_token(s: str) -> str:
+    parts = (s or "").split()
+    while parts and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", parts[0]):
+        parts.pop(0)
+    return parts[0] if parts else ""
+
+
 def _looks_like_shell_command(s: str) -> bool:
     if not s:
         return False
-    first = s.split(maxsplit=1)[0].lower()
+    if re.match(r"^\./[^\s]+/$", s.strip()):
+        return False
+    first_raw = _first_command_token(s)
+    if not first_raw:
+        return False
+    first = first_raw.lower()
+    if first == "make" and first_raw != "make":
+        return False
     if first in {
         "python",
         "python3",
@@ -113,7 +160,14 @@ def _looks_like_shell_command(s: str) -> bool:
         "accelerate",
     }:
         return True
-    return first.startswith("./") or first.endswith(".sh")
+    if first.endswith(".sh"):
+        return True
+    if first.startswith("./"):
+        basename = Path(first).name.lower()
+        return basename in {"run", "train", "eval", "evaluate", "test", "main"} or basename.endswith(
+            (".sh", ".py")
+        )
+    return False
 
 
 def _extract_example_commands_from_readme(readme_text: str) -> list[str]:
@@ -124,7 +178,8 @@ def _extract_example_commands_from_readme(readme_text: str) -> list[str]:
     cmds: list[str] = []
     for m in re.finditer(r"```(?:bash|sh|shell|console|text|python)?\s*([\s\S]*?)```", txt, flags=re.IGNORECASE):
         block = (m.group(1) or "").strip()
-        for s in _join_continuations(block.splitlines()):
+        raw_lines = [line for line in block.splitlines() if not line.strip().startswith("#")]
+        for s in _join_continuations(raw_lines):
             if not _looks_like_shell_command(s):
                 continue
             cmds.append(s)
@@ -212,8 +267,16 @@ def _safe_id_part(raw: str) -> str:
     return s or "task"
 
 
+def _choose_readme_placeholder_options(raw: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        options = [part.strip() for part in match.group(1).split("/") if part.strip()]
+        return options[0] if options else match.group(0)
+
+    return re.sub(r"\[([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)\]", repl, raw or "")
+
+
 def _command_to_argv(raw: str) -> list[str]:
-    s = (raw or "").strip()
+    s = _choose_readme_placeholder_options(raw).strip()
     if not s:
         return []
     try:
@@ -224,10 +287,67 @@ def _command_to_argv(raw: str) -> list[str]:
         return []
     if parts[0].endswith(".sh") or (parts[0].startswith("./") and parts[0].endswith(".sh")):
         return ["bash", *parts]
-    shell_features = any(token in s for token in ["&&", "||", "|", ";", "$(", "`", ">", "<"])
+    leading_env_assignment = bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", parts[0]))
+    shell_features = any(token in s for token in ["&&", "||", "|", ";", "$", "`", ">", "<"])
     if shell_features or parts[0] in {"cd", "export"}:
         return ["bash", "-lc", s]
+    if leading_env_assignment:
+        return ["bash", "-lc", s]
     return parts
+
+
+_README_PLACEHOLDER_WORDS = {
+    "ADAPTER",
+    "ARG",
+    "ARGS",
+    "CHECKPOINT",
+    "CKPT",
+    "CONFIG",
+    "CONFIG_FILE",
+    "DATA",
+    "DATA_DIR",
+    "DATA_PATH",
+    "DATASET",
+    "DEVICE",
+    "ENV",
+    "EXPERIMENT",
+    "FILE",
+    "GPU",
+    "METHOD",
+    "MODEL",
+    "MODEL_NAME",
+    "NAME",
+    "OUTPUT",
+    "OUTPUT_DIR",
+    "PATH",
+    "SEED",
+    "SPLIT",
+    "TASK",
+}
+
+
+def _has_unresolved_readme_placeholder(raw: str, cmd: list[str]) -> bool:
+    s = _choose_readme_placeholder_options(raw or "")
+    if re.search(r"\[[A-Za-z0-9_.-]+\]", s):
+        return True
+    if re.search(r"<[A-Za-z0-9_. -]+>", s):
+        return True
+    if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*", s):
+        return True
+    tokens = list(cmd)
+    if len(tokens) >= 3 and tokens[0] in {"bash", "sh"} and tokens[1] == "-lc":
+        try:
+            tokens = shlex.split(tokens[2], posix=True)
+        except Exception:
+            tokens = tokens[2].split()
+    for tok in tokens:
+        stripped = str(tok).strip().strip("[]{}<>")
+        if not stripped or stripped.startswith("$") or stripped.startswith("-"):
+            continue
+        upper = stripped.upper()
+        if upper.startswith("YOUR_") or upper in _README_PLACEHOLDER_WORDS:
+            return True
+    return False
 
 
 def _infer_cwd_for_command(repo_root: Path, cmd: list[str]) -> str:
@@ -257,18 +377,232 @@ def _infer_cwd_for_command(repo_root: Path, cmd: list[str]) -> str:
     return "{paper_root}" if rel_parent == "." else f"{{paper_root}}/{rel_parent}"
 
 
+def _script_path_for_command(repo_root: Path, cmd: list[str]) -> Path | None:
+    if len(cmd) < 2:
+        return None
+    executable = str(cmd[0] or "").strip().lower()
+    if executable not in {"python", "python3", "bash", "sh"}:
+        return None
+    script = str(cmd[1] or "").strip()
+    if executable in {"python", "python3"} and not script.endswith(".py"):
+        return None
+    if executable in {"bash", "sh"} and not script.endswith(".sh"):
+        return None
+    direct = (repo_root / script).resolve()
+    if direct.exists() and direct.is_file():
+        return direct
+    if "/" in script or "\\" in script:
+        return None
+    try:
+        matches = [
+            p
+            for p in repo_root.rglob(script)
+            if p.is_file() and ".git" not in p.parts and "__pycache__" not in p.parts
+        ]
+    except Exception:
+        return None
+    return matches[0] if len(matches) == 1 else None
+
+
+def _path_tokens(path: str) -> set[str]:
+    return {
+        tok
+        for tok in re.split(r"[^a-z0-9]+", Path(path).stem.lower())
+        if len(tok) >= 2
+    }
+
+
+def _repair_missing_script_command(repo_root: Path, cmd: list[str]) -> list[str]:
+    if len(cmd) < 2:
+        return cmd
+    executable = str(cmd[0] or "").strip().lower()
+    if executable not in {"python", "python3", "bash", "sh"}:
+        return cmd
+    script = str(cmd[1] or "").strip()
+    suffix = ".py" if executable in {"python", "python3"} else ".sh"
+    if not script.endswith(suffix):
+        return cmd
+    if (repo_root / script).exists():
+        return cmd
+    rel = Path(script)
+    search_dir = repo_root / rel.parent
+    try:
+        candidates = sorted(p for p in search_dir.glob(f"*{suffix}") if p.is_file())
+    except Exception:
+        candidates = []
+    if not candidates:
+        return cmd
+    replacement: Path | None = None
+    if len(candidates) == 1:
+        replacement = candidates[0]
+    else:
+        wanted_tokens = _path_tokens(script)
+        scored = [
+            (len(wanted_tokens & _path_tokens(candidate.name)), candidate)
+            for candidate in candidates
+        ]
+        scored = [(score, candidate) for score, candidate in scored if score > 0]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+            replacement = scored[0][1]
+    if replacement is None:
+        return cmd
+    repaired = list(cmd)
+    repaired[1] = replacement.relative_to(repo_root).as_posix()
+    return repaired
+
+
+def _resolve_local_python_module(
+    repo_root: Path, script_path: Path, module: str, *, level: int = 0
+) -> list[Path]:
+    parts = [p for p in (module or "").split(".") if p]
+    bases: list[Path] = []
+    if level > 0:
+        base = script_path.parent
+        for _ in range(max(level - 1, 0)):
+            base = base.parent
+        bases.append(base)
+    else:
+        bases.extend([script_path.parent, repo_root])
+
+    out: list[Path] = []
+    for base in bases:
+        target = base.joinpath(*parts) if parts else base
+        candidates = [target.with_suffix(".py"), target / "__init__.py"] if parts else []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+                if resolved.exists() and resolved.is_file() and repo_root.resolve() in resolved.parents:
+                    out.append(resolved)
+            except Exception:
+                continue
+    return out
+
+
+def _local_python_imports(repo_root: Path, script_path: Path, source: str) -> list[Path]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    imports: list[Path] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.extend(_resolve_local_python_module(repo_root, script_path, alias.name.split(".", 1)[0]))
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imports.extend(_resolve_local_python_module(repo_root, script_path, module, level=node.level))
+            if node.level and not module:
+                for alias in node.names:
+                    imports.extend(_resolve_local_python_module(repo_root, script_path, alias.name, level=node.level))
+    return imports
+
+
+def _api_scan_text_for_command(repo_root: Path, raw_cmd: str, script_path: Path | None) -> str:
+    haystacks = [str(raw_cmd or "")]
+    if script_path is None or script_path.suffix.lower() != ".py":
+        if script_path is not None:
+            haystacks.append(_read_optional(script_path, max_chars=30000))
+        return "\n".join(haystacks)
+
+    queue = [script_path]
+    seen: set[Path] = set()
+    while queue and len(seen) < 16:
+        path = queue.pop(0)
+        try:
+            resolved = path.resolve()
+        except Exception:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        source = _read_optional(resolved, max_chars=60000)
+        haystacks.append(source)
+        queue.extend(p for p in _local_python_imports(repo_root, resolved, source) if p not in seen)
+    return "\n".join(haystacks)
+
+
+def _command_requires_external_api(repo_root: Path, raw_cmd: str, cmd: list[str]) -> bool:
+    """
+    Conservative guard for README examples that require paid APIs or a local
+    model server. These commands are still recorded, but auto-full should skip
+    them so later metric/plotting tasks can run.
+    """
+
+    script_path = _script_path_for_command(repo_root, cmd)
+    text = _api_scan_text_for_command(repo_root, raw_cmd, script_path).lower()
+    if not text.strip():
+        return False
+    api_markers = [
+        "from openai import",
+        "import openai",
+        "asyncopenai",
+        "openai(",
+        "google-genai",
+        "google.genai",
+        "genai.client",
+        "api_key",
+        "api key",
+        "apikey",
+        "base_url",
+        "localhost:8000/v1",
+        "127.0.0.1:8000/v1",
+        "vllm",
+    ]
+    if any(marker in text for marker in api_markers):
+        return True
+    return bool(re.search(r"\b(?:openai|anthropic|gemini|claude)_api_key\b", text))
+
+
+def _external_api_tasks_disabled() -> bool:
+    token = (
+        os.environ.get("EXECUTION_DISABLE_EXTERNAL_API_TASKS")
+        or os.environ.get("FACTREVIEW_DISABLE_EXTERNAL_API_TASKS")
+        or ""
+    ).strip().lower()
+    return token in {"1", "true", "yes", "on"}
+
+
+def _mark_external_api_task(task: dict[str, Any], requires_api: bool) -> dict[str, Any]:
+    if requires_api:
+        task["requires_external_api"] = True
+        if _external_api_tasks_disabled():
+            task["enabled"] = False
+            task["disabled_reason"] = "external_api_or_model_server_required"
+    return task
+
+
+def _is_environment_management_command(raw: str) -> bool:
+    s = re.sub(r"\s+", " ", (raw or "").strip().lower())
+    if not s:
+        return False
+    return bool(
+        re.match(r"^(?:conda|mamba|micromamba)\s+(?:activate|deactivate|create|install)\b", s)
+        or re.match(r"^(?:conda|mamba|micromamba)\s+env\s+(?:create|update|remove)\b", s)
+        or re.match(r"^(?:source|\.)\s+(?:activate|deactivate)\b", s)
+    )
+
+
 def _command_family(raw: str) -> str:
     s = (raw or "").lower()
+    if _is_environment_management_command(raw):
+        return "prepare"
     if any(tok in s for tok in ["pip install", "conda env", "mamba env", "environment.yml", "requirements.txt"]):
         return "prepare"
     if any(tok in s for tok in ["preprocess", "prepare", "download", "convert"]):
         return "prepare"
-    if any(tok in s for tok in ["eval", "evaluate", "test.py", "predict", "inference"]):
-        return "eval"
-    if any(tok in s for tok in ["train", "finetune", "fit"]) or re.search(r"\b(run|main)\.py\b", s):
-        return "train"
     if "--help" in s or "-h" in s:
         return "smoke"
+    if (
+        any(tok in s for tok in ["--do_train", "train_batch_size", "finetune", "fine-tune", "fit"])
+        or re.search(r"\btrain(?:\.py|_|\b)", s)
+        or re.search(r"\bmain\.py\b", s)
+    ):
+        return "train"
+    if any(tok in s for tok in ["eval", "evaluate", "test.py", "predict", "inference"]):
+        return "eval"
+    if re.search(r"\brun\.py\b", s):
+        return "train"
     return "reproduce"
 
 
@@ -329,7 +663,8 @@ def _build_target_reproduction_tasks(
             continue
         scored.sort(key=lambda item: item[0], reverse=True)
         score, raw_cmd = scored[0]
-        cmd = _command_to_argv(raw_cmd)
+        cmd = _repair_missing_script_command(repo_root, _command_to_argv(raw_cmd))
+        has_placeholder = _has_unresolved_readme_placeholder(raw_cmd, cmd)
         ident = _target_identity(target)
         family = _command_family(raw_cmd)
         task_id = f"{family}_{ident}"
@@ -337,10 +672,11 @@ def _build_target_reproduction_tasks(
             task_id = f"{task_id}_{idx}"
         seen.add(task_id)
         tasks.append(
-            {
+            _mark_external_api_task(
+                {
                 "id": task_id,
                 "family": family,
-                "enabled": mode == "full",
+                "enabled": mode == "full" and not has_placeholder,
                 "cwd": _infer_cwd_for_command(repo_root, cmd),
                 "cmd": cmd,
                 "timeout_sec": 86400 if family == "train" else 7200,
@@ -358,14 +694,19 @@ def _build_target_reproduction_tasks(
                     "match_score": score,
                     "paper_table_id": target.get("paper_table_id", ""),
                 },
-            }
+                },
+                _command_requires_external_api(repo_root, raw_cmd, cmd),
+            )
         )
+        if has_placeholder:
+            tasks[-1]["disabled_reason"] = "readme_placeholder_command"
     return tasks
 
 
 def _build_generic_readme_tasks(repo_root: Path, readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_cmds: set[str] = set()
     for idx, raw in enumerate(readme_example_cmds, 1):
         family = _command_family(raw)
         if family not in {"prepare", "train", "eval", "reproduce"}:
@@ -378,19 +719,29 @@ def _build_generic_readme_tasks(repo_root: Path, readme_example_cmds: list[str],
         if task_id in seen:
             continue
         seen.add(task_id)
-        cmd = _command_to_argv(raw)
+        cmd = _repair_missing_script_command(repo_root, _command_to_argv(raw))
+        cmd_key = " ".join(cmd)
+        if cmd_key in seen_cmds:
+            continue
+        seen_cmds.add(cmd_key)
+        has_placeholder = _has_unresolved_readme_placeholder(raw, cmd)
         tasks.append(
-            {
+            _mark_external_api_task(
+                {
                 "id": task_id,
                 "family": family,
-                "enabled": mode == "full",
+                "enabled": mode == "full" and not has_placeholder,
                 "cwd": _infer_cwd_for_command(repo_root, cmd),
                 "cmd": cmd,
                 "timeout_sec": 86400 if family == "train" else 7200,
                 "use_conda": True,
                 "artifact_paths": ["metrics/**", "results/**", "outputs/**", "logs/**", "checkpoints/**"],
-            }
+                },
+                _command_requires_external_api(repo_root, raw, cmd),
+            )
         )
+        if has_placeholder:
+            tasks[-1]["disabled_reason"] = "readme_placeholder_command"
         if len(tasks) >= 12:
             break
     return tasks
@@ -404,8 +755,14 @@ def _is_dependency_install_command(raw: str) -> bool:
         token in s
         for token in [
             "pip install",
+            "conda create",
+            "conda install",
             "conda env",
+            "mamba create",
+            "mamba install",
             "mamba env",
+            "micromamba create",
+            "micromamba install",
             "micromamba env",
             "environment.yml",
             "requirements.txt",
@@ -419,17 +776,18 @@ def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], m
     seen_cmds: set[str] = set()
 
     def add_prepare(raw_cmd: str, raw_id: str) -> None:
-        cmd = re.sub(r"\s+", " ", (raw_cmd or "").strip())
-        if not cmd or cmd in seen_cmds:
+        cmd_text = re.sub(r"\s+", " ", (raw_cmd or "").strip())
+        if not cmd_text or cmd_text in seen_cmds:
             return
-        seen_cmds.add(cmd)
+        seen_cmds.add(cmd_text)
+        cmd = _repair_missing_script_command(repo_root, _command_to_argv(cmd_text))
         tasks.append(
             {
                 "id": f"prepare_{_safe_id_part(raw_id)}",
                 "family": "prepare",
                 "enabled": mode == "full",
                 "cwd": "{paper_root}",
-                "cmd": _command_to_argv(cmd),
+                "cmd": cmd,
                 "timeout_sec": 7200,
                 "use_conda": True,
                 "artifact_paths": ["data/**", "datasets/**", "processed/**", "preprocessed/**"],
@@ -437,7 +795,11 @@ def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], m
         )
 
     for idx, raw in enumerate(readme_example_cmds, 1):
-        if _command_family(raw) != "prepare" or _is_dependency_install_command(raw):
+        if (
+            _command_family(raw) != "prepare"
+            or _is_dependency_install_command(raw)
+            or _is_environment_management_command(raw)
+        ):
             continue
         add_prepare(raw, f"readme_{idx}")
 
@@ -455,6 +817,58 @@ def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], m
         if path.exists() and path.is_file():
             add_prepare(f"bash {rel.replace(os.sep, '/')}", rel)
 
+    return tasks
+
+
+def _script_text(repo_root: Path, rel_path: str, max_chars: int = 12000) -> str:
+    script = repo_root / rel_path
+    if not script.exists() or not script.is_file():
+        return ""
+    return _read_optional(script, max_chars=max_chars)
+
+
+def _script_has_main_guard(repo_root: Path, rel_path: str) -> bool:
+    return "__name__" in _script_text(repo_root, rel_path, max_chars=80000)
+
+
+def _script_requires_cli_args(repo_root: Path, rel_path: str) -> bool:
+    text = _script_text(repo_root, rel_path, max_chars=30000)
+    return "add_argument" in text and bool(re.search(r"add_argument\([\s\S]{0,300}?required\s*=\s*True", text))
+
+
+def _entrypoint_family(rel_path: str) -> str:
+    name = Path(rel_path).name.lower()
+    if any(tok in name for tok in ["eval", "evaluate", "predict", "inference"]):
+        return "eval"
+    if any(tok in name for tok in ["train", "main", "experiment", "pipeline"]):
+        return "train"
+    return "reproduce"
+
+
+def _build_entrypoint_run_tasks(
+    repo_root: Path, entrypoints: list[str], readme_example_cmds: list[str], mode: str
+) -> list[dict[str, Any]]:
+    if readme_example_cmds:
+        return []
+    tasks: list[dict[str, Any]] = []
+    for rel in entrypoints[:6]:
+        if not _script_has_main_guard(repo_root, rel):
+            continue
+        family = _entrypoint_family(rel)
+        task = {
+            "id": f"{family}_entrypoint_{_safe_id_part(rel)}",
+            "family": family,
+            "enabled": mode == "full",
+            "cwd": "{paper_root}",
+            "cmd": ["python", rel],
+            "timeout_sec": 86400 if family == "train" else 7200,
+            "use_conda": True,
+            "artifact_paths": ["metrics/**", "results/**", "outputs/**", "logs/**", "checkpoints/**", "models/**"],
+        }
+        if _script_requires_cli_args(repo_root, rel):
+            task["enabled"] = False
+            task["disabled_reason"] = "required_cli_arguments_missing"
+        tasks.append(_mark_external_api_task(task, _command_requires_external_api(repo_root, "python " + rel, task["cmd"])))
     return tasks
 
 
@@ -654,6 +1068,7 @@ def _finalize_tasks(
     *,
     repo_root: Path,
     tasks: list[dict[str, Any]],
+    entrypoints: list[str],
     readme_example_cmds: list[str],
     datasets: list[str],
     mode: str,
@@ -698,6 +1113,13 @@ def _finalize_tasks(
 
     generic_tasks = _build_generic_readme_tasks(repo_root, readme_example_cmds, mode=mode)
     for task in generic_tasks:
+        tid = str(task.get("id") or "")
+        if tid and tid not in existing_ids:
+            tasks.append(task)
+            existing_ids.add(tid)
+
+    entrypoint_tasks = _build_entrypoint_run_tasks(repo_root, entrypoints, readme_example_cmds, mode=mode)
+    for task in entrypoint_tasks:
         tid = str(task.get("id") or "")
         if tid and tid not in existing_ids:
             tasks.append(task)
@@ -777,26 +1199,10 @@ def infer_tasks_heuristic(
                 }
             )
 
-    # Full: propose heavier commands but disable them by default.
-    if mode == "full":
-        if examples:
-            example_cmd = _command_to_argv(examples[0])
-            tasks.append(
-                {
-                    "id": "readme_example_1",
-                    "family": _command_family(examples[0]),
-                    "enabled": False,
-                    "cwd": _infer_cwd_for_command(root, example_cmd),
-                    "cmd": example_cmd,
-                    "timeout_sec": 3600,
-                    "use_conda": True,
-                    "artifact_paths": ["results/**", "logs/**"],
-                }
-            )
-
     tasks = _finalize_tasks(
         repo_root=root,
         tasks=tasks,
+        entrypoints=entrypoints,
         readme_example_cmds=examples,
         datasets=datasets,
         mode=mode,
@@ -810,6 +1216,7 @@ def infer_tasks_heuristic(
         "requirements_present": requirements_present,
         "readme_example_cmds": examples,
         "paper_metric_targets_count": len(paper_metric_targets or []),
+        "external_api_tasks_disabled": _external_api_tasks_disabled(),
     }
     return InferResult(tasks=tasks, evidence=evidence)
 
@@ -932,6 +1339,7 @@ def infer_tasks_llm(
     finalized = _finalize_tasks(
         repo_root=root,
         tasks=finalized,
+        entrypoints=entrypoints,
         readme_example_cmds=readme_example_cmds,
         datasets=datasets,
         mode=mode,

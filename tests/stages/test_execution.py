@@ -286,6 +286,57 @@ def test_runtime_traceback_output_is_treated_as_failure() -> None:
     assert reason == "python_traceback_in_output"
 
 
+def test_masked_startup_failure_output_is_treated_as_failure() -> None:
+    reason = _semantic_runtime_failure(
+        stdout=(
+            "All trained models found! Can skip training.\n"
+            "Failed to load MIMIC data: preprocessed_mimic_data.pkl missing\n"
+            "System startup failed\n"
+        ),
+        stderr="",
+    )
+
+    assert reason == "semantic_system_startup_failed"
+
+
+def test_run_result_carries_semantic_failure(tmp_path) -> None:
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    run_dir = tmp_path / "run"
+    tasks_p = tmp_path / "tasks.json"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "masked_failure",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "-c", "print('System startup failed')"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    assert out["status"] == "failed"
+    assert out["run_result"]["returncode"] == 0
+    assert out["run_result"]["semantic_failure"] == "semantic_system_startup_failed"
+
+
 def test_no_docker_python_tasks_use_current_interpreter() -> None:
     resolved = _resolve_host_python_cmd(["python", "-V"])
 
@@ -432,6 +483,67 @@ def test_heuristic_tasks_do_not_install_missing_requirements(tmp_path) -> None:
     assert any(t.get("id") == "repo_smoke" for t in result.tasks)
 
 
+def test_heuristic_smoke_uses_unique_top_level_python_file(tmp_path) -> None:
+    (tmp_path / "dinov2_moe_new.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    task = next(t for t in result.tasks if t.get("id") == "repo_smoke")
+    assert task.get("cmd") == ["python", "-m", "py_compile", "dinov2_moe_new.py"]
+
+
+def test_heuristic_smoke_finds_nested_main_script(tmp_path) -> None:
+    nested = tmp_path / "Code" / "Diagramdiff platform" / "Core algorithm code"
+    nested.mkdir(parents=True)
+    (nested / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    task = next(t for t in result.tasks if t.get("id") == "repo_smoke")
+    assert task.get("cmd") == [
+        "python",
+        "-m",
+        "py_compile",
+        "Code/Diagramdiff platform/Core algorithm code/main.py",
+    ]
+
+
+def test_heuristic_full_adds_entrypoint_task_without_readme_command(tmp_path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "working_main_system.py").write_text(
+        "if __name__ == '__main__':\n    print('train')\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "train_entrypoint_src_working_main_system_py")
+    assert task.get("cmd") == ["python", "src/working_main_system.py"]
+    assert task.get("enabled") is True
+
+
+def test_heuristic_disables_entrypoint_with_required_args(tmp_path) -> None:
+    (tmp_path / "main.py").write_text(
+        "\n".join(
+            [
+                "import argparse",
+                "parser = argparse.ArgumentParser()",
+                "parser.add_argument('--img_path', required=True)",
+                "if __name__ == '__main__':",
+                "    parser.parse_args()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "train_entrypoint_main_py")
+    assert task.get("enabled") is False
+    assert task.get("disabled_reason") == "required_cli_arguments_missing"
+
+
 def test_heuristic_smoke_disables_readme_prepare_commands(tmp_path) -> None:
     (tmp_path / "README.md").write_text(
         "```bash\npip install -r requirements.txt\npython main.py --help\n```\n",
@@ -468,6 +580,33 @@ def test_heuristic_full_adds_conventional_preprocess_before_training(tmp_path) -
     assert not any((t.get("cmd") or [])[:2] == ["cmd", "/c"] for t in result.tasks)
 
 
+def test_heuristic_skips_conda_environment_commands(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\nconda create -n paper python=3.9\nconda activate paper\npython train.py\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "train.py").write_text("print('train')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    commands = [t.get("cmd") or [] for t in result.tasks]
+    assert ["python", "train.py"] in commands
+    assert not any(cmd and cmd[0] == "conda" for cmd in commands)
+
+
+def test_heuristic_deduplicates_repeated_readme_commands(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\nbash run_for_dataset.sh\nbash run_for_dataset.sh\nbash run_for_dataset.sh\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "run_for_dataset.sh").write_text("echo ok\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    commands = [t.get("cmd") for t in result.tasks]
+    assert commands.count(["bash", "run_for_dataset.sh"]) == 1
+
+
 def test_heuristic_infers_cwd_for_unique_readme_script(tmp_path) -> None:
     (tmp_path / "README.md").write_text(
         "```bash\npython generate_response.py\n```\n",
@@ -482,6 +621,198 @@ def test_heuristic_infers_cwd_for_unique_readme_script(tmp_path) -> None:
     task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_1")
     assert task.get("cwd") == "{paper_root}/Scripts"
     assert task.get("cmd") == ["python", "generate_response.py"]
+
+
+def test_heuristic_marks_api_tasks_but_keeps_them_enabled_by_default(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", raising=False)
+    (tmp_path / "README.md").write_text(
+        "```bash\npython eval_model.py\npython plot_table.py\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "eval_model.py").write_text(
+        "from openai import OpenAI\nclient = OpenAI(api_key='xxx')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "plot_table.py").write_text("print('accuracy: 23.9')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    api_task = next(t for t in result.tasks if t.get("id") == "eval_readme_1")
+    table_task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_2")
+    assert api_task.get("requires_external_api") is True
+    assert api_task.get("enabled") is True
+    assert "disabled_reason" not in api_task
+    assert table_task.get("requires_external_api") is not True
+    assert table_task.get("enabled") is True
+
+
+def test_heuristic_can_disable_api_tasks_for_server_queues(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    (tmp_path / "README.md").write_text(
+        "```bash\npython eval_model.py\npython plot_table.py\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "eval_model.py").write_text(
+        "from openai import OpenAI\nclient = OpenAI(api_key='xxx')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "plot_table.py").write_text("print('accuracy: 23.9')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    api_task = next(t for t in result.tasks if t.get("id") == "eval_readme_1")
+    table_task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_2")
+    assert api_task.get("requires_external_api") is True
+    assert api_task.get("enabled") is False
+    assert api_task.get("disabled_reason") == "external_api_or_model_server_required"
+    assert table_task.get("enabled") is True
+
+
+def test_heuristic_marks_api_tasks_through_local_imports(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    (tmp_path / "README.md").write_text("```bash\npython conversation.py\n```\n", encoding="utf-8")
+    (tmp_path / "conversation.py").write_text("from agent import Agent\nAgent()\n", encoding="utf-8")
+    (tmp_path / "agent.py").write_text(
+        "from openai import OpenAI\nclient = OpenAI(api_key='Your API_KEY')\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_1")
+    assert task.get("requires_external_api") is True
+    assert task.get("enabled") is False
+    assert task.get("disabled_reason") == "external_api_or_model_server_required"
+
+
+def test_heuristic_repairs_missing_readme_shell_script_to_existing_candidate(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\nscripts/test/test_pipeline_gpt_4o_resume.sh\n```\n",
+        encoding="utf-8",
+    )
+    scripts = tmp_path / "scripts" / "test"
+    scripts.mkdir(parents=True)
+    (scripts / "test_pipeline.sh").write_text("echo ok\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_1")
+    assert task.get("cmd") == ["bash", "scripts/test/test_pipeline.sh"]
+
+
+def test_heuristic_marks_shell_api_script(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    (tmp_path / "README.md").write_text(
+        "```bash\nbash run_eval.sh\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "run_eval.sh").write_text("export OPENAI_API_KEY=xxx\npython eval.py\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "eval_readme_1")
+    assert task.get("requires_external_api") is True
+    assert task.get("enabled") is False
+
+
+def test_heuristic_does_not_treat_title_case_make_sentence_as_command(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```text\nMake predictions\nmake evaluate\n```\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    commands = [t.get("cmd") for t in result.tasks]
+    assert ["Make", "predictions"] not in commands
+    assert ["make", "evaluate"] in commands
+
+
+def test_heuristic_ignores_python_comments_that_look_like_make_commands(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```python\n# make batch size small enough so you do not run OOM\nprint('ok')\n```\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    commands = [t.get("cmd") for t in result.tasks]
+    assert ["make", "batch", "size", "small", "enough", "so", "you", "do", "not", "run", "OOM"] not in commands
+
+
+def test_heuristic_ignores_readme_directory_paths(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```text\n./ckpt/domainnet126/\n```\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    commands = [t.get("cmd") for t in result.tasks]
+    assert ["./ckpt/domainnet126/"] not in commands
+
+
+def test_heuristic_disables_unresolved_usage_placeholder_commands(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\n./run.sh DATASET ADAPTER [CONFIG_FILE]\n./run.sh cifar10c petta\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "run.sh").write_text("echo ok\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    placeholder_task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_1")
+    concrete_task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_2")
+    assert placeholder_task.get("enabled") is False
+    assert placeholder_task.get("disabled_reason") == "readme_placeholder_command"
+    assert concrete_task.get("enabled") is True
+
+
+def test_heuristic_detects_env_prefixed_training_command(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "\n".join(
+            [
+                "```bash",
+                "CUDA_VISIBLE_DEVICES=$GPU python main.py \\",
+                "  --data_dir data/$1 \\",
+                "  --do_train",
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text("print('train')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "train_readme_1")
+    assert task.get("cmd") == [
+        "bash",
+        "-lc",
+        "CUDA_VISIBLE_DEVICES=$GPU python main.py --data_dir data/$1 --do_train",
+    ]
+    assert task.get("enabled") is False
+    assert task.get("disabled_reason") == "readme_placeholder_command"
+
+
+def test_heuristic_selects_first_readme_choice_placeholder(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "```bash\npython test_time_new.py --cfg cfgs/cifar10_c/[tent/cotta].yaml fed.fed_tech [fedavg/fedbn]\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_time_new.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "reproduce_readme_1")
+    assert task.get("cmd") == [
+        "python",
+        "test_time_new.py",
+        "--cfg",
+        "cfgs/cifar10_c/tent.yaml",
+        "fed.fed_tech",
+        "fedavg",
+    ]
 
 
 def test_normalize_shell_script_line_endings(tmp_path) -> None:
@@ -550,6 +881,53 @@ def test_patch_api_placeholders_reads_runtime_env_without_writing_secret(tmp_pat
     assert "EXECUTION_OPENAI_BASE_URL" in text
     assert "EXECUTION_OPENAI_MODEL" in text
     assert "sk-" not in text
+
+
+def test_patch_api_placeholders_handles_lowercase_xxx_keys(tmp_path) -> None:
+    script = tmp_path / "eval_model.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from openai import OpenAI",
+                "openai_api_key = 'xxx'",
+                "openai_api_base = 'http://localhost:8000/v1'",
+                "model_name = 'o3'",
+                "client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    changed = _patch_api_placeholders_for_env(tmp_path)
+
+    text = script.read_text(encoding="utf-8")
+    assert changed == ["eval_model.py"]
+    assert "openai_api_key = __import__('os').environ.get('EXECUTION_OPENAI_API_KEY')" in text
+    assert "openai_api_base = __import__('os').environ.get('EXECUTION_OPENAI_BASE_URL')" in text
+    assert "model_name = __import__('os').environ.get('EXECUTION_OPENAI_MODEL')" in text
+
+
+def test_patch_api_placeholders_handles_shell_exports(tmp_path) -> None:
+    script = tmp_path / "run_eval.sh"
+    script.write_text(
+        "\n".join(
+            [
+                'export OPENAI_API_KEY="your api key"',
+                'export OPENAI_BASE_URL="your api base url"',
+                'MODEL_NAME="gpt-4o"',
+                "python -m tests.test_full_pipeline_resume --model_name $MODEL_NAME",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    changed = _patch_api_placeholders_for_env(tmp_path)
+
+    text = script.read_text(encoding="utf-8")
+    assert changed == ["run_eval.sh"]
+    assert 'export OPENAI_API_KEY="${EXECUTION_OPENAI_API_KEY:-' in text
+    assert 'export OPENAI_BASE_URL="${EXECUTION_OPENAI_BASE_URL:-' in text
+    assert 'MODEL_NAME="${EXECUTION_OPENAI_MODEL:-' in text
 
 
 def test_anonymous_4open_repo_id_parses_repo_links() -> None:

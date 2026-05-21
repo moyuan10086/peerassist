@@ -117,8 +117,21 @@ def _task_result_base(task: dict[str, Any], task_id: str) -> dict[str, Any]:
 
 def _semantic_runtime_failure(stdout: str, stderr: str) -> str:
     text = f"{stdout or ''}\n{stderr or ''}"
+    text_lower = text.lower()
     if "Traceback (most recent call last):" in text:
         return "python_traceback_in_output"
+    for marker, reason in [
+        ("system startup failed", "semantic_system_startup_failed"),
+        ("error loading system:", "semantic_system_load_failed"),
+        ("failed to load mimic data", "semantic_missing_mimic_data"),
+        ("preprocessed data file not found", "semantic_missing_preprocessed_data"),
+        ("please run mimic_processor.py first", "semantic_missing_preprocessed_data"),
+        ("error(s) in loading state_dict", "semantic_checkpoint_state_dict_mismatch"),
+    ]:
+        if marker in text_lower:
+            return reason
+    if "size mismatch for " in text_lower and ("state_dict" in text_lower or "checkpoint" in text_lower):
+        return "semantic_checkpoint_state_dict_mismatch"
     for token in [
         "ModuleNotFoundError:",
         "ImportError:",
@@ -404,26 +417,25 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         if metric_artifact:
             item["metric_artifact"] = metric_artifact
         results.append(item)
-        append_event(
-            run_dir,
-            "task_done",
-            {
-                "task": task_id,
-                "task_index": idx,
-                "task_total": total_tasks,
-                "attempt": attempt,
-                "success": ok,
-                "returncode": res.returncode,
-                "duration_sec": res.duration_sec,
-                "timeout_sec": timeout_sec,
-                "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
-            },
-        )
+        task_event = {
+            "task": task_id,
+            "task_index": idx,
+            "task_total": total_tasks,
+            "attempt": attempt,
+            "success": ok,
+            "returncode": res.returncode,
+            "duration_sec": res.duration_sec,
+            "timeout_sec": timeout_sec,
+            "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
+        }
+        if semantic_failure:
+            task_event["semantic_failure"] = semantic_failure
+        append_event(run_dir, "task_done", task_event)
 
         if not ok:
             # stop at first failing task (simpler, deterministic); can be extended to continue.
             state["status"] = "failed"
-            state["run_result"] = {
+            failure_result = {
                 "success": False,
                 "failed_task": task_id,
                 "task_index": idx,
@@ -435,6 +447,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 "stdout_tail": (res.stdout or "")[-2000:],
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
             }
+            if semantic_failure:
+                failure_result["semantic_failure"] = semantic_failure
+            state["run_result"] = failure_result
             append_event(run_dir, "run_failed", state["run_result"])
             state.setdefault("history", []).append({"kind": "run_failed", "data": state["run_result"]})
             return state
