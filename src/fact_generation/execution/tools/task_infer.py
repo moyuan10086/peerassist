@@ -195,7 +195,62 @@ def _is_training_task(task: dict[str, Any]) -> bool:
     return "-h" not in cmd and "--help" not in cmd
 
 
-def _append_eval_export_tasks(repo_root: Path, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _target_matches_cmd(target: dict[str, Any], cmd: list[str]) -> bool:
+    dataset = _cmd_flag_value(cmd, "-data", "--data").strip().lower()
+    score_func = _cmd_flag_value(cmd, "-score_func", "--score_func").strip().lower()
+    opn = _cmd_flag_value(cmd, "-opn", "--opn").strip().lower()
+    method = str(target.get("method") or target.get("paper_claim") or "").lower()
+    target_dataset = str(target.get("dataset") or "").strip().lower()
+    target_score = str(target.get("scoring_function") or "").strip().lower()
+    if dataset and target_dataset and dataset != target_dataset:
+        return False
+    if score_func and target_score and score_func != target_score:
+        return False
+    if score_func and (score_func not in method) and target_score and score_func != target_score:
+        return False
+    if opn and method and opn not in method:
+        # Keep this soft: many papers omit the opn label in row text.
+        return bool(score_func and (score_func in method or score_func == target_score))
+    return bool(dataset or score_func or method)
+
+
+def _best_target_for_command(
+    paper_metric_targets: list[dict[str, Any]], cmd: list[str]
+) -> dict[str, Any] | None:
+    scored: list[tuple[int, dict[str, Any]]] = []
+    dataset = _cmd_flag_value(cmd, "-data", "--data").strip().lower()
+    score_func = _cmd_flag_value(cmd, "-score_func", "--score_func").strip().lower()
+    opn = _cmd_flag_value(cmd, "-opn", "--opn").strip().lower()
+    for target in paper_metric_targets:
+        if not isinstance(target, dict) or not isinstance(target.get("metrics"), dict):
+            continue
+        if not _target_matches_cmd(target, cmd):
+            continue
+        score = len(target.get("metrics") or {})
+        tds = str(target.get("dataset") or "").strip().lower()
+        tsf = str(target.get("scoring_function") or "").strip().lower()
+        method = str(target.get("method") or "").lower()
+        if dataset and tds == dataset:
+            score += 4
+        if score_func and tsf == score_func:
+            score += 4
+        if score_func and score_func in method:
+            score += 2
+        if opn and opn in method:
+            score += 2
+        scored.append((score, target))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _append_eval_export_tasks(
+    repo_root: Path,
+    tasks: list[dict[str, Any]],
+    *,
+    paper_metric_targets: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     evaluator = repo_root / "codeeval_eval_ckpt.py"
     if not evaluator.exists():
         return tasks
@@ -217,6 +272,12 @@ def _append_eval_export_tasks(repo_root: Path, tasks: list[dict[str, Any]]) -> l
             continue
 
         out_path = f"./metrics/{task_id}_test.json"
+        target = _best_target_for_command(paper_metric_targets or [], cmd)
+        claims = []
+        if target:
+            claim = str(target.get("paper_claim") or target.get("method") or "").strip()
+            if claim:
+                claims.append(claim)
         out.append(
             {
                 "id": eval_id,
@@ -237,6 +298,9 @@ def _append_eval_export_tasks(repo_root: Path, tasks: list[dict[str, Any]]) -> l
                 "timeout_sec": 1800,
                 "use_conda": True,
                 "artifact_paths": [out_path.lstrip("./")],
+                "expected_metrics": dict(target.get("metrics") or {}) if target else {},
+                "paper_targets": [target] if target else [],
+                "claims": claims,
             }
         )
         existing_ids.add(eval_id)
@@ -250,15 +314,18 @@ def _finalize_tasks(
     readme_example_cmds: list[str],
     datasets: list[str],
     mode: str,
+    paper_metric_targets: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     matrix_tasks = _build_readme_matrix_tasks(readme_example_cmds, datasets, mode=mode)
     if matrix_tasks:
         non_train = [t for t in tasks if isinstance(t, dict) and not _is_training_task(t)]
         tasks = non_train + matrix_tasks
-    return _append_eval_export_tasks(repo_root, tasks)
+    return _append_eval_export_tasks(repo_root, tasks, paper_metric_targets=paper_metric_targets)
 
 
-def infer_tasks_heuristic(repo_root: str, mode: str = "smoke") -> InferResult:
+def infer_tasks_heuristic(
+    repo_root: str, mode: str = "smoke", paper_metric_targets: list[dict[str, Any]] | None = None
+) -> InferResult:
     root = Path(repo_root)
     readme = _read_optional(root / "README.md")
     req = _read_optional(root / "requirements.txt", max_chars=8000)
@@ -332,6 +399,7 @@ def infer_tasks_heuristic(repo_root: str, mode: str = "smoke") -> InferResult:
         readme_example_cmds=examples,
         datasets=datasets,
         mode=mode,
+        paper_metric_targets=paper_metric_targets,
     )
     evidence = {
         "mode": mode,
@@ -340,6 +408,7 @@ def infer_tasks_heuristic(repo_root: str, mode: str = "smoke") -> InferResult:
         "readme_has_content": bool(readme.strip()),
         "requirements_present": bool(req.strip()),
         "readme_example_cmds": examples,
+        "paper_metric_targets_count": len(paper_metric_targets or []),
     }
     return InferResult(tasks=tasks, evidence=evidence)
 
@@ -351,6 +420,7 @@ def infer_tasks_llm(
     cfg_model: str,
     cfg_base_url: str,
     paper_md_excerpt: str = "",
+    paper_metric_targets: list[dict[str, Any]] | None = None,
 ) -> InferResult:
     """
     LLM-assisted task inference. Must be safe by design:
@@ -384,6 +454,7 @@ def infer_tasks_llm(
         "readme_example_commands": readme_example_cmds,
         "readme_md_excerpt": readme,
         "paper_mineru_md_excerpt": (paper_md_excerpt or ""),
+        "paper_metric_targets": paper_metric_targets or [],
         "requirements_txt_excerpt": req,
         "schema": {
             "tasks": [
@@ -395,6 +466,8 @@ def infer_tasks_llm(
                     "timeout_sec": 600,
                     "use_conda": True,
                     "artifact_paths": ["results/**"],
+                    "expected_metrics": {"accuracy": 0.0},
+                    "claims": ["paper claim text this task evaluates"],
                 }
             ],
             "notes": ["string"],
@@ -412,6 +485,8 @@ def infer_tasks_llm(
             "When datasets_detected contains multiple benchmark datasets and the training entrypoint supports a dataset flag, expand reproduction tasks across those datasets unless the README clearly restricts a command to one dataset.",
             "When a training command does not specify a run name but the CLI supports one, add a stable explicit run name so downstream checkpoints/logs can be located deterministically.",
             "If the repo contains a local evaluator/export script that can turn checkpoints into machine-readable metrics, add follow-up eval/export tasks for each training task.",
+            "For metric-export/eval tasks, write or collect JSON artifacts that include dataset, split, method/model/variant, and metric keys matching paper_metric_targets whenever possible.",
+            "Attach expected_metrics and claims to eval/export tasks when paper_metric_targets identify the paper value being tested.",
             "If you emit a pip install task, prefer id='install_deps'. In paper-image Docker mode, avoid redundant runtime installs unless they are clearly necessary beyond image build.",
             "Use {paper_root} in cwd/cmd paths instead of hardcoding absolute paths.",
         ],
@@ -421,14 +496,14 @@ def infer_tasks_llm(
     resp = llm_json(prompt=json.dumps(prompt, ensure_ascii=False), system=system, cfg=llm_cfg)
     if not isinstance(resp, dict) or resp.get("status") == "error":
         # fallback to heuristics if LLM fails
-        hr = infer_tasks_heuristic(repo_root, mode=mode)
+        hr = infer_tasks_heuristic(repo_root, mode=mode, paper_metric_targets=paper_metric_targets)
         ev = dict(hr.evidence)
         ev["llm_error"] = resp
         return InferResult(tasks=hr.tasks, evidence=ev)
 
     tasks = resp.get("tasks")
     if not isinstance(tasks, list):
-        hr = infer_tasks_heuristic(repo_root, mode=mode)
+        hr = infer_tasks_heuristic(repo_root, mode=mode, paper_metric_targets=paper_metric_targets)
         ev = dict(hr.evidence)
         ev["llm_bad_shape"] = resp
         return InferResult(tasks=hr.tasks, evidence=ev)
@@ -443,13 +518,16 @@ def infer_tasks_llm(
             continue
         cleaned.append(t)
 
-    finalized = cleaned or infer_tasks_heuristic(repo_root, mode=mode).tasks
+    finalized = cleaned or infer_tasks_heuristic(
+        repo_root, mode=mode, paper_metric_targets=paper_metric_targets
+    ).tasks
     finalized = _finalize_tasks(
         repo_root=root,
         tasks=finalized,
         readme_example_cmds=readme_example_cmds,
         datasets=datasets,
         mode=mode,
+        paper_metric_targets=paper_metric_targets,
     )
     evidence = {
         "mode": mode,
@@ -457,5 +535,6 @@ def infer_tasks_llm(
         "llm_provider": llm_cfg.provider,
         "llm_model": llm_cfg.model,
         "raw": resp,
+        "paper_metric_targets_count": len(paper_metric_targets or []),
     }
     return InferResult(tasks=finalized, evidence=evidence)

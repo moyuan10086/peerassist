@@ -7,7 +7,7 @@ from typing import Any
 
 from util.fs import ensure_dir, write_text
 
-from .paper_tables import PaperMetricTarget, extract_paper_metric_targets
+from .paper_tables import PaperMetricTarget, _metric_key, extract_paper_metric_targets
 
 
 def _read_json(p: Path) -> dict[str, Any]:
@@ -67,6 +67,8 @@ class AlignmentMatch:
     paper_table_md_path: str
     paper_row_label: str
     paper_scoring_function: str
+    paper_metric_source: str = ""
+    paper_claim: str = ""
 
 
 @dataclass(frozen=True)
@@ -81,29 +83,115 @@ class AlignmentResult:
     notes: list[str]
 
 
+def _tokens(*parts: str) -> set[str]:
+    text = " ".join(str(p or "") for p in parts).lower()
+    return {t for t in re_split_nonword(text) if len(t) >= 3}
+
+
+def re_split_nonword(text: str) -> list[str]:
+    import re
+
+    return re.split(r"[^a-z0-9@]+", text.lower())
+
+
+def _target_from_dict(raw: dict[str, Any]) -> PaperMetricTarget | None:
+    metrics = raw.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    clean_metrics: dict[str, float] = {}
+    for k, v in metrics.items():
+        fv = _as_float(v)
+        if fv is not None:
+            clean_metrics[_metric_key(str(k))] = float(fv)
+    if not clean_metrics:
+        return None
+    return PaperMetricTarget(
+        paper_table_id=str(raw.get("paper_table_id") or raw.get("id") or "baseline_target"),
+        paper_table_md_path=str(raw.get("paper_table_md_path") or raw.get("source") or ""),
+        dataset=str(raw.get("dataset") or ""),
+        scoring_function=str(raw.get("scoring_function") or ""),
+        method=str(raw.get("method") or raw.get("paper_claim") or ""),
+        metrics=clean_metrics,
+        metric_source=str(raw.get("metric_source") or "baseline"),
+        paper_claim=str(raw.get("paper_claim") or ""),
+    )
+
+
 def _pick_target(
-    targets: list[PaperMetricTarget], *, dataset: str, score_func: str, opn: str
+    targets: list[PaperMetricTarget],
+    *,
+    dataset: str,
+    score_func: str,
+    opn: str,
+    run_descriptor: str,
+    metric_keys: set[str],
 ) -> PaperMetricTarget | None:
     ds = _norm(dataset)
     sf = _score_func_display(score_func)
     op = _opn_display(opn)
 
-    cand = [t for t in targets if _norm(t.dataset) == ds and _norm(t.scoring_function) == _norm(sf)]
-    if not cand:
+    scored: list[tuple[float, PaperMetricTarget]] = []
+    run_tokens = _tokens(dataset, score_func, opn, run_descriptor)
+    for target in targets:
+        target_metric_keys = set(target.metrics)
+        overlap = metric_keys & target_metric_keys
+        if not overlap:
+            continue
+        score = float(len(overlap) * 5)
+
+        target_ds = _norm(target.dataset)
+        if ds and target_ds:
+            if ds == target_ds:
+                score += 6
+            else:
+                score -= 8
+        elif ds or target_ds:
+            score += 0.5
+
+        if sf and target.scoring_function and _norm(sf) == _norm(target.scoring_function):
+            score += 5
+        if op and op.lower() in _norm(target.method):
+            score += 3
+        if score_func and _norm(score_func) in _norm(target.method):
+            score += 2
+
+        target_tokens = _tokens(target.dataset, target.scoring_function, target.method, target.paper_claim)
+        token_overlap = run_tokens & target_tokens
+        score += min(4, len(token_overlap))
+
+        # Avoid arbitrary matching when there is no shared context at all and
+        # the paper has many candidate targets.
+        has_context = bool((ds and target_ds and ds == target_ds) or token_overlap or target.scoring_function)
+        if not has_context and len(targets) > 1:
+            continue
+
+        if score > 0:
+            scored.append((score, target))
+
+    if not scored:
         return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
 
-    # Prefer method rows that mention compgcn and the opn (Sub/Mult/Corr).
-    # This is intentionally conservative for COMPGCN.
-    preferred = [t for t in cand if ("compgcn" in _norm(t.method)) and (op.lower() in _norm(t.method))]
-    if preferred:
-        return preferred[0]
 
-    # Fallback: any row mentioning opn.
-    op_only = [t for t in cand if op.lower() in _norm(t.method)]
-    if op_only:
-        return op_only[0]
-
-    return cand[0] if cand else None
+def _scale_pair(metric: str, observed: float, expected: float) -> tuple[float, float]:
+    key = _metric_key(metric)
+    bounded = key in {
+        "mrr",
+        "accuracy",
+        "f1",
+        "precision",
+        "recall",
+        "auc",
+        "map",
+        "ndcg",
+    } or key.startswith("hits@")
+    if bounded:
+        if observed <= 1.0 and 1.0 < expected <= 100.0:
+            return observed, expected / 100.0
+        if expected <= 1.0 and 1.0 < observed <= 100.0:
+            return observed / 100.0, expected
+    return observed, expected
 
 
 def _calc_delta(obs: dict[str, float], exp: dict[str, float]) -> dict[str, float]:
@@ -112,7 +200,8 @@ def _calc_delta(obs: dict[str, float], exp: dict[str, float]) -> dict[str, float
         obs_v = obs.get(k)
         if obs_v is None:
             continue
-        out[k] = float(obs_v) - float(exp_v)
+        scaled_obs, scaled_exp = _scale_pair(k, float(obs_v), float(exp_v))
+        out[k] = scaled_obs - scaled_exp
     return out
 
 
@@ -125,23 +214,89 @@ def _within_tol(delta: dict[str, float], tol: AlignmentTolerance) -> dict[str, b
             out[k] = abs(d) <= float(tol.hits_at_10)
         elif k == "mr":
             out[k] = abs(d) <= float(tol.mr)
+        elif k.startswith("hits@") or k in {"accuracy", "f1", "precision", "recall", "auc", "map", "ndcg"}:
+            out[k] = abs(d) <= 0.02
+        elif k in {"bleu", "rouge-l", "rouge-1", "rouge-2"}:
+            out[k] = abs(d) <= (0.02 if abs(d) <= 1 else 2.0)
+        elif k in {"mae", "rmse", "mse", "perplexity", "loss", "fid"}:
+            out[k] = abs(d) <= max(0.05, abs(d) * 0.0 + 0.05)
         else:
-            # Unknown metric keys: treat as not checked.
-            out[k] = False
+            out[k] = abs(d) <= 0.05
     return out
 
 
-def _extract_run_metrics_row(d: dict[str, Any]) -> tuple[str, str, str, str, dict[str, float]]:
+def _is_metric_key(key: str) -> bool:
+    canonical = _metric_key(key)
+    return canonical in {
+        "mrr",
+        "mr",
+        "accuracy",
+        "error_rate",
+        "f1",
+        "precision",
+        "recall",
+        "auc",
+        "bleu",
+        "rouge-l",
+        "rouge-1",
+        "rouge-2",
+        "map",
+        "ndcg",
+        "mae",
+        "rmse",
+        "mse",
+        "perplexity",
+        "loss",
+        "fid",
+        "inception_score",
+        "r2",
+    } or canonical.startswith("hits@")
+
+
+def _collect_metrics(d: dict[str, Any]) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+
+    def add_from(obj: dict[str, Any]) -> None:
+        for k, v in obj.items():
+            if isinstance(v, bool):
+                continue
+            fv = _as_float(v)
+            if fv is None or not _is_metric_key(str(k)):
+                continue
+            metrics[_metric_key(str(k))] = float(fv)
+
+    add_from(d)
+    nested = d.get("metrics")
+    if isinstance(nested, dict):
+        add_from(nested)
+    return metrics
+
+
+def _extract_run_metrics_row(d: dict[str, Any]) -> tuple[str, str, str, str, str, dict[str, float]]:
     dataset = str(d.get("dataset") or "").strip()
     split = str(d.get("split") or "").strip()
     score_func = str(d.get("score_func") or d.get("scoring_function") or "").strip()
     opn = str(d.get("opn") or "").strip()
-    metrics: dict[str, float] = {}
-    for k in ["mrr", "mr", "hits@10", "hits@3", "hits@1"]:
-        v = _as_float(d.get(k))
-        if v is not None:
-            metrics[k] = float(v)
-    return dataset, split, score_func, opn, metrics
+    descriptor = " ".join(
+        str(d.get(k) or "")
+        for k in ("method", "model", "variant", "name", "task", "claim", "paper_claim")
+    ).strip()
+    claims = d.get("claims")
+    if isinstance(claims, list):
+        descriptor = (descriptor + " " + " ".join(str(x) for x in claims)).strip()
+    return dataset, split, score_func, opn, descriptor, _collect_metrics(d)
+
+
+def _find_metrics_files(artifacts_dir: Path) -> list[Path]:
+    files = []
+    for p in sorted(Path(artifacts_dir).rglob("*.json")):
+        rel = str(p.relative_to(artifacts_dir)).replace("\\", "/")
+        if rel.startswith(("alignment/", "tables/")):
+            continue
+        if p.stat().st_size > 5_000_000:
+            continue
+        files.append(p)
+    return files
 
 
 def run_alignment(
@@ -150,6 +305,7 @@ def run_alignment(
     run_dir: Path,
     artifacts_dir: Path,
     paper_extracted_tables_dir: Path,
+    paper_metric_targets: list[dict[str, Any]] | None = None,
 ) -> AlignmentResult:
     """
     Deterministic alignment between:
@@ -168,10 +324,16 @@ def run_alignment(
     except Exception:
         tol = AlignmentTolerance()
 
-    targets = extract_paper_metric_targets(paper_extracted_tables_dir)
+    targets: list[PaperMetricTarget] = []
+    for raw_target in paper_metric_targets or []:
+        if isinstance(raw_target, dict):
+            target = _target_from_dict(raw_target)
+            if target is not None:
+                targets.append(target)
+    if not targets:
+        targets = extract_paper_metric_targets(paper_extracted_tables_dir)
 
-    metrics_dir = Path(artifacts_dir) / "metrics"
-    metrics_files = sorted(metrics_dir.glob("*.json")) if metrics_dir.exists() else []
+    metrics_files = _find_metrics_files(artifacts_dir)
 
     matches: list[AlignmentMatch] = []
     unmatched: list[str] = []
@@ -185,18 +347,26 @@ def run_alignment(
 
     for mf in metrics_files:
         d = _read_json(mf)
-        dataset, split, score_func, opn, obs_metrics = _extract_run_metrics_row(d)
-        if not (dataset and score_func and opn and obs_metrics):
-            unmatched.append(mf.name)
+        dataset, split, score_func, opn, descriptor, obs_metrics = _extract_run_metrics_row(d)
+        rel_mf = str(mf.relative_to(artifacts_dir)).replace("\\", "/")
+        if not obs_metrics:
+            unmatched.append(rel_mf)
             continue
 
         if not targets:
-            unmatched.append(mf.name)
+            unmatched.append(rel_mf)
             continue
 
-        tgt = _pick_target(targets, dataset=dataset, score_func=score_func, opn=opn)
+        tgt = _pick_target(
+            targets,
+            dataset=dataset,
+            score_func=score_func,
+            opn=opn,
+            run_descriptor=descriptor,
+            metric_keys=set(obs_metrics),
+        )
         if tgt is None:
-            unmatched.append(mf.name)
+            unmatched.append(rel_mf)
             continue
 
         # Compare only overlapping keys (paper table might not include hits@1/hits@3).
@@ -204,7 +374,7 @@ def run_alignment(
         obs = {k: v for k, v in obs_metrics.items() if k in exp}
         # If paper has mrr/mr/hits@10 but run doesn't, keep it unmatched.
         if not obs:
-            unmatched.append(mf.name)
+            unmatched.append(rel_mf)
             continue
 
         delta = _calc_delta(obs, exp)
@@ -213,7 +383,7 @@ def run_alignment(
 
         matches.append(
             AlignmentMatch(
-                run_metrics_file=mf.name,
+                run_metrics_file=rel_mf,
                 dataset=dataset,
                 split=split,
                 score_func=score_func,
@@ -227,6 +397,8 @@ def run_alignment(
                 paper_table_md_path=tgt.paper_table_md_path,
                 paper_row_label=tgt.method,
                 paper_scoring_function=tgt.scoring_function,
+                paper_metric_source=tgt.metric_source,
+                paper_claim=tgt.paper_claim,
             )
         )
 
@@ -246,7 +418,7 @@ def run_alignment(
                 {
                     "type": "paper_alignment_mismatch",
                     "severity_level": sev,
-                    "run_metrics_file": mf.name,
+                    "run_metrics_file": rel_mf,
                     "paper_table_id": tgt.paper_table_id,
                     "paper_row": tgt.method,
                     "paper_scoring_function": tgt.scoring_function,

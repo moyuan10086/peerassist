@@ -71,20 +71,30 @@ def judge_node(state: dict[str, Any]) -> dict[str, Any]:
     # ── Evidence source 2: Paper-table alignment (always, independent of baseline) ──
     try:
         configured_tables_dir = str(cfg.get("paper_extracted_tables_dir") or "").strip()
-        # prepare_node sets cfg['paper_extracted_tables_dir']; if it is missing or
-        # the directory does not exist, skip alignment evidence silently.
+        paper_targets: list[dict[str, Any]] = []
+        if isinstance(baseline_raw, dict) and isinstance(baseline_raw.get("paper_metric_targets"), list):
+            paper_targets = [
+                x for x in baseline_raw.get("paper_metric_targets") or [] if isinstance(x, dict)
+            ]
+        elif isinstance(cfg.get("paper_metric_targets"), list):
+            paper_targets = [x for x in cfg.get("paper_metric_targets") or [] if isinstance(x, dict)]
+
         paper_tables_dir = Path(configured_tables_dir).resolve() if configured_tables_dir else None
-        if paper_tables_dir is not None and paper_tables_dir.exists():
+        can_align = bool(paper_targets) or (paper_tables_dir is not None and paper_tables_dir.exists())
+        if can_align:
             ar = run_alignment(
                 cfg=cfg,
                 run_dir=run_dir,
                 artifacts_dir=artifacts_dir,
-                paper_extracted_tables_dir=paper_tables_dir,
+                paper_extracted_tables_dir=paper_tables_dir or Path(""),
+                paper_metric_targets=paper_targets,
             )
+            alignment_passed = bool(ar.matched > 0 and ar.failed == 0 and run_ok)
             results.append(
                 {
-                    "type": "paper_table_alignment",
-                    "passed": bool(ar.matched > 0 and ar.failed == 0 and run_ok),
+                    "type": "paper_metric_alignment",
+                    "passed": alignment_passed,
+                    "extracted_targets": ar.extracted_targets,
                     "matched": ar.matched,
                     "passed_n": ar.passed,
                     "failed_n": ar.failed,
@@ -93,10 +103,19 @@ def judge_node(state: dict[str, Any]) -> dict[str, Any]:
                     "alignment_artifact": "alignment/alignment.json",
                 }
             )
+            if ar.matched > 0:
+                if ar.failed > 0 or not run_ok:
+                    passed = False
+                elif not checks:
+                    passed = alignment_passed
+            elif (not checks) and ar.extracted_targets > 0:
+                passed = False
     except Exception as e:
         results.append(
-            {"type": "paper_table_alignment", "passed": False, "error": f"{type(e).__name__}: {e}"}
+            {"type": "paper_metric_alignment", "passed": False, "error": f"{type(e).__name__}: {e}"}
         )
+        if not checks:
+            passed = False
 
     # ── Evidence source 3: LLM judge (advisory by default) ──
     llm_mode = _llm_judge_enabled(cfg)
