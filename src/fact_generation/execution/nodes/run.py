@@ -12,6 +12,7 @@ from util.recorder import append_event
 from util.subprocess_runner import persist_command_result, run_command
 
 from ..tools.docker import docker_ensure_paper_image, docker_run_paper_image
+from ..tools.log_metrics import write_task_metric_artifact
 from ..tools.results_tables import maybe_summarize_metrics_tables
 
 
@@ -87,6 +88,30 @@ def _ensure_task_output_roots(*, cwd: str, artifact_paths: list[Any]) -> None:
             (Path(cwd) / first).mkdir(parents=True, exist_ok=True)
         except Exception:
             continue
+
+
+def _task_result_base(task: dict[str, Any], task_id: str) -> dict[str, Any]:
+    """Carry reviewer-facing task metadata into run_result."""
+
+    keep = {
+        "family",
+        "dataset",
+        "split",
+        "eval_split",
+        "method",
+        "model",
+        "variant",
+        "claims",
+        "expected_metrics",
+        "paper_targets",
+        "verification_target",
+        "artifact_paths",
+    }
+    out: dict[str, Any] = {"id": task_id}
+    for key in keep:
+        if key in task:
+            out[key] = task.get(key)
+    return out
 
 
 def run_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -199,7 +224,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             ]
         timeout_sec = int(task.get("timeout_sec") or 3600)
         if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
-            results.append({"id": task_id, "success": False, "error": "invalid_cmd"})
+            item = _task_result_base(task, task_id)
+            item.update({"success": False, "error": "invalid_cmd"})
+            results.append(item)
             continue
 
         # Docker mode always runs inside container; ignore per-task use_conda.
@@ -222,7 +249,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
         if not enabled:
-            results.append({"id": task_id, "success": True, "skipped": True})
+            item = _task_result_base(task, task_id)
+            item.update({"success": True, "skipped": True})
+            results.append(item)
             append_event(
                 run_dir,
                 "task_skipped",
@@ -238,7 +267,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
 
         if dry_run:
             write_text(logs_dir / f"{task_id}_dry_run.txt", f"[DRY RUN] cwd={cwd}\ncmd={' '.join(cmd)}\n")
-            results.append({"id": task_id, "success": True, "dry_run": True})
+            item = _task_result_base(task, task_id)
+            item.update({"success": True, "dry_run": True})
+            results.append(item)
             append_event(
                 run_dir,
                 "task_done",
@@ -257,6 +288,8 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         env["EXECUTION_RUN_DIR"] = str(run_dir)
         env["EXECUTION_ARTIFACT_DIR"] = str(artifacts_dir)
         env["EXECUTION_PAPER_ROOT"] = pr_host
+        env["EXECUTION_ATTEMPT"] = str(attempt)
+        env["EXECUTION_TASK_ID"] = task_id
         env["EXECUTION_OUTPUT_DIR"] = str(run_dir / "outputs" / task_id)
         env["EXECUTION_TASK_OUTPUT_DIR"] = str(run_dir / "outputs" / task_id)
         (run_dir / "outputs" / task_id).mkdir(parents=True, exist_ok=True)
@@ -289,6 +322,11 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 cwd_container=cwd,
                 cmd=cmd,
                 env={
+                    "EXECUTION_RUN_DIR": "/workspace/run_dir",
+                    "EXECUTION_ARTIFACT_DIR": "/workspace/run_dir/artifacts",
+                    "EXECUTION_PAPER_ROOT": "/app",
+                    "EXECUTION_ATTEMPT": str(attempt),
+                    "EXECUTION_TASK_ID": task_id,
                     "EXECUTION_OUTPUT_DIR": f"/workspace/run_dir/outputs/{task_id}",
                     "EXECUTION_TASK_OUTPUT_DIR": f"/workspace/run_dir/outputs/{task_id}",
                 },
@@ -309,15 +347,30 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         stdout_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_stdout.log")
         stderr_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_stderr.log")
         ok = res.returncode == 0
-        results.append(
+        item = _task_result_base(task, task_id)
+        item.update(
             {
-                "id": task_id,
                 "success": ok,
                 "returncode": res.returncode,
                 "duration_sec": res.duration_sec,
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
             }
         )
+        metric_artifact = ""
+        if ok:
+            try:
+                metric_artifact = write_task_metric_artifact(
+                    artifacts_dir=artifacts_dir,
+                    task_id=task_id,
+                    task=task,
+                    stdout=res.stdout or "",
+                    stderr=res.stderr or "",
+                )
+            except Exception:
+                metric_artifact = ""
+        if metric_artifact:
+            item["metric_artifact"] = metric_artifact
+        results.append(item)
         append_event(
             run_dir,
             "task_done",

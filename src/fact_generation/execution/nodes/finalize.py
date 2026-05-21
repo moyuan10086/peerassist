@@ -157,11 +157,11 @@ def _judge_highlights(
             checks = resp.get("suggested_baseline_checks") or []
             if isinstance(checks, list):
                 baseline_checks.extend([c for c in checks if isinstance(c, dict)])
-        elif r.get("type") == "paper_table_alignment":
+        elif r.get("type") in {"paper_table_alignment", "paper_metric_alignment"}:
             matched = int(r.get("matched") or 0)
             failed_n = int(r.get("failed_n") or 0)
             notes.append(
-                f"Deterministic paper-table alignment matched {matched} targets with {failed_n} mismatches."
+                f"Deterministic paper-metric alignment matched {matched} targets with {failed_n} mismatches."
             )
         elif r.get("type") == "reference_check":
             errs = int(r.get("errors") or 0)
@@ -503,7 +503,7 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     # Deterministic actionable hints (no LLM)
     suggestions: list[dict[str, Any]] = []
     # missing baseline => can't conclude
-    if any(
+    if judge.get("passed") is not True and any(
         isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline"
         for r in (judge.get("results") or [])
     ):
@@ -568,8 +568,9 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
                     "report_file": r.get("report_file", ""),
                 }
             )
-        elif rtype == "paper_table_alignment":
+        elif rtype in {"paper_table_alignment", "paper_metric_alignment"}:
             alignment_summary = {
+                "extracted_targets": r.get("extracted_targets", 0),
                 "matched": r.get("matched", 0),
                 "passed": r.get("passed_n", 0),
                 "failed": r.get("failed_n", 0),
@@ -580,16 +581,16 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
 
     # Coverage gaps: identify what's missing for a complete reproduction verdict
     coverage_gaps: list[str] = []
-    if any(
+    if judge.get("passed") is not True and any(
         isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline"
         for r in (judge.get("results") or [])
     ):
-        coverage_gaps.append("No baseline checks defined — cannot verify paper claims quantitatively.")
+        coverage_gaps.append("No baseline checks defined; cannot verify paper claims quantitatively.")
     if not checks_summary:
         coverage_gaps.append("No deterministic checks (file_exists/json_value/csv_agg) were evaluated.")
     if not alignment_summary:
         coverage_gaps.append(
-            "No paper-table alignment data available (paper_extracted/tables/ may be missing)."
+            "No paper-metric alignment data available (paper_extracted/tables/ or metric artifacts may be missing)."
         )
     eval_tasks = [t for t in tasks if _task_family(t) == "eval"]
     if not eval_tasks:

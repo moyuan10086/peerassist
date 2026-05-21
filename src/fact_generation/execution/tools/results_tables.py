@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from util.fs import ensure_dir, write_text
+from .paper_tables import _metric_key
 
 
 def _load_json(p: Path) -> dict[str, Any]:
@@ -19,6 +20,28 @@ def _fmt(x: Any) -> str:
         return f"{float(x):.5f}"
     except Exception:
         return ""
+
+
+def _numeric_metrics(d: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+
+    def add(obj: dict[str, Any]) -> None:
+        for k, v in obj.items():
+            if isinstance(v, bool):
+                continue
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            key = _metric_key(str(k))
+            if key:
+                out[key] = fv
+
+    add(d)
+    nested = d.get("metrics")
+    if isinstance(nested, dict):
+        add(nested)
+    return out
 
 
 def _md_table(rows: list[dict[str, Any]], *, caption: str, columns: list[tuple[str, str]]) -> str:
@@ -77,17 +100,22 @@ def maybe_summarize_metrics_tables(*, cfg: dict, run_dir: Path, artifacts_dir: P
     The JSON schema is intentionally loose. Recommended keys:
     - dataset, split, model/variant fields (e.g., score_func/opn), and numeric metrics (mrr, hits@k, etc.)
     """
-    metrics_dir = artifacts_dir / "metrics"
-    if not metrics_dir.exists():
+    if not artifacts_dir.exists():
         return
 
     rows: list[dict[str, Any]] = []
-    for p in sorted(metrics_dir.glob("*.json")):
+    for p in sorted(artifacts_dir.rglob("*.json")):
+        rel = str(p.relative_to(artifacts_dir)).replace("\\", "/")
+        if rel.startswith(("alignment/", "tables/")):
+            continue
+        if "metrics" not in rel.lower() and p.parent.name.lower() != "metrics":
+            continue
         d = _load_json(p)
         if not d:
             continue
         r = dict(d)
-        r["_file"] = str(p.name)
+        r.update(_numeric_metrics(d))
+        r["_file"] = rel
         rows.append(r)
     if not rows:
         return
@@ -103,15 +131,21 @@ def maybe_summarize_metrics_tables(*, cfg: dict, run_dir: Path, artifacts_dir: P
     ensure_dir(md_dir)
     ensure_dir(html_dir)
 
-    # Prefer common metric columns if present.
-    columns: list[tuple[str, str]] = [
+    common_columns: list[tuple[str, str]] = [
         ("variant", "variant"),
         ("mrr", "mrr"),
         ("mr", "mr"),
         ("hits@1", "hits@1"),
         ("hits@3", "hits@3"),
         ("hits@10", "hits@10"),
+        ("accuracy", "accuracy"),
+        ("f1", "f1"),
+        ("loss", "loss"),
     ]
+    present = {k for row in rows for k in row}
+    columns = [common_columns[0]] + [c for c in common_columns[1:] if c[1] in present]
+    if len(columns) == 1:
+        columns = common_columns[:2]
 
     index: list[dict[str, Any]] = []
     table_idx = 1
@@ -163,5 +197,5 @@ def maybe_summarize_metrics_tables(*, cfg: dict, run_dir: Path, artifacts_dir: P
     )
     write_text(
         artifacts_dir / "tables" / "README.md",
-        "This folder is auto-generated from artifacts/metrics/*.json to make run outputs easy to compare against paper_extracted tables.\n",
+        "This folder is auto-generated from metric-looking JSON artifacts to make run outputs easy to compare against paper_extracted tables.\n",
     )

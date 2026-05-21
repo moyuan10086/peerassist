@@ -66,6 +66,25 @@ def _artifact_json_paths(task: dict[str, Any]) -> list[str]:
     return out
 
 
+def _expected_metric_artifact_paths(task: dict[str, Any]) -> list[str]:
+    task_id = str(task.get("id") or "").strip()
+    paths: list[str] = []
+    explicit = str(task.get("metric_artifact_path") or "").replace("\\", "/").strip()
+    if explicit:
+        paths.append(explicit.lstrip("./"))
+    if task_id:
+        paths.append(f"metrics/{task_id}_metrics.json")
+    paths.extend(_artifact_json_paths(task))
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
 def _merge_auto_baseline(
     *,
     baseline_p: Path,
@@ -96,7 +115,7 @@ def _merge_auto_baseline(
             expected = task.get("expected_metrics")
             if not isinstance(expected, dict) or not expected:
                 continue
-            paths = _artifact_json_paths(task)
+            paths = _expected_metric_artifact_paths(task)
             if not paths:
                 continue
             rel_path = paths[0]
@@ -116,7 +135,9 @@ def _merge_auto_baseline(
                     {
                         "type": "json_value",
                         "path": rel_path,
-                        "json_path": [str(metric)],
+                        "json_path": ["metrics", str(metric)],
+                        "json_path_alternatives": [[str(metric)]],
+                        "metric": str(metric),
                         "expected": value,
                         "tolerance": _default_tolerance(str(metric), value),
                         "claim": f"{task.get('id') or rel_path}: {metric} matches paper target",

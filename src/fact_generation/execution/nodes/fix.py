@@ -298,12 +298,18 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
         "attempt": attempt,
         "paper_root": paper_root,
         "failed_task": failed_task,
+        "failed_task_cmd": run_result.get("failed_task_cmd") or [],
+        "failed_task_cwd": run_result.get("failed_task_cwd") or "",
+        "judge": state.get("judge") or {},
+        "baseline": state.get("baseline") or {},
+        "paper_metric_targets": cfg.get("paper_metric_targets") or [],
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
         "constraints": {
             "prefer_wrapper_env_fixes": True,
             "avoid_core_source_changes": True,
             "must_be_reproducible": True,
+            "primary_goal": "make tasks produce metric artifacts that can be compared against paper_metric_targets",
         },
         "output_schema": {
             "category": "env|deps|path|encoding|data|runtime|other",
@@ -414,7 +420,13 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                     # allow absolute or relative path that resolves to the tasks_path
                     target = Path(path)
                     if not target.is_absolute():
-                        target = Path(paper_root) / target
+                        if Path(path).name == Path(tasks_path).name or path.replace("\\", "/") in {
+                            "tasks.yaml",
+                            "tasks.yml",
+                        }:
+                            target = Path(tasks_path)
+                        else:
+                            target = Path(paper_root) / target
                     if str(target.resolve()).lower() != str(Path(tasks_path).resolve()).lower():
                         continue
                     write_text(target, content)

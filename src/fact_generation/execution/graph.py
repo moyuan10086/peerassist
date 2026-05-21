@@ -96,6 +96,7 @@ def _route_after_prepare(state: State) -> str:
         recoverable = {
             "docker_env_ensure_failed",
             "docker_image_build_failed",
+            "docker_paper_image_build_failed",
         }
         if last_err in recoverable:
             return "fix"
@@ -124,10 +125,21 @@ def _route_after_judge(state: State) -> str:
         return "finalize"
     # If judge is inconclusive, do not enter fix loop.
     results = (state.get("judge", {}) or {}).get("results") or []
-    if isinstance(results, list) and any(
-        isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline" for r in results
-    ):
-        return "finalize"
+    if isinstance(results, list):
+        has_no_baseline = any(
+            isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline" for r in results
+        )
+        alignment_failed = any(
+            isinstance(r, dict)
+            and r.get("type") in {"paper_metric_alignment", "paper_table_alignment"}
+            and (
+                int(r.get("failed_n") or 0) > 0
+                or (int(r.get("extracted_targets") or 0) > 0 and int(r.get("matched") or 0) == 0)
+            )
+            for r in results
+        )
+        if has_no_baseline and not alignment_failed:
+            return "finalize"
     return "fix"
 
 

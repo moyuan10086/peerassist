@@ -30,33 +30,122 @@ def _read_optional(path: Path, max_chars: int = 12000) -> str:
 
 
 def _guess_entrypoints(repo_root: Path) -> list[str]:
-    # Conservative: only look for common top-level scripts.
-    cands = ["launcher.py", "run.py", "eval.py", "main.py", "app.py"]
+    # Prefer common top-level scripts, then shallow train/eval scripts.
+    cands = [
+        "launcher.py",
+        "run.py",
+        "train.py",
+        "eval.py",
+        "evaluate.py",
+        "test.py",
+        "main.py",
+        "app.py",
+    ]
     out: list[str] = []
     for c in cands:
         if (repo_root / c).exists():
             out.append(c)
+    if len(out) < 8:
+        for p in sorted(repo_root.rglob("*.py")):
+            rel = p.relative_to(repo_root)
+            parts = set(rel.parts)
+            if any(x in parts for x in {".git", "__pycache__", "site-packages", "build", "dist"}):
+                continue
+            if len(rel.parts) > 3:
+                continue
+            name = p.name.lower()
+            if name in {"train.py", "eval.py", "evaluate.py", "test.py", "run.py", "main.py"}:
+                s = str(rel).replace("\\", "/")
+                if s not in out:
+                    out.append(s)
+            if len(out) >= 12:
+                break
     return out
+
+
+def _clean_command_line(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"^\s*(?:\$|>|#)\s*", "", s)
+    s = re.sub(r"\s+#\s+.*$", "", s).strip()
+    return s
+
+
+def _join_continuations(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    buf = ""
+    for raw in lines:
+        line = _clean_command_line(raw)
+        if not line:
+            continue
+        if buf:
+            buf += " " + line
+        else:
+            buf = line
+        if buf.endswith("\\"):
+            buf = buf[:-1].rstrip()
+            continue
+        out.append(buf.strip())
+        buf = ""
+    if buf:
+        out.append(buf.strip())
+    return out
+
+
+def _looks_like_shell_command(s: str) -> bool:
+    if not s:
+        return False
+    first = s.split(maxsplit=1)[0].lower()
+    if first in {
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "conda",
+        "mamba",
+        "micromamba",
+        "bash",
+        "sh",
+        "make",
+        "pytest",
+        "torchrun",
+        "accelerate",
+    }:
+        return True
+    return first.startswith("./") or first.endswith(".sh")
 
 
 def _extract_example_commands_from_readme(readme_text: str) -> list[str]:
     """
-    Extract a few likely shell commands from README code fences.
-    Keep it best-effort and small; this is only used as hinting.
+    Extract likely shell commands from README code fences and prompt-like lines.
     """
     txt = readme_text or ""
     cmds: list[str] = []
-    # Grab fenced blocks ```bash ... ```
-    for m in re.finditer(r"```(?:bash|sh|shell)\s+([\s\S]*?)```", txt, flags=re.IGNORECASE):
+    for m in re.finditer(r"```(?:bash|sh|shell|console|text|python)?\s*([\s\S]*?)```", txt, flags=re.IGNORECASE):
         block = (m.group(1) or "").strip()
-        for line in block.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
+        for s in _join_continuations(block.splitlines()):
+            if not _looks_like_shell_command(s):
                 continue
             cmds.append(s)
-            if len(cmds) >= 24:
-                return cmds
-    return cmds
+    for raw in txt.splitlines():
+        line = raw.strip()
+        if not re.match(r"^(?:\$|>)\s+", line):
+            continue
+        s = _clean_command_line(line)
+        if _looks_like_shell_command(s):
+            cmds.append(s)
+    out: list[str] = []
+    seen: set[str] = set()
+    for cmd in cmds:
+        key = re.sub(r"\s+", " ", cmd).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+        if len(out) >= 80:
+            break
+    return out
 
 
 def _detect_benchmark_datasets(repo_root: Path) -> list[str]:
@@ -123,6 +212,157 @@ def _safe_id_part(raw: str) -> str:
     return s or "task"
 
 
+def _command_to_argv(raw: str) -> list[str]:
+    s = (raw or "").strip()
+    if not s:
+        return []
+    try:
+        parts = shlex.split(s, posix=True)
+    except Exception:
+        return ["bash", "-lc", s]
+    if not parts:
+        return []
+    shell_features = any(token in s for token in ["&&", "||", "|", ";", "$(", "`", ">", "<"])
+    if shell_features or parts[0] in {"cd", "export"}:
+        return ["bash", "-lc", s]
+    return parts
+
+
+def _command_family(raw: str) -> str:
+    s = (raw or "").lower()
+    if any(tok in s for tok in ["pip install", "conda env", "mamba env", "environment.yml", "requirements.txt"]):
+        return "prepare"
+    if any(tok in s for tok in ["preprocess", "prepare", "download", "convert"]):
+        return "prepare"
+    if any(tok in s for tok in ["eval", "evaluate", "test.py", "predict", "inference"]):
+        return "eval"
+    if any(tok in s for tok in ["train", "finetune", "fit"]) or re.search(r"\b(run|main)\.py\b", s):
+        return "train"
+    if "--help" in s or "-h" in s:
+        return "smoke"
+    return "reproduce"
+
+
+def _target_identity(target: dict[str, Any]) -> str:
+    parts = [
+        str(target.get("dataset") or ""),
+        str(target.get("scoring_function") or ""),
+        str(target.get("method") or target.get("paper_claim") or ""),
+    ]
+    return "_".join(_safe_id_part(p) for p in parts if p).strip("_") or "paper_target"
+
+
+def _target_command_score(target: dict[str, Any], raw_cmd: str) -> int:
+    s = (raw_cmd or "").lower()
+    score = 0
+    dataset = str(target.get("dataset") or "").strip().lower()
+    method = str(target.get("method") or target.get("paper_claim") or "").lower()
+    scoring = str(target.get("scoring_function") or "").strip().lower()
+    if dataset and dataset in s:
+        score += 8
+    if scoring and scoring in s:
+        score += 5
+    for token in re.split(r"[^a-z0-9]+", method):
+        if len(token) >= 4 and token in s:
+            score += 2
+    family = _command_family(raw_cmd)
+    if family == "eval":
+        score += 4
+    elif family == "train":
+        score += 2
+    return score
+
+
+def _target_claims(target: dict[str, Any]) -> list[str]:
+    claim = str(target.get("paper_claim") or target.get("method") or "").strip()
+    return [claim] if claim else []
+
+
+def _build_target_reproduction_tasks(
+    *,
+    readme_example_cmds: list[str],
+    paper_metric_targets: list[dict[str, Any]],
+    mode: str,
+) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, target in enumerate(paper_metric_targets[:24], 1):
+        if not isinstance(target, dict) or not isinstance(target.get("metrics"), dict):
+            continue
+        scored = [
+            (_target_command_score(target, cmd), cmd)
+            for cmd in readme_example_cmds
+            if _command_family(cmd) in {"train", "eval", "reproduce"}
+        ]
+        scored = [(score, cmd) for score, cmd in scored if score > 0]
+        if not scored:
+            continue
+        scored.sort(key=lambda item: item[0], reverse=True)
+        score, raw_cmd = scored[0]
+        ident = _target_identity(target)
+        family = _command_family(raw_cmd)
+        task_id = f"{family}_{ident}"
+        if task_id in seen:
+            task_id = f"{task_id}_{idx}"
+        seen.add(task_id)
+        tasks.append(
+            {
+                "id": task_id,
+                "family": family,
+                "enabled": mode == "full",
+                "cwd": "{paper_root}",
+                "cmd": _command_to_argv(raw_cmd),
+                "timeout_sec": 86400 if family == "train" else 7200,
+                "use_conda": True,
+                "artifact_paths": ["metrics/**", "results/**", "outputs/**", "logs/**", "checkpoints/**"],
+                "metric_artifact_path": f"metrics/{task_id}_metrics.json",
+                "dataset": str(target.get("dataset") or ""),
+                "method": str(target.get("method") or ""),
+                "split": "test" if family == "eval" else "",
+                "expected_metrics": dict(target.get("metrics") or {}),
+                "paper_targets": [target],
+                "claims": _target_claims(target),
+                "verification_target": {
+                    "source": "paper_metric_target",
+                    "match_score": score,
+                    "paper_table_id": target.get("paper_table_id", ""),
+                },
+            }
+        )
+    return tasks
+
+
+def _build_generic_readme_tasks(readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, raw in enumerate(readme_example_cmds, 1):
+        family = _command_family(raw)
+        if family not in {"prepare", "train", "eval", "reproduce"}:
+            continue
+        if family == "prepare" and tasks:
+            # Keep setup small; the default install task already covers requirements.
+            continue
+        task_id = f"{family}_readme_{idx}"
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        tasks.append(
+            {
+                "id": task_id,
+                "family": family,
+                "enabled": bool(mode == "full" or family == "prepare"),
+                "cwd": "{paper_root}",
+                "cmd": _command_to_argv(raw),
+                "timeout_sec": 86400 if family == "train" else 7200,
+                "use_conda": True,
+                "artifact_paths": ["metrics/**", "results/**", "outputs/**", "logs/**", "checkpoints/**"],
+            }
+        )
+        if len(tasks) >= 12:
+            break
+    return tasks
+
+
 def _build_readme_matrix_tasks(
     readme_example_cmds: list[str], datasets: list[str], mode: str
 ) -> list[dict[str, Any]]:
@@ -172,12 +412,15 @@ def _build_readme_matrix_tasks(
             out.append(
                 {
                     "id": task_id,
+                    "family": "train",
                     "enabled": mode == "full",
                     "cwd": "{paper_root}",
                     "cmd": cmd,
                     "timeout_sec": 86400,
                     "use_conda": True,
                     "artifact_paths": ["checkpoints/**", "log/**"],
+                    "dataset": dataset,
+                    "method": run_name,
                 }
             )
             seen_ids.add(task_id)
@@ -281,6 +524,7 @@ def _append_eval_export_tasks(
         out.append(
             {
                 "id": eval_id,
+                "family": "eval",
                 "enabled": bool(task.get("enabled", True)),
                 "cwd": "{paper_root}",
                 "cmd": [
@@ -298,6 +542,10 @@ def _append_eval_export_tasks(
                 "timeout_sec": 1800,
                 "use_conda": True,
                 "artifact_paths": [out_path.lstrip("./")],
+                "metric_artifact_path": f"metrics/{eval_id}_metrics.json",
+                "dataset": str((target or {}).get("dataset") or task.get("dataset") or ""),
+                "method": str((target or {}).get("method") or task.get("method") or run_name),
+                "split": "test",
                 "expected_metrics": dict(target.get("metrics") or {}) if target else {},
                 "paper_targets": [target] if target else [],
                 "claims": claims,
@@ -316,9 +564,49 @@ def _finalize_tasks(
     mode: str,
     paper_metric_targets: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        cmd = task.get("cmd")
+        raw = " ".join(cmd) if isinstance(cmd, list) else ""
+        task.setdefault("family", _command_family(raw))
+        target = None
+        if isinstance(cmd, list):
+            target = _best_target_for_command(paper_metric_targets or [], cmd)
+        if target and not task.get("expected_metrics"):
+            task["expected_metrics"] = dict(target.get("metrics") or {})
+            task["paper_targets"] = [target]
+            task["claims"] = _target_claims(target)
+            task["dataset"] = str(target.get("dataset") or task.get("dataset") or "")
+            task["method"] = str(target.get("method") or task.get("method") or "")
+            task["metric_artifact_path"] = f"metrics/{task.get('id')}_metrics.json"
+
+    existing_ids = {str(t.get("id") or "") for t in tasks if isinstance(t, dict)}
+    target_tasks = _build_target_reproduction_tasks(
+        readme_example_cmds=readme_example_cmds,
+        paper_metric_targets=paper_metric_targets or [],
+        mode=mode,
+    )
+    for task in target_tasks:
+        tid = str(task.get("id") or "")
+        if tid and tid not in existing_ids:
+            tasks.append(task)
+            existing_ids.add(tid)
+
+    generic_tasks = _build_generic_readme_tasks(readme_example_cmds, mode=mode)
+    for task in generic_tasks:
+        tid = str(task.get("id") or "")
+        if tid and tid not in existing_ids:
+            tasks.append(task)
+            existing_ids.add(tid)
+
     matrix_tasks = _build_readme_matrix_tasks(readme_example_cmds, datasets, mode=mode)
     if matrix_tasks:
-        non_train = [t for t in tasks if isinstance(t, dict) and not _is_training_task(t)]
+        non_train = [
+            t
+            for t in tasks
+            if isinstance(t, dict) and (not _is_training_task(t) or bool(t.get("expected_metrics")))
+        ]
         tasks = non_train + matrix_tasks
     return _append_eval_export_tasks(repo_root, tasks, paper_metric_targets=paper_metric_targets)
 
@@ -337,6 +625,7 @@ def infer_tasks_heuristic(
     tasks: list[dict[str, Any]] = [
         {
             "id": "install_deps",
+            "family": "prepare",
             "cwd": "{paper_root}",
             "cmd": ["python", "-m", "pip", "install", "-r", "{paper_root}/requirements.txt"],
             "timeout_sec": 3600,
@@ -351,6 +640,7 @@ def infer_tasks_heuristic(
         tasks.append(
             {
                 "id": "repo_smoke",
+                "family": "smoke",
                 "cwd": "{paper_root}",
                 "cmd": ["python", "-c", "import os; print('cwd=', os.getcwd()); print('ok')"],
                 "timeout_sec": 60,
@@ -361,6 +651,7 @@ def infer_tasks_heuristic(
         tasks.append(
             {
                 "id": "repo_smoke",
+                "family": "smoke",
                 "cwd": "{paper_root}",
                 "cmd": ["python", "-m", "py_compile", ep],
                 "timeout_sec": 600,
@@ -371,6 +662,7 @@ def infer_tasks_heuristic(
             tasks.append(
                 {
                     "id": "eval_smoke",
+                    "family": "smoke",
                     "cwd": "{paper_root}",
                     "cmd": ["python", "-m", "py_compile", "eval.py"],
                     "timeout_sec": 600,
@@ -384,6 +676,7 @@ def infer_tasks_heuristic(
             tasks.append(
                 {
                     "id": "readme_example_1",
+                    "family": _command_family(examples[0]),
                     "enabled": False,
                     "cwd": "{paper_root}",
                     "cmd": ["cmd", "/c", examples[0]] if os.name == "nt" else ["bash", "-lc", examples[0]],
@@ -460,13 +753,19 @@ def infer_tasks_llm(
             "tasks": [
                 {
                     "id": "string",
+                    "family": "prepare|smoke|train|eval|reproduce",
                     "enabled": True,
                     "cwd": "{paper_root}",
                     "cmd": ["python", "run.py", "--help"],
                     "timeout_sec": 600,
                     "use_conda": True,
                     "artifact_paths": ["results/**"],
+                    "metric_artifact_path": "metrics/task_id_metrics.json",
+                    "dataset": "dataset name when known",
+                    "method": "method/model/variant being evaluated",
+                    "split": "train|validation|test when known",
                     "expected_metrics": {"accuracy": 0.0},
+                    "paper_targets": [{"paper_table_id": "string", "metrics": {"accuracy": 0.0}}],
                     "claims": ["paper claim text this task evaluates"],
                 }
             ],
@@ -485,6 +784,7 @@ def infer_tasks_llm(
             "When datasets_detected contains multiple benchmark datasets and the training entrypoint supports a dataset flag, expand reproduction tasks across those datasets unless the README clearly restricts a command to one dataset.",
             "When a training command does not specify a run name but the CLI supports one, add a stable explicit run name so downstream checkpoints/logs can be located deterministically.",
             "If the repo contains a local evaluator/export script that can turn checkpoints into machine-readable metrics, add follow-up eval/export tasks for each training task.",
+            "Every task that tests a paper claim must include family, dataset, method, expected_metrics, claims, paper_targets, and metric_artifact_path.",
             "For metric-export/eval tasks, write or collect JSON artifacts that include dataset, split, method/model/variant, and metric keys matching paper_metric_targets whenever possible.",
             "Attach expected_metrics and claims to eval/export tasks when paper_metric_targets identify the paper value being tested.",
             "If you emit a pip install task, prefer id='install_deps'. In paper-image Docker mode, avoid redundant runtime installs unless they are clearly necessary beyond image build.",

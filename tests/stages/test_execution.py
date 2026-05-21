@@ -14,8 +14,12 @@ import shutil
 import pytest
 
 from fact_generation.execution.nodes.plan import _merge_auto_baseline
+from fact_generation.execution.nodes.run import run_node
 from fact_generation.execution.tools.alignment import run_alignment
+from fact_generation.execution.tools.log_metrics import extract_metrics_from_text, write_task_metric_artifact
+from fact_generation.execution.tools.metrics import compute_check
 from fact_generation.execution.tools.paper_tables import extract_paper_metric_targets
+from fact_generation.execution.tools.task_infer import infer_tasks_heuristic
 
 
 def test_extracts_generic_paper_metric_table(tmp_path) -> None:
@@ -44,6 +48,32 @@ def test_extracts_generic_paper_metric_table(tmp_path) -> None:
     assert target.method == "Ours"
     assert target.metric_source == "generic_table"
     assert target.metrics == {"accuracy": 94.2, "f1": 93.5}
+
+
+def test_extracts_metric_row_paper_table(tmp_path) -> None:
+    tables_dir = tmp_path / "tables"
+    tables_dir.mkdir()
+    (tables_dir / "index.json").write_text(
+        json.dumps([{"id": "table_2", "path_md": "table_2.md"}]),
+        encoding="utf-8",
+    )
+    (tables_dir / "table_2.md").write_text(
+        "\n".join(
+            [
+                "| Metric | Baseline | Ours |",
+                "| --- | --- | --- |",
+                "| Accuracy | 91.0 | 94.2 |",
+                "| F1 | 90.5 | 93.5 |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    targets = extract_paper_metric_targets(tables_dir)
+    ours = next(t for t in targets if t.method == "Ours")
+
+    assert ours.metric_source == "metric_row_table"
+    assert ours.metrics == {"accuracy": 94.2, "f1": 93.5}
 
 
 def test_alignment_matches_nested_metric_json_against_paper_target(tmp_path) -> None:
@@ -85,6 +115,37 @@ def test_alignment_matches_nested_metric_json_against_paper_target(tmp_path) -> 
     assert result.matches[0]["run_metrics_file"] == "text/execution_ours/metrics.json"
 
 
+def test_log_metrics_writes_standard_metric_artifact(tmp_path) -> None:
+    rel = write_task_metric_artifact(
+        artifacts_dir=tmp_path / "artifacts",
+        task_id="eval_ours",
+        task={
+            "family": "eval",
+            "dataset": "CIFAR-10",
+            "method": "Ours",
+            "expected_metrics": {"accuracy": 94.2, "f1": 93.5},
+            "claims": ["Ours reaches 94.2 accuracy and 93.5 F1 on CIFAR-10."],
+        },
+        stdout="Epoch done\naccuracy: 94.3\nf1 = 93.4\n",
+        stderr="",
+    )
+
+    assert rel == "metrics/eval_ours_metrics.json"
+    payload = json.loads((tmp_path / "artifacts" / rel).read_text(encoding="utf-8"))
+    assert payload["dataset"] == "CIFAR-10"
+    assert payload["metrics"] == {"accuracy": 94.3, "f1": 93.4}
+
+
+def test_extract_metrics_from_json_log_line() -> None:
+    metrics = extract_metrics_from_text(
+        'prefix\n{"metrics": {"acc": 0.943, "loss": 0.12}}\n',
+        expected_metrics={"accuracy": 94.2},
+    )
+
+    assert metrics["accuracy"] == 0.943
+    assert metrics["loss"] == 0.12
+
+
 def test_plan_auto_baseline_generates_checks_from_expected_metrics(tmp_path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -123,10 +184,113 @@ def test_plan_auto_baseline_generates_checks_from_expected_metrics(tmp_path) -> 
     assert any(chk["type"] == "file_exists" for chk in checks)
     assert any(
         chk["type"] == "json_value"
-        and chk["path"] == "metrics/eval_ours.json"
-        and chk["json_path"] == ["accuracy"]
+        and chk["path"] == "metrics/eval_ours_metrics.json"
+        and chk["json_path"] == ["metrics", "accuracy"]
         for chk in checks
     )
+
+
+def test_json_value_check_handles_metric_scaling_and_nested_paths(tmp_path) -> None:
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "metrics").mkdir(parents=True)
+    (artifacts / "metrics" / "eval.json").write_text(
+        json.dumps({"metrics": {"accuracy": 0.943}}),
+        encoding="utf-8",
+    )
+
+    result = compute_check(
+        str(artifacts),
+        {
+            "type": "json_value",
+            "path": "metrics/eval.json",
+            "json_path": ["metrics", "accuracy"],
+            "metric": "accuracy",
+            "expected": 94.2,
+            "tolerance": 0.02,
+        },
+    )
+
+    assert result["passed"] is True
+
+
+def test_run_node_extracts_metrics_from_task_logs(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "eval_ours",
+                    "family": "eval",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "-c", "print('accuracy: 94.3')"],
+                    "timeout_sec": 30,
+                    "dataset": "CIFAR-10",
+                    "method": "Ours",
+                    "expected_metrics": {"accuracy": 94.2},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    task_result = out["run_result"]["tasks"][0]
+    assert task_result["metric_artifact"] == "metrics/eval_ours_metrics.json"
+    metrics = json.loads((run_dir / "artifacts" / task_result["metric_artifact"]).read_text())
+    assert metrics["dataset"] == "CIFAR-10"
+    assert metrics["metrics"]["accuracy"] == 94.3
+
+
+def test_heuristic_tasks_use_paper_targets_and_readme_commands(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "\n".join(
+            [
+                "```bash",
+                "python train.py --dataset CIFAR-10 --model ours",
+                "python eval.py --dataset CIFAR-10 --model ours",
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "requirements.txt").write_text("", encoding="utf-8")
+    (tmp_path / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (tmp_path / "eval.py").write_text("print('accuracy: 94.3')\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(
+        str(tmp_path),
+        mode="full",
+        paper_metric_targets=[
+            {
+                "paper_table_id": "table_1",
+                "dataset": "CIFAR-10",
+                "method": "ours",
+                "metrics": {"accuracy": 94.2},
+                "paper_claim": "Ours reaches 94.2 accuracy on CIFAR-10.",
+            }
+        ],
+    )
+
+    target_tasks = [t for t in result.tasks if t.get("expected_metrics") == {"accuracy": 94.2}]
+    assert target_tasks
+    assert any(t.get("family") == "eval" for t in target_tasks)
+    assert all(t.get("metric_artifact_path") for t in target_tasks)
 
 
 @pytest.mark.requires_docker

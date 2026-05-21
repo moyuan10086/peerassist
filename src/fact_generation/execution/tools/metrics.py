@@ -4,12 +4,46 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .paper_tables import _metric_key
+
 
 def _as_float(x: Any) -> float | None:
     try:
         return float(x)
     except Exception:
         return None
+
+
+def _scaled_pair(metric: str, observed: float, expected: float) -> tuple[float, float]:
+    key = _metric_key(metric)
+    bounded = key in {
+        "mrr",
+        "accuracy",
+        "f1",
+        "precision",
+        "recall",
+        "auc",
+        "map",
+        "ndcg",
+    } or key.startswith("hits@")
+    if bounded:
+        if observed <= 1.0 and 1.0 < expected <= 100.0:
+            return observed, expected / 100.0
+        if expected <= 1.0 and 1.0 < observed <= 100.0:
+            return observed / 100.0, expected
+    return observed, expected
+
+
+def _get_json_path(obj: Any, path: list[Any]) -> Any:
+    cur = obj
+    for part in path:
+        if isinstance(part, int) and isinstance(cur, list):
+            cur = cur[part]
+        elif isinstance(part, str) and isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
 
 
 def compute_check(run_artifacts_dir: str, check: dict[str, Any]) -> dict[str, Any]:
@@ -32,16 +66,18 @@ def compute_check(run_artifacts_dir: str, check: dict[str, Any]) -> dict[str, An
         if not artifact_path.exists():
             return {"type": ctype, "path": rel, "passed": False, "error": "missing_file"}
         obj = json.loads(artifact_path.read_text(encoding="utf-8", errors="ignore") or "{}")
-        jp = check.get("json_path") or []
-        cur: Any = obj
+        paths = [check.get("json_path") or []]
+        for alt in check.get("json_path_alternatives") or []:
+            if isinstance(alt, list):
+                paths.append(alt)
         try:
-            for part in jp:
-                if isinstance(part, int) and isinstance(cur, list):
-                    cur = cur[part]
-                elif isinstance(part, str) and isinstance(cur, dict):
-                    cur = cur.get(part)
-                else:
-                    cur = None
+            cur: Any = None
+            used_path: list[Any] = []
+            for jp in paths:
+                cur = _get_json_path(obj, jp if isinstance(jp, list) else [])
+                if cur is not None:
+                    used_path = jp if isinstance(jp, list) else []
+                    break
             expected = check.get("expected")
             tol = float(check.get("tolerance") or 0.0)
             obs_f = _as_float(cur)
@@ -49,10 +85,16 @@ def compute_check(run_artifacts_dir: str, check: dict[str, Any]) -> dict[str, An
             if obs_f is None or exp_f is None:
                 passed = cur == expected
             else:
-                passed = abs(obs_f - exp_f) <= tol
+                metric = str(check.get("metric") or (used_path[-1] if used_path else ""))
+                obs_cmp, exp_cmp = _scaled_pair(metric, obs_f, exp_f)
+                tol_cmp = tol
+                if abs(exp_f) > 1.0 and abs(exp_cmp) <= 1.0 and tol > 1.0:
+                    tol_cmp = tol / 100.0
+                passed = abs(obs_cmp - exp_cmp) <= tol_cmp
             return {
                 "type": ctype,
                 "path": rel,
+                "json_path": used_path,
                 "passed": passed,
                 "observed": cur,
                 "expected": expected,

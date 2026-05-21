@@ -278,6 +278,79 @@ def _extract_generic_markdown_tables(
     return targets
 
 
+def _extract_metric_row_markdown_tables(
+    md_text: str, *, paper_table_id: str, paper_table_md_path: str
+) -> list[PaperMetricTarget]:
+    """Parse result tables where metrics are rows and methods are columns."""
+
+    out: list[PaperMetricTarget] = []
+    for block_idx, block in enumerate(_table_blocks(md_text)):
+        rows = [r for r in block if r and not _is_sep_row(r)]
+        if len(rows) < 2:
+            continue
+        header = rows[0]
+        metric_col = next(
+            (
+                i
+                for i, h in enumerate(header)
+                if _strip_md(h).lower() in {"metric", "metrics", "measure", "score"}
+            ),
+            None,
+        )
+        if metric_col is None:
+            metric_col = 0 if any(_is_metric_header(r[0]) for r in rows[1:] if r) else None
+        if metric_col is None:
+            continue
+
+        dataset_col = next(
+            (i for i, h in enumerate(header) if "dataset" in _strip_md(h).lower()),
+            None,
+        )
+        grouped: dict[tuple[str, str], dict[str, float]] = {}
+        claims: dict[tuple[str, str], list[str]] = {}
+        for row in rows[1:]:
+            if metric_col >= len(row):
+                continue
+            metric = _metric_key(row[metric_col])
+            if not _is_metric_header(row[metric_col]):
+                continue
+            dataset = ""
+            if dataset_col is not None and dataset_col < len(row):
+                dataset = _strip_md(row[dataset_col])
+            for col, method in enumerate(header):
+                if col == metric_col or col == dataset_col:
+                    continue
+                if col >= len(row):
+                    continue
+                value = _to_float(row[col])
+                if value is None:
+                    continue
+                label = _strip_md(method)
+                if not label or _is_metric_header(label):
+                    continue
+                key = (dataset, label)
+                grouped.setdefault(key, {})[metric] = value
+                claims.setdefault(key, []).append(" | ".join(row))
+
+        target_id = paper_table_id or Path(paper_table_md_path).stem
+        for row_idx, ((dataset, method), metrics) in enumerate(grouped.items(), start=1):
+            if not metrics:
+                continue
+            out.append(
+                PaperMetricTarget(
+                    paper_table_id=f"{target_id}:metric_rows{block_idx}:col{row_idx}",
+                    paper_table_md_path=paper_table_md_path,
+                    dataset=dataset,
+                    scoring_function="",
+                    method=method,
+                    metrics=metrics,
+                    metric_source="metric_row_table",
+                    paper_claim="; ".join(claims.get((dataset, method), [])[:4]),
+                )
+            )
+    return out
+
+
 _CLAIM_METRIC_RE = re.compile(
     r"(?P<metric>MRR|MR|H@ ?\d+|Hits?@ ?\d+|Accuracy|Acc\.?|F1|BLEU|ROUGE-?L|ROUGE-?1|ROUGE-?2|AUC|"
     r"MAE|RMSE|MSE|Perplexity|PPL|Loss|FID)"
@@ -534,6 +607,11 @@ def extract_paper_metric_targets(
             )
         out.extend(
             _extract_generic_markdown_tables(
+                md_text, paper_table_id=table_id or p.stem, paper_table_md_path=str(p)
+            )
+        )
+        out.extend(
+            _extract_metric_row_markdown_tables(
                 md_text, paper_table_id=table_id or p.stem, paper_table_md_path=str(p)
             )
         )
