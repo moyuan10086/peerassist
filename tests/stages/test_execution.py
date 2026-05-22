@@ -37,6 +37,7 @@ from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
     _download_anonymous_4open_repo,
     _download_openreview_supplementary,
+    _extended_windows_path,
     _extract_archive_bytes,
     _infer_python_spec_from_repo,
     _normalize_shell_script_line_endings,
@@ -57,6 +58,7 @@ from fact_generation.execution.tools.docker import (
     _docker_build_args,
     _docker_env_passthrough,
     _docker_include_notebook_requirements,
+    _docker_proxy_env,
     _docker_run_user_args,
     _normalize_container_proxy,
     _paper_dockerfile_text,
@@ -945,6 +947,21 @@ def test_docker_build_args_include_pip_index_and_extra_packages(monkeypatch) -> 
     assert "--build-arg EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=numpy scikit-learn" in joined
     assert "--build-arg HTTP_PROXY=http://host.docker.internal:7897" in joined
     assert "--build-arg HTTPS_PROXY=http://host.docker.internal:7897" in joined
+
+
+def test_docker_proxy_env_ignores_stale_inherited_loopback_proxy(monkeypatch) -> None:
+    monkeypatch.setattr("fact_generation.execution.tools.docker._docker_info_field", lambda field: "")
+    monkeypatch.delenv("EXECUTION_DOCKER_HTTP_PROXY", raising=False)
+    monkeypatch.delenv("EXECUTION_DOCKER_HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("EXECUTION_DOCKER_NO_PROXY", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://localhost:1")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    env = _docker_proxy_env({})
+
+    assert "HTTP_PROXY" not in env
+    assert "HTTPS_PROXY" not in env
 
 
 def test_docker_runtime_injects_host_proxy(monkeypatch, tmp_path) -> None:
@@ -1866,6 +1883,31 @@ def test_infer_python_spec_prefers_pyproject_requires_python(tmp_path) -> None:
     assert "numpy>=2.2.6" in req_text
 
 
+def test_collect_repo_requirements_reads_nested_requirements(tmp_path) -> None:
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "requirements.txt").write_text(
+        "\n".join(
+            [
+                "cvxpy==1.7.1",
+                "scikit_learn==1.7.1",
+                "PyYAML==6.0.2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    generated = tmp_path / "outputs"
+    generated.mkdir()
+    (generated / "requirements.txt").write_text("openai==1.0.0\n", encoding="utf-8")
+
+    req_text = _collect_repo_requirements_text(tmp_path)
+
+    assert "cvxpy==1.7.1" in req_text
+    assert "scikit_learn==1.7.1" in req_text
+    assert "PyYAML==6.0.2" in req_text
+    assert "openai==1.0.0" not in req_text
+
+
 def test_environment_yml_informs_python_spec_and_docker_requirements(tmp_path) -> None:
     (tmp_path / "environment.yml").write_text(
         "\n".join(
@@ -2160,6 +2202,45 @@ def test_extract_archive_bytes_flattens_single_root_and_blocks_traversal(tmp_pat
     assert (dest / "README.md").exists()
     assert (dest / "main.py").exists()
     assert not (tmp_path / "escape.txt").exists()
+
+
+def test_extract_archive_bytes_handles_deep_member_paths(tmp_path) -> None:
+    blob_io = BytesIO()
+    deep_dir = "/".join(["deep_path_segment_with_long_name"] * 8)
+    member = f"repo-main/{deep_dir}/trainvalid_lasso_frac0p50_seed101_pred.png"
+    with zipfile.ZipFile(blob_io, "w") as zf:
+        zf.writestr("repo-main/README.md", "# demo\n")
+        zf.writestr(member, b"png")
+
+    dest = tmp_path / "source"
+    manifest = _extract_archive_bytes(blob_io.getvalue(), dest)
+
+    assert manifest["files"] == 2
+    assert (dest / "README.md").exists()
+    if manifest.get("path_rewrites"):
+        long_member = dest / manifest["path_rewrites"][0]["to"]
+    else:
+        long_member = dest / deep_dir / "trainvalid_lasso_frac0p50_seed101_pred.png"
+    with open(_extended_windows_path(long_member), "rb") as fh:
+        assert fh.read() == b"png"
+
+
+def test_extract_archive_bytes_skips_generated_output_dirs(tmp_path) -> None:
+    blob_io = BytesIO()
+    with zipfile.ZipFile(blob_io, "w") as zf:
+        zf.writestr("repo-main/README.md", "# demo\n")
+        zf.writestr("repo-main/code/outputs/custom_sweep/deep/pred.png", b"png")
+        zf.writestr("repo-main/code/logs/train.log", b"log")
+        zf.writestr("repo-main/logs-pv1/run.json", b"log")
+
+    dest = tmp_path / "source"
+    manifest = _extract_archive_bytes(blob_io.getvalue(), dest)
+
+    assert manifest["files"] == 1
+    assert (dest / "README.md").exists()
+    assert not (dest / "code" / "outputs").exists()
+    assert not (dest / "code" / "logs").exists()
+    assert not (dest / "logs-pv1").exists()
 
 
 def test_anonymous_4open_download_prefers_zip_archive(monkeypatch, tmp_path) -> None:

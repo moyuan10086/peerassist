@@ -145,6 +145,8 @@ def _stage_from_error_text(text: str) -> str:
             "importerror",
             "requirements",
             "pip install",
+            "command not found",
+            "is not recognized as an internal",
         ]
     ):
         return "environment"
@@ -172,6 +174,8 @@ def classify_task_failure(task: dict[str, Any]) -> str:
         return ""
     if task.get("skipped"):
         return ""
+    if int(task.get("returncode") or 0) == 127:
+        return "environment"
     semantic = str(task.get("semantic_failure") or "")
     if semantic == "semantic_no_metrics":
         return "metric"
@@ -196,6 +200,8 @@ def classify_run_failure(run_result: dict[str, Any], judge: dict[str, Any]) -> s
         return "access"
     if run_result.get("semantic_failure") == "semantic_no_metrics" or run_result.get("inconclusive"):
         return "metric"
+    if int(run_result.get("returncode") or 0) == 127:
+        return "environment"
     text = json.dumps(run_result, ensure_ascii=False)
     stage = _stage_from_error_text(text)
     if stage != "run":

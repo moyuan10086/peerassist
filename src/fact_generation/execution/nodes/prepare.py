@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -348,6 +349,28 @@ _ROOT_GENERATED_COPY_IGNORED = {
     "logs",
     "log",
 }
+
+_ROOT_GENERATED_COPY_IGNORED_PREFIXES = (
+    "runs-",
+    "runs_",
+    "outputs-",
+    "outputs_",
+    "output-",
+    "output_",
+    "checkpoints-",
+    "checkpoints_",
+    "checkpoint-",
+    "checkpoint_",
+    "logs-",
+    "logs_",
+    "log-",
+    "log_",
+)
+
+
+def _generated_archive_dir_ignored(part: str) -> bool:
+    name = str(part or "").strip().lower()
+    return name in _ROOT_GENERATED_COPY_IGNORED or name.startswith(_ROOT_GENERATED_COPY_IGNORED_PREFIXES)
 
 
 def _robocopy_tree(src: Path, dst: Path) -> bool:
@@ -1026,32 +1049,141 @@ def _safe_archive_member_path(name: str) -> Path | None:
     parts = [p for p in clean.split("/") if p and p not in {".", ".."}]
     if not parts or len(parts) != len([p for p in clean.split("/") if p]):
         return None
+    lowered = [part.lower() for part in parts]
     if any(part == ".DS_Store" or part.startswith("._") for part in parts):
+        return None
+    if any(part in _RECURSIVE_COPY_IGNORED or _generated_archive_dir_ignored(part) for part in lowered):
         return None
     rel = Path(*parts)
     return None if rel.is_absolute() else rel
 
 
-def _flatten_single_extracted_root(dest: Path) -> None:
+def _extended_windows_path(path: Path) -> str:
+    raw = str(path.resolve())
+    if os.name != "nt" or raw.startswith("\\\\?\\"):
+        return raw
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw.lstrip("\\")
+    return "\\\\?\\" + raw
+
+
+def _mkdir_for_archive_member(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        os.makedirs(_extended_windows_path(path), exist_ok=True)
+
+
+def _write_archive_member_bytes(path: Path, data: bytes) -> None:
+    _mkdir_for_archive_member(path.parent)
+    try:
+        path.write_bytes(data)
+    except OSError:
+        with open(_extended_windows_path(path), "wb") as fh:
+            fh.write(data)
+
+
+def _remove_archive_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path, ignore_errors=False)
+    except Exception:
+        if os.name == "nt":
+            shutil.rmtree(_extended_windows_path(path), ignore_errors=True)
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _shorten_archive_component(part: str, max_len: int = 96) -> str:
+    value = str(part or "")
+    if len(value) <= max_len:
+        return value
+    suffix = hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    path = Path(value)
+    ext = path.suffix if 0 < len(path.suffix) <= 16 else ""
+    budget = max(12, max_len - len(suffix) - len(ext) - 1)
+    return f"{value[:budget]}~{suffix}{ext}"
+
+
+def _archive_short_path_limit() -> int:
+    raw = os.getenv("EXECUTION_ARCHIVE_MAX_PATH") or os.getenv("FACTREVIEW_ARCHIVE_MAX_PATH") or "240"
+    try:
+        return max(120, int(raw))
+    except Exception:
+        return 240
+
+
+def _shorten_archive_member_path(dest: Path, rel: Path) -> tuple[Path, str]:
+    """
+    Keep archive extraction usable on Windows run directories with deep names.
+
+    Returns ``(relative_path_to_write, original_relative_path_if_rewritten)``.
+    """
+
+    original = str(rel).replace("\\", "/")
+    force = str(os.getenv("EXECUTION_ARCHIVE_FORCE_SHORT_PATHS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    limit = _archive_short_path_limit()
+    if not force and (os.name != "nt" or len(str(dest / rel)) < limit):
+        return rel, ""
+
+    parts = [_shorten_archive_component(part) for part in rel.parts]
+    shortened = Path(*parts)
+    if len(str(dest / shortened)) < limit:
+        return shortened, original if shortened != rel else ""
+
+    digest = hashlib.sha1(original.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    leaf = _shorten_archive_component(rel.name or "member", max_len=80)
+    prefix = Path(rel.parts[0]) if len(rel.parts) > 1 else Path()
+    shortened = prefix / "__longpaths__" / digest / leaf
+    return shortened, original if shortened != rel else ""
+
+
+def _flatten_single_extracted_root(dest: Path) -> str:
     children = [p for p in dest.iterdir() if p.name != "__MACOSX"]
     if len(children) != 1 or not children[0].is_dir():
-        return
+        return ""
     nested = children[0]
+    nested_name = nested.name
     tmp = dest.with_name(dest.name + "_flat_tmp")
     if tmp.exists():
-        shutil.rmtree(tmp, ignore_errors=True)
+        _remove_archive_tree(tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     for child in nested.iterdir():
-        shutil.move(str(child), str(tmp / child.name))
-    shutil.rmtree(dest, ignore_errors=True)
+        target = tmp / child.name
+        try:
+            shutil.move(str(child), str(target))
+        except OSError:
+            if child.is_dir():
+                _copy_tree(child, target)
+                _remove_archive_tree(child)
+            else:
+                _write_archive_member_bytes(target, child.read_bytes())
+                child.unlink(missing_ok=True)
+    _remove_archive_tree(dest)
     tmp.rename(dest)
+    return nested_name
+
+
+def _strip_flattened_root(path: str, root_name: str) -> str:
+    value = str(path or "").replace("\\", "/")
+    root = str(root_name or "").strip().strip("/")
+    if root and value.startswith(root + "/"):
+        return value[len(root) + 1 :]
+    return value
 
 
 def _extract_archive_bytes(blob: bytes, dest: Path) -> dict[str, Any]:
     if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
+        _remove_archive_tree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     files: list[str] = []
+    path_rewrites: list[dict[str, str]] = []
     stream = BytesIO(blob)
     if zipfile.is_zipfile(stream):
         stream.seek(0)
@@ -1062,10 +1194,12 @@ def _extract_archive_bytes(blob: bytes, dest: Path) -> dict[str, Any]:
                 rel = _safe_archive_member_path(info.filename)
                 if rel is None:
                     continue
+                rel, rewritten_from = _shorten_archive_member_path(dest, rel)
                 out_path = dest / rel
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_bytes(zf.read(info))
+                _write_archive_member_bytes(out_path, zf.read(info))
                 files.append(str(rel).replace("\\", "/"))
+                if rewritten_from:
+                    path_rewrites.append({"from": rewritten_from, "to": str(rel).replace("\\", "/")})
     else:
         stream.seek(0)
         try:
@@ -1079,16 +1213,26 @@ def _extract_archive_bytes(blob: bytes, dest: Path) -> dict[str, Any]:
                     fh = tf.extractfile(member)
                     if fh is None:
                         continue
+                    rel, rewritten_from = _shorten_archive_member_path(dest, rel)
                     out_path = dest / rel
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_bytes(fh.read())
+                    _write_archive_member_bytes(out_path, fh.read())
                     files.append(str(rel).replace("\\", "/"))
+                    if rewritten_from:
+                        path_rewrites.append({"from": rewritten_from, "to": str(rel).replace("\\", "/")})
         except tarfile.TarError as exc:
             raise RuntimeError("archive_format_unsupported") from exc
     if not files:
         raise RuntimeError("archive_no_files_extracted")
-    _flatten_single_extracted_root(dest)
-    return {"files": len(files), "sample_files": files[:20]}
+    flattened_root = _flatten_single_extracted_root(dest)
+    if flattened_root:
+        files = [_strip_flattened_root(path, flattened_root) for path in files]
+        for row in path_rewrites:
+            row["to"] = _strip_flattened_root(row.get("to", ""), flattened_root)
+    manifest = {"files": len(files), "sample_files": files[:20]}
+    if path_rewrites:
+        manifest["path_rewrite_count"] = len(path_rewrites)
+        manifest["path_rewrites"] = path_rewrites[:50]
+    return manifest
 
 
 def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path) -> dict[str, Any]:

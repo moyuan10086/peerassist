@@ -157,6 +157,15 @@ def _host_dependency_installs_allowed(cfg: dict[str, Any]) -> bool:
     )
 
 
+def _llm_source_edits_allowed(cfg: dict[str, Any]) -> bool:
+    return _truthy(
+        cfg.get("allow_llm_source_edits")
+        or os.environ.get("EXECUTION_ALLOW_LLM_SOURCE_EDITS")
+        or os.environ.get("FACTREVIEW_ALLOW_LLM_SOURCE_EDITS")
+        or ""
+    )
+
+
 _HOST_DEP_INSTALL_RE = re.compile(
     r"("
     r"\b(?:python(?:\.exe)?|python3|py)\s+(?:-\d+(?:\.\d+)?\s+)?-m\s+pip\s+"
@@ -176,6 +185,33 @@ _HOST_DEP_INSTALL_RE = re.compile(
 
 def _is_host_dependency_install_command(cmd: list[str]) -> bool:
     return bool(_HOST_DEP_INSTALL_RE.search(_normalized_shell_for_compare(cmd)))
+
+
+_SOURCE_EDIT_COMMAND_RE = re.compile(
+    r"("
+    r"\.write_text\s*\("
+    r"|\.write_bytes\s*\("
+    r"|\bopen\s*\([^)]*,\s*['\"][^'\"]*[wax+]"
+    r"|\bsed\s+-i\b"
+    r"|\bperl\s+-pi\b"
+    r"|\btee\s+"
+    r"|(?<!\d)>{1,2}\s*(?!&)\S+"
+    r")",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_source_edit_command(cmd: list[str]) -> bool:
+    shell = _normalized_shell_for_compare(cmd)
+    if not _SOURCE_EDIT_COMMAND_RE.search(shell):
+        return False
+    path_literals = re.findall(r"(?:pathlib\.)?Path\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", shell)
+    generated_roots = {"artifacts", "metrics", "outputs", "results", "logs", "figs", "figures"}
+    return not (
+        path_literals
+        and all(str(p).replace("\\", "/").split("/", 1)[0] in generated_roots for p in path_literals)
+        and not re.search(r"\b(?:sed\s+-i|perl\s+-pi|tee\s+|open\s*\(|>{1,2}\s*(?!&))", shell, re.IGNORECASE)
+    )
 
 
 def _resolve_max_attempts(state: dict[str, Any], cfg: dict[str, Any]) -> int:
@@ -287,6 +323,22 @@ _PATH_REWRITE_TEXT_SUFFIXES = {
     ".yml",
 }
 
+_PIP_INSTALL_OPTION_TAKES_VALUE = {
+    "-c",
+    "--constraint",
+    "-f",
+    "--find-links",
+    "-i",
+    "--index-url",
+    "--extra-index-url",
+    "--trusted-host",
+    "--index",
+    "-r",
+    "--requirement",
+}
+
+_PIP_BOOTSTRAP_PACKAGES = {"pip", "setuptools", "wheel"}
+
 
 def _rewrite_container_path_leaks(paper_root: str, run_dir: Path) -> list[str]:
     root = Path(paper_root or ".")
@@ -328,6 +380,96 @@ def _pip_package_for_module(module: str) -> str:
     return _MODULE_TO_PIP.get(module) or _MODULE_TO_PIP.get(key) or key.replace("_", "-")
 
 
+def _package_key(package: str) -> str:
+    token = str(package or "").strip()
+    if not token or token.startswith(("-", ".")):
+        return ""
+    token = token.split(";", 1)[0].strip()
+    if token.startswith(("git+", "http://", "https://")):
+        return token.lower()
+    name = re.split(r"\s*(?:==|>=|<=|~=|!=|>|<|\[)", token, maxsplit=1)[0].strip()
+    return name.lower().replace("_", "-")
+
+
+def _package_is_specific(package: str) -> bool:
+    return bool(re.search(r"(?:==|>=|<=|~=|!=|>|<|\[)", str(package or "")))
+
+
+def _split_shell_commands(shell: str) -> list[str]:
+    pieces = re.split(r"\s*(?:&&|\|\||;|\n)\s*", str(shell or ""))
+    return [p.strip() for p in pieces if p.strip()]
+
+
+def _extract_pip_install_requests(cmd: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Extract installable package specs from simple pip-install commands.
+
+    In Docker mode these commands would otherwise mutate only a throwaway
+    container. We convert them into per-paper image build inputs instead.
+    """
+
+    packages: list[str] = []
+    extra_indexes: list[str] = []
+    seen_packages: set[str] = set()
+    seen_indexes: set[str] = set()
+    shell = _to_shell(cmd)
+    for segment in _split_shell_commands(shell):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+        pip_index = -1
+        if Path(tokens[0]).name.lower() in {"pip", "pip3", "pip.exe", "pip3.exe"}:
+            pip_index = 0
+        else:
+            for i in range(len(tokens) - 2):
+                if tokens[i + 1] == "-m" and tokens[i + 2] == "pip":
+                    pip_index = i + 2
+                    break
+        if pip_index < 0:
+            continue
+        try:
+            install_index = tokens.index("install", pip_index + 1)
+        except ValueError:
+            continue
+        i = install_index + 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token in {"-i", "--index-url", "--extra-index-url"} and i + 1 < len(tokens):
+                url = tokens[i + 1].strip()
+                if url and url not in seen_indexes:
+                    extra_indexes.append(url)
+                    seen_indexes.add(url)
+                i += 2
+                continue
+            if token.startswith("--index-url=") or token.startswith("--extra-index-url="):
+                url = token.split("=", 1)[1].strip()
+                if url and url not in seen_indexes:
+                    extra_indexes.append(url)
+                    seen_indexes.add(url)
+                i += 1
+                continue
+            if token in _PIP_INSTALL_OPTION_TAKES_VALUE:
+                i += 2
+                continue
+            if any(token.startswith(prefix + "=") for prefix in _PIP_INSTALL_OPTION_TAKES_VALUE if prefix.startswith("--")):
+                i += 1
+                continue
+            if token.startswith("-"):
+                i += 1
+                continue
+            key = _package_key(token)
+            if not key or key in _PIP_BOOTSTRAP_PACKAGES or key in seen_packages:
+                i += 1
+                continue
+            packages.append(token)
+            seen_packages.add(key)
+            i += 1
+    return packages, extra_indexes
+
+
 def _missing_module_looks_local(paper_root: str, module: str) -> bool:
     root = str(module or "").strip().split(".", 1)[0]
     if not root:
@@ -342,13 +484,76 @@ def _add_extra_pip_package(cfg: dict[str, Any], package: str) -> bool:
         return False
     raw = str(cfg.get("docker_extra_pip_packages") or os.getenv("EXECUTION_DOCKER_EXTRA_PIP_PACKAGES") or "")
     existing = [x.strip() for x in raw.split() if x.strip()]
-    if package in existing:
+    key = _package_key(package)
+    if not key:
+        return False
+    for i, item in enumerate(existing):
+        if _package_key(item) != key:
+            continue
+        if item == package:
+            return False
+        if _package_is_specific(package) and not _package_is_specific(item):
+            existing[i] = package
+            cfg["docker_extra_pip_packages"] = " ".join(existing)
+            cfg.pop("docker_paper_image", None)
+            return True
+        if _package_is_specific(package) and _package_is_specific(item):
+            existing[i] = package
+            cfg["docker_extra_pip_packages"] = " ".join(existing)
+            cfg.pop("docker_paper_image", None)
+            return True
         return False
     existing.append(package)
     cfg["docker_extra_pip_packages"] = " ".join(existing)
     # Force docker_ensure_paper_image to compute a fresh tag from the updated cfg.
     cfg.pop("docker_paper_image", None)
     return True
+
+
+def _add_docker_extra_index_url(cfg: dict[str, Any], url: str) -> bool:
+    value = str(url or "").strip()
+    if not value:
+        return False
+    raw = str(cfg.get("docker_pip_extra_index_url") or os.getenv("EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL") or "")
+    existing = [x.strip() for x in raw.split() if x.strip()]
+    if value in existing:
+        return False
+    existing.append(value)
+    cfg["docker_pip_extra_index_url"] = " ".join(existing)
+    cfg.pop("docker_paper_image", None)
+    return True
+
+
+def _validate_module_in_docker_image(
+    *,
+    cfg: dict[str, Any],
+    image: str,
+    paper_root: str,
+    run_dir: Path,
+    module: str,
+) -> tuple[bool, int, str]:
+    name = str(module or "").strip().split(".", 1)[0]
+    if not name:
+        return True, 0, ""
+    code = (
+        "import importlib.util, sys\n"
+        f"name={name!r}\n"
+        "spec=importlib.util.find_spec(name)\n"
+        "print('module_spec', name, bool(spec))\n"
+        "raise SystemExit(0 if spec else 1)\n"
+    )
+    docker_cmd = docker_run_paper_image(
+        image=image,
+        paper_root_host=str(Path(paper_root).resolve()),
+        run_dir_host=str(run_dir),
+        cwd_container="/app",
+        cmd=["python", "-c", code],
+        env={},
+        env_passthrough=_docker_env_passthrough(cfg),
+        **_docker_runtime_kwargs(cfg),
+    )
+    res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=180)
+    return res.returncode == 0, int(res.returncode), ((res.stdout or "") + (res.stderr or ""))[-800:]
 
 
 def _docker_build_timeout(cfg: dict[str, Any]) -> int:
@@ -535,10 +740,37 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             if ok_img:
-                cfg["docker_paper_image"] = img_or_msg
-                state["config"] = cfg
-                state["status"] = "running"
-                return state
+                import_ok, import_rc, import_tail = _validate_module_in_docker_image(
+                    cfg=cfg,
+                    image=img_or_msg,
+                    paper_root=paper_root,
+                    run_dir=run_dir,
+                    module=missing,
+                )
+                append_event(
+                    run_dir,
+                    "fix_rebuild_image_extra_pip_verify",
+                    {"ok": import_ok, "package": package, "module": missing, "rc": import_rc, "tail": import_tail},
+                )
+                state.setdefault("history", []).append(
+                    {
+                        "kind": "fix_rebuild_image_extra_pip_verify",
+                        "data": {
+                            "ok": import_ok,
+                            "package": package,
+                            "module": missing,
+                            "rc": import_rc,
+                        },
+                    }
+                )
+                if not import_ok:
+                    cfg.pop("docker_paper_image", None)
+                    state["config"] = cfg
+                else:
+                    cfg["docker_paper_image"] = img_or_msg
+                    state["config"] = cfg
+                    state["status"] = "running"
+                    return state
 
     # Deterministic fix: missing torch_scatter.
     # Prefer installing in-container (wheel index), then fallback injection module. Avoid editing paper code.
@@ -721,6 +953,91 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                     state.setdefault("history", []).append(
                         {
                             "kind": "fix_command_skipped_host_dependency_install",
+                            "data": {"cmd": cmd, "failed_task": failed_task},
+                        }
+                    )
+                    continue
+                if not _llm_source_edits_allowed(cfg) and _is_source_edit_command(cmd):
+                    append_event(
+                        run_dir,
+                        "fix_command_skipped_source_edit",
+                        {"cmd": cmd, "failed_task": failed_task},
+                    )
+                    state.setdefault("history", []).append(
+                        {
+                            "kind": "fix_command_skipped_source_edit",
+                            "data": {"cmd": cmd, "failed_task": failed_task},
+                        }
+                    )
+                    continue
+                if docker_enabled and _is_host_dependency_install_command(cmd):
+                    packages, extra_indexes = _extract_pip_install_requests(cmd)
+                    changed = False
+                    for package in packages:
+                        changed = _add_extra_pip_package(cfg, package) or changed
+                    for index_url in extra_indexes:
+                        changed = _add_docker_extra_index_url(cfg, index_url) or changed
+                    if packages:
+                        state["config"] = cfg
+                        ok_img, img_or_msg = docker_ensure_paper_image(
+                            cfg,
+                            paper_key=str(cfg.get("paper_key") or "paper"),
+                            paper_root_host=str(Path(paper_root).resolve()),
+                            python_spec=python_spec,
+                            timeout_sec=_docker_build_timeout(cfg),
+                        )
+                        import_ok = True
+                        import_rc = 0
+                        import_tail = ""
+                        if ok_img and missing:
+                            import_ok, import_rc, import_tail = _validate_module_in_docker_image(
+                                cfg=cfg,
+                                image=img_or_msg,
+                                paper_root=paper_root,
+                                run_dir=run_dir,
+                                module=missing,
+                            )
+                        append_event(
+                            run_dir,
+                            "fix_command_rebuilt_image_dependency_install",
+                            {
+                                "cmd": cmd,
+                                "packages": packages,
+                                "extra_index_urls": extra_indexes,
+                                "changed": changed,
+                                "ok": bool(ok_img and import_ok),
+                                "detail": img_or_msg,
+                                "verify_module": missing or "",
+                                "verify_rc": import_rc,
+                                "verify_tail": import_tail,
+                            },
+                        )
+                        state.setdefault("history", []).append(
+                            {
+                                "kind": "fix_command_rebuilt_image_dependency_install",
+                                "data": {
+                                    "packages": packages,
+                                    "extra_index_urls": extra_indexes,
+                                    "changed": changed,
+                                    "ok": bool(ok_img and import_ok),
+                                    "verify_module": missing or "",
+                                    "verify_rc": import_rc,
+                                },
+                            }
+                        )
+                        if ok_img and import_ok:
+                            cfg["docker_paper_image"] = img_or_msg
+                            state["config"] = cfg
+                            applied_any = True
+                        continue
+                    append_event(
+                        run_dir,
+                        "fix_command_skipped_docker_ephemeral_dependency_install",
+                        {"cmd": cmd, "failed_task": failed_task},
+                    )
+                    state.setdefault("history", []).append(
+                        {
+                            "kind": "fix_command_skipped_docker_ephemeral_dependency_install",
                             "data": {"cmd": cmd, "failed_task": failed_task},
                         }
                     )

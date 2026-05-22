@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import warnings
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -261,10 +262,30 @@ def _dedupe_requirement_lines(lines: list[str]) -> list[str]:
 def _read_requirement_file_lines(repo_root: Path) -> list[str]:
     lines: list[str] = []
     candidates = []
+    skip_parts = {
+        ".git",
+        ".venv",
+        "__pycache__",
+        "deployment",
+        "outputs",
+        "logs",
+        "results",
+        "checkpoints",
+        "simpletransformers",
+        "transformers",
+        "venv",
+    }
     for pattern in ("requirements*.txt", "environment*.yml", "environment*.yaml"):
-        candidates.extend(repo_root.glob(pattern))
-    for path in sorted(candidates):
-        if path.parent != repo_root or not path.is_file():
+        candidates.extend(repo_root.rglob(pattern))
+    unique = {p.resolve(): p for p in candidates if p.exists()}
+    for path in sorted(unique.values(), key=lambda p: (len(p.relative_to(repo_root).parts), p.as_posix()))[:40]:
+        if not path.is_file():
+            continue
+        try:
+            rel_parts = [part.lower() for part in path.relative_to(repo_root).parts]
+        except Exception:
+            rel_parts = [part.lower() for part in path.parts]
+        if any(part in skip_parts for part in rel_parts):
             continue
         text = _read_text_limited(path)
         for raw in text.splitlines():
@@ -896,6 +917,40 @@ def _cfg_or_env(cfg: dict, cfg_key: str, *env_names: str) -> str:
     return ""
 
 
+def _inherited_proxy_usable(value: str) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return True
+    host = (parts.hostname or "").lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    if not parts.port:
+        return True
+    try:
+        with socket.create_connection((host, int(parts.port)), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _cfg_or_proxy_env(cfg: dict, cfg_key: str, explicit_env: str, *inherited_env_names: str) -> str:
+    value = str(cfg.get(cfg_key) or "").strip()
+    if value:
+        return value
+    value = str(os.environ.get(explicit_env) or "").strip()
+    if value:
+        return value
+    for name in inherited_env_names:
+        value = str(os.environ.get(name) or "").strip()
+        if value and _inherited_proxy_usable(value):
+            return value
+    return ""
+
+
 def _docker_info_field(field: str) -> str:
     try:
         r = run_command(docker_cmd(["info", "--format", f"{{{{.{field}}}}}"]), cwd=str(_repo_root()), timeout_sec=15)
@@ -931,21 +986,21 @@ def _normalize_container_proxy(value: str) -> str:
 
 def _docker_proxy_env(cfg: dict | None = None) -> dict[str, str]:
     cfg = cfg or {}
-    http_proxy = _cfg_or_env(
+    http_proxy = _cfg_or_proxy_env(
         cfg,
         "docker_http_proxy",
         "EXECUTION_DOCKER_HTTP_PROXY",
         "HTTP_PROXY",
         "http_proxy",
     )
-    https_proxy = _cfg_or_env(
+    https_proxy = _cfg_or_proxy_env(
         cfg,
         "docker_https_proxy",
         "EXECUTION_DOCKER_HTTPS_PROXY",
         "HTTPS_PROXY",
         "https_proxy",
     )
-    no_proxy = _cfg_or_env(
+    no_proxy = _cfg_or_proxy_env(
         cfg,
         "docker_no_proxy",
         "EXECUTION_DOCKER_NO_PROXY",
@@ -973,6 +1028,14 @@ def _docker_proxy_env(cfg: dict | None = None) -> dict[str, str]:
         out["NO_PROXY"] = no_proxy
         out["no_proxy"] = no_proxy
     return out
+
+
+def _docker_cli_env(cfg: dict) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        env.pop(key, None)
+    env.update(_docker_proxy_env(cfg))
+    return env
 
 
 def _docker_build_args(cfg: dict) -> list[str]:
@@ -1060,7 +1123,8 @@ def docker_ensure_paper_image(
     image = _paper_image_tag(cfg=cfg, paper_key=paper_key, payload=payload)
 
     # Fast path: if image exists, skip build.
-    r = run_command(docker_cmd(["image", "inspect", image]), cwd=str(_repo_root()), timeout_sec=60)
+    docker_env = _docker_cli_env(cfg)
+    r = run_command(docker_cmd(["image", "inspect", image]), cwd=str(_repo_root()), timeout_sec=60, env=docker_env)
     if r.returncode == 0:
         return True, image
 
@@ -1090,6 +1154,7 @@ def docker_ensure_paper_image(
         docker_cmd(["build", *_docker_build_args(cfg), "-t", image, "-f", str(dockerfile_path), "."]),
         cwd=str(pr),
         timeout_sec=timeout_sec,
+        env=docker_env,
     )
     if build.returncode != 0:
         tail = (build.stderr or "")[-1200:].replace("\r", "")
