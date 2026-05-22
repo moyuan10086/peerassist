@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+import subprocess
 import sys
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -19,9 +22,12 @@ from urllib.error import HTTPError
 
 import pytest
 
+from fact_generation.execution.graph import _route_after_judge, is_budget_exhausted
+from fact_generation.execution.nodes.finalize import finalize_node
 from fact_generation.execution.nodes.fix import (
     _container_cwd_to_host,
     _host_dependency_installs_allowed,
+    _install_missing_module_in_run_venv,
     _is_host_dependency_install_command,
     _is_rerun_failed_task_command,
     _missing_module_looks_local,
@@ -34,19 +40,30 @@ from fact_generation.execution.nodes.fix import (
 )
 from fact_generation.execution.nodes.plan import _is_runtime_pip_install_cmd, _merge_auto_baseline
 from fact_generation.execution.nodes.prepare import (
+    DownloadIncompleteError,
+    DownloadLimitError,
+    _anonymous_4open_get_bytes,
     _anonymous_4open_repo_id,
     _download_anonymous_4open_repo,
+    _download_openreview_candidate_source,
     _download_openreview_supplementary,
+    _download_url_bytes,
     _extended_windows_path,
     _extract_archive_bytes,
+    _git_clone_timeout_sec,
     _infer_python_spec_from_repo,
     _normalize_shell_script_line_endings,
     _openreview_candidate_source_urls,
     _openreview_forum_id,
     _patch_api_placeholders_for_env,
+    _remove_tree_best_effort,
+    _source_dir_has_payload,
+    _source_dir_looks_partial_clone,
 )
 from fact_generation.execution.nodes.run import (
+    _disable_embedded_command_timeouts,
     _effective_task_timeout,
+    _repo_container_pythonpath,
     _resolve_host_python_cmd,
     _semantic_metric_failure,
     _semantic_runtime_failure,
@@ -56,6 +73,7 @@ from fact_generation.execution.tools.alignment import run_alignment
 from fact_generation.execution.tools.docker import (
     _collect_repo_requirements_text,
     _docker_build_args,
+    _docker_daemon_unavailable,
     _docker_env_passthrough,
     _docker_include_notebook_requirements,
     _docker_proxy_env,
@@ -64,6 +82,7 @@ from fact_generation.execution.tools.docker import (
     _paper_dockerfile_text,
     _paper_install_deps_py_text,
     _select_python_image,
+    docker_ensure_paper_image,
     docker_run_paper_image,
 )
 from fact_generation.execution.tools.evidence_summary import (
@@ -82,6 +101,41 @@ from fact_generation.execution.tools.task_infer import (
     infer_tasks_heuristic,
 )
 from util.subprocess_runner import CommandResult, run_command
+
+
+def test_paper_budget_is_disabled_unless_explicitly_enabled(monkeypatch) -> None:
+    monkeypatch.delenv("EXECUTION_ENABLE_PAPER_BUDGET", raising=False)
+    state = {"config": {"paper_budget_sec": 1, "t_start_monotonic": time.monotonic() - 10}, "history": []}
+
+    assert is_budget_exhausted(state) is False
+
+    monkeypatch.setenv("EXECUTION_ENABLE_PAPER_BUDGET", "1")
+    assert is_budget_exhausted(state) is True
+    assert state["history"][-1]["kind"] == "budget_exhausted"
+
+
+def test_disable_embedded_notebook_timeouts_when_task_timeout_disabled() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "jupyter",
+        "nbconvert",
+        "--ExecutePreprocessor.timeout=7200",
+        "--ExecutePreprocessor.timeout",
+        "1800",
+        "demo.ipynb",
+    ]
+
+    assert _disable_embedded_command_timeouts(cmd) == [
+        "python",
+        "-m",
+        "jupyter",
+        "nbconvert",
+        "--ExecutePreprocessor.timeout=-1",
+        "--ExecutePreprocessor.timeout",
+        "-1",
+        "demo.ipynb",
+    ]
 
 
 def test_extracts_generic_paper_metric_table(tmp_path) -> None:
@@ -175,6 +229,13 @@ def test_alignment_matches_nested_metric_json_against_paper_target(tmp_path) -> 
     assert result.passed == 1
     assert result.failed == 0
     assert result.matches[0]["run_metrics_file"] == "text/execution_ours/metrics.json"
+    assert len(result.comparisons) == 2
+    accuracy_row = next(r for r in result.comparisons if r["metric"] == "accuracy")
+    assert accuracy_row["dataset"] == "CIFAR-10"
+    assert accuracy_row["paper_value"] == pytest.approx(0.942)
+    assert accuracy_row["observed_value"] == pytest.approx(0.943)
+    assert accuracy_row["delta"] == pytest.approx(0.001)
+    assert accuracy_row["passed"] is True
 
 
 def test_log_metrics_writes_standard_metric_artifact(tmp_path) -> None:
@@ -196,6 +257,130 @@ def test_log_metrics_writes_standard_metric_artifact(tmp_path) -> None:
     payload = json.loads((tmp_path / "artifacts" / rel).read_text(encoding="utf-8"))
     assert payload["dataset"] == "CIFAR-10"
     assert payload["metrics"] == {"accuracy": 94.3, "f1": 93.4}
+
+
+def test_finalize_publishes_alignment_comparisons_to_report_and_facts(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    artifacts_dir = run_dir / "artifacts"
+    alignment_dir = artifacts_dir / "alignment"
+    alignment_dir.mkdir(parents=True)
+    comparison = {
+        "paper_key": "FB15k-237 / TinyMethod / mrr",
+        "observed_key": "metrics/eval_tinymethod_metrics.json / mrr",
+        "metric": "mrr",
+        "dataset": "FB15k-237",
+        "split": "",
+        "paper_value": 0.355,
+        "observed_value": 0.200,
+        "paper_value_raw": 0.355,
+        "observed_value_raw": 0.200,
+        "delta": -0.155,
+        "delta_abs": 0.155,
+        "delta_pct": 43.66,
+        "tolerance": 0.01,
+        "within_tolerance": False,
+        "passed": False,
+        "direction": "higher_is_better",
+        "run_metrics_file": "metrics/eval_tinymethod_metrics.json",
+        "paper_table_id": "table_1",
+        "paper_table_md_path": "table_1.md",
+        "paper_row_label": "TinyMethod",
+        "paper_scoring_function": "",
+    }
+    (alignment_dir / "alignment.json").write_text(
+        json.dumps({"comparisons": [comparison], "matches": [], "critiques": []}),
+        encoding="utf-8",
+    )
+    (alignment_dir / "alignment.md").write_text("# alignment\n", encoding="utf-8")
+
+    state = {
+        "config": {"paper_key": "tinymethod"},
+        "run": {
+            "id": "demo_run",
+            "dir": str(run_dir),
+            "artifacts_dir": str(artifacts_dir),
+        },
+        "status": "running",
+        "attempt": 0,
+        "run_result": {
+            "success": True,
+            "tasks": [
+                {
+                    "id": "eval_tinymethod",
+                    "family": "eval",
+                    "dataset": "FB15k-237",
+                    "success": True,
+                    "metric_artifact": "metrics/eval_tinymethod_metrics.json",
+                }
+            ],
+        },
+        "judge": {
+            "passed": False,
+            "results": [
+                {
+                    "type": "paper_metric_alignment",
+                    "extracted_targets": 1,
+                    "matched": 1,
+                    "passed_n": 0,
+                    "failed_n": 1,
+                    "comparisons_n": 1,
+                    "alignment_artifact": "alignment/alignment.json",
+                }
+            ],
+        },
+    }
+
+    finalize_node(state)
+
+    assert state["status"] == "deviated"
+    report = (run_dir / "reports" / "demo_run.md").read_text(encoding="utf-8")
+    assert "- Final status: `deviated`" in report
+    assert "Paper-vs-Run Metric Comparison" in report
+    assert "| FB15k-237 | mrr | 0.355 | 0.2 | -0.155 | 0.01 | FAIL |" in report
+    assert "paper=0.355, reproduced=0.2, delta=-0.155 (outside tolerance)" in report
+
+    facts = json.loads((run_dir / "review_pack" / "facts.json").read_text(encoding="utf-8"))
+    assert facts["status"] == "deviated"
+    assert facts["alignment_summary"]["comparisons"] == 1
+    assert facts["alignment_comparisons"][0]["paper_value"] == pytest.approx(0.355)
+    assert facts["alignment_comparisons"][0]["observed_value"] == pytest.approx(0.2)
+
+    evidence = json.loads((artifacts_dir / "execution_evidence.json").read_text(encoding="utf-8"))
+    assert evidence["funnel"]["alignment_comparisons"] == 1
+
+
+def test_route_after_judge_finalizes_matched_metric_mismatch() -> None:
+    mismatch_state = {
+        "status": "running",
+        "judge": {
+            "passed": False,
+            "results": [
+                {
+                    "type": "paper_metric_alignment",
+                    "extracted_targets": 1,
+                    "matched": 1,
+                    "failed_n": 1,
+                }
+            ],
+        },
+    }
+    unmatched_state = {
+        "status": "running",
+        "judge": {
+            "passed": False,
+            "results": [
+                {
+                    "type": "paper_metric_alignment",
+                    "extracted_targets": 1,
+                    "matched": 0,
+                    "failed_n": 0,
+                }
+            ],
+        },
+    }
+
+    assert _route_after_judge(mismatch_state) == "finalize"
+    assert _route_after_judge(unmatched_state) == "fix"
 
 
 def test_extract_metrics_from_json_log_line() -> None:
@@ -326,6 +511,255 @@ def test_run_node_extracts_metrics_from_task_logs(tmp_path) -> None:
     assert metrics["metrics"]["accuracy"] == 94.3
 
 
+def test_run_node_adds_common_src_dir_to_pythonpath(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    (paper_root / "src" / "agent").mkdir(parents=True)
+    (paper_root / "src" / "agent" / "__init__.py").write_text("VALUE = 7\n", encoding="utf-8")
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "import_src",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "-c", "import agent; print(agent.VALUE)"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    task_result = out["run_result"]["tasks"][0]
+    assert task_result["success"] is True
+    assert Path(task_result["logs"]["stdout"]).read_text(encoding="utf-8").strip() == "7"
+
+
+def test_run_node_uses_utf8_python_stdio_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "unicode_logs",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": [
+                        "python",
+                        "-c",
+                        (
+                            "import os; "
+                            "print(os.environ.get('PYTHONIOENCODING')); "
+                            "print(os.environ.get('PYTHONUTF8')); "
+                            "print('✅ ok')"
+                        ),
+                    ],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    task_result = out["run_result"]["tasks"][0]
+    lines = Path(task_result["logs"]["stdout"]).read_text(encoding="utf-8").splitlines()
+    assert task_result["success"] is True
+    assert lines == ["utf-8", "1", "✅ ok"]
+
+
+def test_run_node_prepends_host_venv_to_path_for_shell_tasks(tmp_path, monkeypatch) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    venv_dir = tmp_path / "short-venv"
+    venv_python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    run_dir.mkdir()
+    (run_dir / ".host_venv_path").write_text(str(venv_dir), encoding="utf-8")
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "shell_python",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": ["bash", "-lc", "python -c 'print(1)'"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        captured["cmd"] = cmd
+        captured["env"] = dict(env or {})
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="1\n", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.run.run_command", fake_run_command)
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    assert out["run_result"]["tasks"][0]["success"] is True
+    env = captured["env"]
+    assert isinstance(env, dict)
+    path_head = str(env["PATH"]).split(os.pathsep)[0]
+    assert Path(path_head) == venv_python.parent.resolve()
+    assert env["VIRTUAL_ENV"] == str(venv_dir.resolve())
+
+
+def test_run_node_adds_run_local_jupyter_path_for_host_tasks(tmp_path, monkeypatch) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    kernel_prefix = run_dir / "jupyter"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "notebook",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": ["jupyter", "nbconvert", "--execute", "demo.ipynb"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        captured["env"] = dict(env or {})
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.run.run_command", fake_run_command)
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+            "jupyter_kernel_prefix": str(kernel_prefix),
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    assert out["run_result"]["tasks"][0]["success"] is True
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert str(env["JUPYTER_PATH"]).split(os.pathsep)[0] == str((kernel_prefix / "share" / "jupyter").resolve())
+
+
+def test_run_node_uses_extra_pythonpath_dirs_for_deep_repo_packages(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    package = paper_root / "experiments" / "lib" / "deepagent"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 11\n", encoding="utf-8")
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "import_deep",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "-c", "import deepagent; print(deepagent.VALUE)"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+            "extra_pythonpath_dirs": ["experiments/lib"],
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    task_result = out["run_result"]["tasks"][0]
+    assert task_result["success"] is True
+    assert Path(task_result["logs"]["stdout"]).read_text(encoding="utf-8").strip() == "11"
+
+
+def test_docker_pythonpath_includes_extra_repo_dirs(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    (paper_root / "experiments" / "lib").mkdir(parents=True)
+
+    value = _repo_container_pythonpath(paper_root, {"extra_pythonpath_dirs": ["experiments/lib"]})
+
+    assert value == "/app:/app/experiments/lib"
+
+
 def test_run_node_accepts_eval_metric_without_expected_metrics(tmp_path) -> None:
     paper_root = tmp_path / "repo"
     paper_root.mkdir()
@@ -408,6 +842,58 @@ def test_run_node_marks_eval_without_metrics_inconclusive(tmp_path) -> None:
     assert out["run_result"]["inconclusive"] is True
     assert out["run_result"]["semantic_failure"] == "semantic_no_metrics"
     assert out["run_result"]["tasks"][0]["semantic_failure"] == "semantic_no_metrics"
+
+
+def test_run_node_archives_failure_artifacts_before_fix(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "smoke_imports",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": [
+                        "python",
+                        "-c",
+                        (
+                            "import pathlib; "
+                            "pathlib.Path('metrics').mkdir(exist_ok=True); "
+                            "pathlib.Path('metrics/smoke_imports_metrics.json').write_text('{\"success\": false}'); "
+                            "raise SystemExit(1)"
+                        ),
+                    ],
+                    "timeout_sec": 30,
+                    "artifact_paths": ["metrics/smoke_imports_metrics.json"],
+                    "metric_artifact_path": "metrics/smoke_imports_metrics.json",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    task = out["run_result"]["tasks"][0]
+    assert out["status"] == "failed"
+    assert task["metric_artifact"] == "metrics/smoke_imports_metrics.json"
+    assert (run_dir / "artifacts" / "metrics" / "smoke_imports_metrics.json").exists()
+    assert "artifacts_archived" in (run_dir / "issues.jsonl").read_text(encoding="utf-8")
 
 
 def test_run_node_accepts_smoke_task_even_if_llm_labeled_eval(tmp_path) -> None:
@@ -793,6 +1279,337 @@ def test_no_docker_python_tasks_use_current_interpreter() -> None:
     assert resolved[1:] == ["-V"]
 
 
+def test_no_docker_python_tasks_prefer_run_local_venv(tmp_path) -> None:
+    venv_python = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    resolved = _resolve_host_python_cmd(["python", "-V"], run_dir=tmp_path)
+
+    assert resolved == [str(venv_python), "-V"]
+
+
+def test_no_docker_python_tasks_prefer_marked_short_venv(tmp_path) -> None:
+    short_venv = tmp_path / "fv"
+    venv_python = short_venv / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    (tmp_path / ".host_venv_path").write_text(str(short_venv), encoding="utf-8")
+
+    resolved = _resolve_host_python_cmd(["python", "-V"], run_dir=tmp_path)
+
+    assert resolved == [str(venv_python), "-V"]
+
+
+def test_no_docker_uv_run_python_falls_back_when_uv_missing(monkeypatch) -> None:
+    monkeypatch.setattr("fact_generation.execution.nodes.run.shutil.which", lambda name: None)
+
+    resolved = _resolve_host_python_cmd(["uv", "run", "python", "-c", "print('ok')"])
+
+    assert resolved == [sys.executable, "-c", "print('ok')"]
+
+
+def test_no_docker_host_venv_install_prefers_surgical_package(tmp_path, monkeypatch) -> None:
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    (paper_root / "pyproject.toml").write_text("[project]\nname = 'paper'\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / "logs"
+    short_root = tmp_path / "short_venvs"
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        calls.append(cmd)
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="ok", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.fix.run_command", fake_run_command)
+
+    ok = _install_missing_module_in_run_venv(
+        cfg={"host_venv_dir": str(short_root)},
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        paper_root=str(paper_root),
+        module="litellm",
+        attempt=1,
+    )
+
+    venv_dir = Path((run_dir / ".host_venv_path").read_text(encoding="utf-8").strip())
+    venv_python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    assert ok is True
+    assert venv_dir.parent == short_root
+    assert [sys.executable, "-m", "venv", str(venv_dir)] in calls
+    assert [str(venv_python), "-m", "pip", "install", "litellm"] in calls
+    assert [str(venv_python), "-m", "pip", "install", "-e", "."] not in calls
+
+
+def test_no_docker_host_venv_install_follows_nested_verify_missing_module(tmp_path, monkeypatch) -> None:
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / "logs"
+    calls: list[list[str]] = []
+    verify_count = 0
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        nonlocal verify_count
+        calls.append(cmd)
+        shell = " ".join(str(x) for x in cmd)
+        if "-c import dgl" in shell:
+            verify_count += 1
+            if verify_count == 1:
+                return CommandResult(
+                    cmd=cmd,
+                    cwd=cwd,
+                    returncode=1,
+                    stdout="",
+                    stderr="ModuleNotFoundError: No module named 'packaging'",
+                    duration_sec=0.01,
+                )
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="ok", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.fix.run_command", fake_run_command)
+
+    ok = _install_missing_module_in_run_venv(
+        cfg={},
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        paper_root=str(paper_root),
+        module="dgl",
+        attempt=1,
+    )
+
+    venv_python = run_dir / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    assert ok is True
+    assert [str(venv_python), "-m", "pip", "install", "dgl"] in calls
+    assert [str(venv_python), "-m", "pip", "install", "packaging"] in calls
+
+
+def test_no_docker_host_venv_install_repairs_dgl_graphbolt_torch_pin(tmp_path, monkeypatch) -> None:
+    paper_root = tmp_path / "paper"
+    graphbolt = paper_root / "site-packages" / "dgl" / "graphbolt"
+    graphbolt.mkdir(parents=True)
+    for version in ["2.1.0", "2.2.2", "2.3.0"]:
+        (graphbolt / f"graphbolt_pytorch_{version}.dll").write_text("", encoding="utf-8")
+    missing_dll = graphbolt / "graphbolt_pytorch_2.12.0.dll"
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / "logs"
+    calls: list[list[str]] = []
+    verify_count = 0
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        nonlocal verify_count
+        calls.append(cmd)
+        shell = " ".join(str(x) for x in cmd)
+        if "-c import dgl" in shell:
+            verify_count += 1
+            if verify_count == 1:
+                return CommandResult(
+                    cmd=cmd,
+                    cwd=cwd,
+                    returncode=1,
+                    stdout="",
+                    stderr=f"FileNotFoundError: Cannot find DGL C++ graphbolt library at {missing_dll}",
+                    duration_sec=0.01,
+                )
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="ok", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.fix.run_command", fake_run_command)
+
+    ok = _install_missing_module_in_run_venv(
+        cfg={},
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        paper_root=str(paper_root),
+        module="dgl",
+        attempt=1,
+    )
+
+    venv_python = run_dir / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    assert ok is True
+    assert [str(venv_python), "-m", "pip", "install", "torch==2.3.0"] in calls
+    issues = (run_dir / "issues.jsonl").read_text(encoding="utf-8")
+    assert "fix_host_venv_compat_package" in issues
+
+
+def test_no_docker_host_venv_installs_pyg_native_package_from_torch_wheel_index(tmp_path, monkeypatch) -> None:
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / "logs"
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        calls.append(cmd)
+        shell = " ".join(str(x) for x in cmd)
+        if "import torch" in shell and "torch.version" in shell:
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="2.3.0\n\n", stderr="", duration_sec=0.01)
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="ok", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.fix.run_command", fake_run_command)
+
+    ok = _install_missing_module_in_run_venv(
+        cfg={},
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        paper_root=str(paper_root),
+        module="torch_sparse",
+        attempt=1,
+    )
+
+    venv_python = run_dir / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
+        "python.exe" if os.name == "nt" else "python"
+    )
+    assert ok is True
+    assert [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "--no-build-isolation",
+        "torch-sparse",
+        "-f",
+        "https://data.pyg.org/whl/torch-2.3.0+cpu.html",
+    ] in calls
+
+
+def test_no_docker_host_venv_creates_case_variant_import_alias(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / "logs"
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    short_root = tmp_path / "venvs"
+    calls: list[list[str]] = []
+    alias_created = False
+
+    def fake_run_command(cmd, cwd, timeout_sec=None, env=None):
+        nonlocal alias_created
+        calls.append(list(cmd))
+        text = " ".join(str(part) for part in cmd)
+        if len(cmd) >= 3 and cmd[1:3] == ["-m", "venv"]:
+            venv_dir = Path(cmd[-1])
+            venv_python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / (
+                "python.exe" if os.name == "nt" else "python"
+            )
+            venv_python.parent.mkdir(parents=True, exist_ok=True)
+            venv_python.write_text("", encoding="utf-8")
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="", stderr="", duration_sec=0.01)
+        if "-m pip install pyDOE2" in text:
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="installed pyDOE2", stderr="", duration_sec=0.01)
+        if "alias_name='pyDOE'" in text or 'alias_name="pyDOE"' in text:
+            assert "pyDOE2" in text
+            alias_created = True
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="alias", stderr="", duration_sec=0.01)
+        if "import pyDOE" in text or "importlib.import_module(mod)" in text:
+            if alias_created:
+                return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="module_ok", stderr="", duration_sec=0.01)
+            return CommandResult(
+                cmd=cmd,
+                cwd=cwd,
+                returncode=1,
+                stdout="",
+                stderr="ModuleNotFoundError: No module named 'pyDOE'",
+                duration_sec=0.01,
+            )
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.fix.run_command", fake_run_command)
+
+    ok = _install_missing_module_in_run_venv(
+        cfg={"host_venv_dir": str(short_root)},
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        paper_root=str(paper_root),
+        module="pyDOE",
+        context_modules=["pyDOE"],
+        attempt=1,
+    )
+
+    assert ok is True
+    assert alias_created is True
+    issues = (run_dir / "issues.jsonl").read_text(encoding="utf-8")
+    assert "fix_host_venv_case_variant_alias" in issues
+
+
+def test_no_docker_host_venv_adds_imp_shim_for_pydoe2_on_python312(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / "logs"
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    calls: list[list[str]] = []
+    alias_created = False
+    imp_shim_created = False
+
+    def fake_run_command(cmd, cwd, timeout_sec=None, env=None):
+        nonlocal alias_created, imp_shim_created
+        calls.append(list(cmd))
+        text = " ".join(str(part) for part in cmd)
+        if len(cmd) >= 3 and cmd[1:3] == ["-m", "venv"]:
+            venv_dir = Path(cmd[-1])
+            venv_python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / (
+                "python.exe" if os.name == "nt" else "python"
+            )
+            venv_python.parent.mkdir(parents=True, exist_ok=True)
+            venv_python.write_text("", encoding="utf-8")
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="", stderr="", duration_sec=0.01)
+        if "-m pip install pyDOE2" in text:
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="installed pyDOE2", stderr="", duration_sec=0.01)
+        if "target_candidates=['pyDOE2', 'pydoe']" in text:
+            alias_created = True
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="alias", stderr="", duration_sec=0.01)
+        if "module='imp'" in text and "target.write_text" in text:
+            imp_shim_created = True
+            return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="shim", stderr="", duration_sec=0.01)
+        if "import pyDOE" in text or "importlib.import_module(mod)" in text:
+            if alias_created and imp_shim_created:
+                return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="module_ok", stderr="", duration_sec=0.01)
+            if alias_created:
+                return CommandResult(
+                    cmd=cmd,
+                    cwd=cwd,
+                    returncode=1,
+                    stdout="",
+                    stderr="ModuleNotFoundError: No module named 'imp'",
+                    duration_sec=0.01,
+                )
+            return CommandResult(
+                cmd=cmd,
+                cwd=cwd,
+                returncode=1,
+                stdout="",
+                stderr="ModuleNotFoundError: No module named 'pyDOE'",
+                duration_sec=0.01,
+            )
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.fix.run_command", fake_run_command)
+
+    ok = _install_missing_module_in_run_venv(
+        cfg={},
+        run_dir=run_dir,
+        logs_dir=logs_dir,
+        paper_root=str(paper_root),
+        module="pyDOE",
+        context_modules=["pyDOE"],
+        attempt=1,
+    )
+
+    assert ok is True
+    assert alias_created is True
+    assert imp_shim_created is True
+    issues = (run_dir / "issues.jsonl").read_text(encoding="utf-8")
+    assert "fix_host_venv_stdlib_compat_shim" in issues
+
+
 def test_no_docker_windows_bash_prefers_explicit_path(tmp_path, monkeypatch) -> None:
     fake_bash = tmp_path / "bash.exe"
     fake_bash.write_text("", encoding="utf-8")
@@ -922,6 +1739,28 @@ def test_run_command_reports_timeout_explicitly(tmp_path) -> None:
     assert "TimeoutExpired" in result.stderr
 
 
+def test_run_command_timeout_kills_windows_child_process_tree(tmp_path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows process-tree behavior")
+    marker = tmp_path / "child_survived.txt"
+    child = (
+        "import pathlib, time; "
+        "time.sleep(5); "
+        f"pathlib.Path({str(marker)!r}).write_text('survived', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "time.sleep(30)"
+    )
+
+    result = run_command([sys.executable, "-c", parent], cwd=str(tmp_path), timeout_sec=1)
+    time.sleep(6)
+
+    assert result.returncode == 124
+    assert not marker.exists()
+
+
 def test_run_command_zero_timeout_means_no_timeout(tmp_path) -> None:
     result = run_command(
         [sys.executable, "-c", "import time; time.sleep(0.1); print('ok')"],
@@ -947,6 +1786,42 @@ def test_docker_build_args_include_pip_index_and_extra_packages(monkeypatch) -> 
     assert "--build-arg EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=numpy scikit-learn" in joined
     assert "--build-arg HTTP_PROXY=http://host.docker.internal:7897" in joined
     assert "--build-arg HTTPS_PROXY=http://host.docker.internal:7897" in joined
+
+
+def test_docker_daemon_unavailable_detects_windows_engine_pipe() -> None:
+    result = CommandResult(
+        cmd=["docker", "image", "inspect", "paper:test"],
+        cwd=".",
+        returncode=1,
+        stdout="",
+        stderr="open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.",
+        duration_sec=0.1,
+    )
+
+    assert _docker_daemon_unavailable(result)
+
+
+def test_docker_ensure_paper_image_fails_fast_when_daemon_unavailable(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        calls.append(cmd)
+        return CommandResult(
+            cmd=cmd,
+            cwd=cwd,
+            returncode=1,
+            stdout="",
+            stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            duration_sec=0.1,
+        )
+
+    monkeypatch.setattr("fact_generation.execution.tools.docker.run_command", fake_run_command)
+    ok, detail = docker_ensure_paper_image({}, paper_key="demo", paper_root_host=str(tmp_path), python_spec="3.11")
+
+    assert ok is False
+    assert detail.startswith("docker_daemon_unavailable:")
+    assert calls
+    assert not any("build" in cmd for cmd in calls)
 
 
 def test_docker_proxy_env_ignores_stale_inherited_loopback_proxy(monkeypatch) -> None:
@@ -996,6 +1871,8 @@ def test_docker_runtime_maps_explicit_user_and_writable_cache(monkeypatch, tmp_p
     assert "--user 123:456" in joined
     assert "-e PYTHONPATH=/app" in joined
     assert "-e PYTHONUNBUFFERED=1" in joined
+    assert "-e PYTHONIOENCODING=utf-8" in joined
+    assert "-e PYTHONUTF8=1" in joined
     assert "-e PYTHONPYCACHEPREFIX=/workspace/run_dir/.pycache" in joined
     assert "-e XDG_CACHE_HOME=/workspace/run_dir/.cache" in joined
 
@@ -1242,6 +2119,21 @@ def test_heuristic_smoke_uses_unique_top_level_python_file(tmp_path) -> None:
     assert task.get("cmd") == ["python", "-m", "py_compile", "dinov2_moe_new.py"]
 
 
+def test_heuristic_import_smoke_ignores_top_level_test_modules(tmp_path) -> None:
+    pkg = tmp_path / "agent"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "test_litellm_agent_pattern.py").write_text(
+        "model = 'bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0'\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    assert "agent" in result.evidence["python_import_targets"]
+    assert "test_litellm_agent_pattern" not in result.evidence["python_import_targets"]
+
+
 def test_heuristic_smoke_imports_library_repo_and_records_notebook(tmp_path) -> None:
     pkg = tmp_path / "iemm"
     pkg.mkdir()
@@ -1274,6 +2166,41 @@ def test_heuristic_smoke_imports_library_repo_and_records_notebook(tmp_path) -> 
     assert result.evidence["notebook_paths"] == ["experiments/very_simple_example.ipynb"]
 
 
+def test_heuristic_full_adds_notebook_dependency_smoke_from_cells(tmp_path) -> None:
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    (experiments / "analysis.ipynb").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "source": [
+                            "import numpy as np\n",
+                            "import pandas as pd\n",
+                            "from matplotlib import pyplot as plt\n",
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("Run `experiments/analysis.ipynb` for results.\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+    task_ids = [task.get("id") for task in result.tasks]
+    dep_idx = task_ids.index("notebook_dependency_smoke")
+    nb_idx = task_ids.index("reproduce_notebook_experiments_analysis_ipynb")
+    dep_task = result.tasks[dep_idx]
+
+    assert dep_idx < nb_idx
+    assert dep_task["enabled"] is True
+    assert dep_task["notebook_import_modules"][:3] == ["nbformat", "nbconvert", "IPython"]
+    assert "pandas" in dep_task["notebook_import_modules"]
+    assert "matplotlib" in dep_task["cmd"][2]
+
+
 def test_heuristic_disables_api_notebook_only_when_api_tasks_disabled(tmp_path, monkeypatch) -> None:
     experiments = tmp_path / "experiments"
     experiments.mkdir()
@@ -1291,6 +2218,14 @@ def test_heuristic_disables_api_notebook_only_when_api_tasks_disabled(tmp_path, 
         encoding="utf-8",
     )
     (tmp_path / "README.md").write_text("Run `experiments/main.ipynb` for the paper results.\n", encoding="utf-8")
+
+    monkeypatch.delenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", raising=False)
+    allowed = infer_tasks_heuristic(str(tmp_path), mode="full")
+    allowed_task = next(t for t in allowed.tasks if t.get("id") == "reproduce_notebook_experiments_main_ipynb")
+    assert allowed_task.get("requires_external_api") is True
+    assert allowed_task.get("enabled") is True
+    assert allowed_task.get("disabled_reason") is None
+
     monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
 
     result = infer_tasks_heuristic(str(tmp_path), mode="full")
@@ -1394,6 +2329,36 @@ def test_static_import_policy_disables_namespace_package_root_import(tmp_path) -
     assert tasks[0]["enabled"] is False
     assert tasks[0]["disabled_reason"] == "namespace_package_root_import_unavailable"
     assert tasks[1]["enabled"] is True
+
+
+def test_static_import_policy_disables_import_module_list_with_top_level_data_load(tmp_path) -> None:
+    (tmp_path / "adv_gnn.py").write_text(
+        "def load_pokec(path):\n"
+        "    return path\n"
+        "dataset = 'pokec_n'\n"
+        "data = load_pokec('/data/private/pokec.csv')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "utils.py").write_text("VALUE = 1\n", encoding="utf-8")
+    tasks = [
+        {
+            "id": "smoke_import_modules",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": [
+                "python",
+                "-c",
+                "import importlib; mods=['adv_gnn','utils']; [importlib.import_module(m) for m in mods]",
+            ],
+        }
+    ]
+
+    _apply_static_import_policy(tasks, tmp_path)
+
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "module_import_has_top_level_side_effects"
+    assert tasks[0]["static_import_issues"]["module"] == "adv_gnn"
+    assert tasks[0]["static_import_issues"]["top_level_calls"] == ["load_pokec"]
 
 
 def test_missing_entrypoint_policy_disables_nonexistent_script(tmp_path) -> None:
@@ -1655,6 +2620,62 @@ def test_external_api_policy_marks_llm_generated_tasks_for_server_queues(tmp_pat
             "disabled_reason": "full_mode_required",
             "cmd": ["bash", "scripts/test/test_pipeline_gpt_4o_resume.sh"],
             "method": "GPT-4o + ORGEval",
+        }
+    ]
+
+    _apply_external_api_policy(tasks, tmp_path)
+
+    assert tasks[0]["requires_external_api"] is True
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "external_api_or_model_server_required"
+
+
+def test_external_api_policy_marks_uv_pytest_file_tasks(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    (tmp_path / "test_litellm_agent_pattern.py").write_text(
+        "\n".join(
+            [
+                "from src.agent import Agent",
+                "model = 'bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0'",
+                "Agent(model)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tasks = [
+        {
+            "id": "smoke_pytest_litellm_agent_pattern",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": ["uv", "run", "python", "-m", "pytest", "test_litellm_agent_pattern.py", "-q"],
+        }
+    ]
+
+    _apply_external_api_policy(tasks, tmp_path)
+
+    assert tasks[0]["requires_external_api"] is True
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "external_api_or_model_server_required"
+
+
+def test_external_api_policy_marks_inline_import_of_api_test_module(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    (tmp_path / "test_litellm_agent_pattern.py").write_text(
+        "MODEL = 'bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0'\n",
+        encoding="utf-8",
+    )
+    tasks = [
+        {
+            "id": "smoke_imports",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": [
+                "uv",
+                "run",
+                "python",
+                "-c",
+                "import importlib; importlib.import_module('test_litellm_agent_pattern')",
+            ],
         }
     ]
 
@@ -2144,6 +3165,31 @@ def test_openreview_download_logs_metadata_when_no_public_supplement(monkeypatch
     assert manifest["content_keys"] == ["abstract", "pdf", "title"]
 
 
+def test_openreview_download_reports_empty_metadata_explicitly(monkeypatch, tmp_path) -> None:
+    def fake_metadata(forum_id: str, timeout_sec: int = 30) -> dict[str, object]:
+        assert forum_id == "F5Cj26wfiu"
+        return {}
+
+    def fake_download(url: str, timeout_sec: int = 180) -> bytes:
+        raise HTTPError(url, 404, "not found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._openreview_note_metadata", fake_metadata)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._download_url_bytes", fake_download)
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    with pytest.raises(RuntimeError, match="openreview_metadata_empty_or_unavailable"):
+        _download_openreview_supplementary(
+            "https://openreview.net/forum?id=F5Cj26wfiu",
+            tmp_path / "source",
+            logs_dir,
+        )
+
+    manifest = json.loads((logs_dir / "openreview_supplementary_metadata.json").read_text(encoding="utf-8"))
+    assert manifest["forum_id"] == "F5Cj26wfiu"
+    assert manifest["content_keys"] == []
+
+
 def test_openreview_download_falls_back_to_candidate_repo(monkeypatch, tmp_path) -> None:
     def fake_metadata(forum_id: str, timeout_sec: int = 30) -> dict[str, object]:
         assert forum_id == "abc123"
@@ -2185,6 +3231,28 @@ def test_openreview_download_falls_back_to_candidate_repo(monkeypatch, tmp_path)
     assert persisted["method"] == "candidate_git_clone"
 
 
+def test_openreview_candidate_clone_timeout_does_not_fallback(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        calls.append(cmd)
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=124, stdout="", stderr="TimeoutExpired", duration_sec=30)
+
+    monkeypatch.setenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC", "30")
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.run_command", fake_run_command)
+
+    with pytest.raises(RuntimeError, match="candidate_git_clone_timeout:30"):
+        _download_openreview_candidate_source(
+            "https://github.com/example/slow-repo",
+            tmp_path / "source",
+            tmp_path,
+            1,
+        )
+
+    assert len(calls) == 1
+    assert "--filter" in calls[0]
+
+
 def test_openreview_download_falls_back_to_direct_attachment_after_timeout(monkeypatch, tmp_path) -> None:
     blob_io = BytesIO()
     with zipfile.ZipFile(blob_io, "w") as zf:
@@ -2219,6 +3287,145 @@ def test_openreview_download_falls_back_to_direct_attachment_after_timeout(monke
     assert manifest["attachment_http_status"] == 0
     assert manifest["candidate_url"] == "https://openreview.net/attachment/direct-hash.zip"
     assert (tmp_path / "source" / "README.md").exists()
+
+
+def test_openreview_download_retries_canonical_attachment_after_transient_error(monkeypatch, tmp_path) -> None:
+    blob_io = BytesIO()
+    with zipfile.ZipFile(blob_io, "w") as zf:
+        zf.writestr("repo-main/README.md", "# demo\n")
+    calls: dict[str, int] = {}
+
+    def fake_metadata(forum_id: str, timeout_sec: int = 30) -> dict[str, object]:
+        assert forum_id == "retry123"
+        return {
+            "supplementary_material": {"value": "/attachment/stale-hash.zip"},
+            "title": {"value": "Paper with transient attachment failure"},
+        }
+
+    def fake_download(url: str, timeout_sec: int = 180) -> bytes:
+        calls[url] = calls.get(url, 0) + 1
+        if "attachment?id=retry123" in url and calls[url] == 1:
+            raise TimeoutError("download_total_timeout")
+        if "attachment?id=retry123" in url:
+            return blob_io.getvalue()
+        raise HTTPError(url, 404, "not found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._openreview_note_metadata", fake_metadata)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._download_url_bytes", fake_download)
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    manifest = _download_openreview_supplementary(
+        "https://openreview.net/forum?id=retry123",
+        tmp_path / "source",
+        logs_dir,
+    )
+
+    assert manifest["method"] == "candidate_archive"
+    assert manifest["attachment_http_status"] == 0
+    assert manifest["candidate_url"] == "https://openreview.net/attachment?id=retry123&name=supplementary_material"
+    assert (tmp_path / "source" / "README.md").exists()
+
+
+def test_download_url_bytes_retries_truncated_content_length(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    class TruncatedResponse:
+        def __init__(self) -> None:
+            self.headers = {"Content-Length": "10"}
+
+        def __enter__(self):
+            self._chunks = [b"12345", b""]
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, n: int) -> bytes:
+            return self._chunks.pop(0)
+
+    def fake_urlopen(req, timeout: int):
+        calls["count"] += 1
+        return TruncatedResponse()
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.urlopen", fake_urlopen)
+
+    with pytest.raises(DownloadIncompleteError, match="download_incomplete"):
+        _download_url_bytes("https://example.com/archive.zip", timeout_sec=30)
+
+    assert calls["count"] == 3
+
+
+def test_download_url_bytes_can_use_curl_backend(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DOWNLOAD_BACKEND", "curl")
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.shutil.which", lambda name: "curl")
+
+    def fake_run(cmd, capture_output, timeout, check):
+        assert "--max-time" in cmd
+        assert cmd[-1] == "https://example.com/archive.zip"
+        assert capture_output is True
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"archive-bytes", stderr=b"")
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.subprocess.run", fake_run)
+
+    assert _download_url_bytes("https://example.com/archive.zip", timeout_sec=30) == b"archive-bytes"
+
+
+def test_anonymous_4open_binary_download_uses_size_guard(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DOWNLOAD_MAX_BYTES", "1000000")
+
+    class LargeResponse:
+        def __init__(self) -> None:
+            self.headers = {"Content-Length": "1000001"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, n: int) -> bytes:
+            return b""
+
+    def fake_urlopen(req, timeout: int):
+        return LargeResponse()
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.urlopen", fake_urlopen)
+
+    with pytest.raises(DownloadLimitError, match="download_too_large"):
+        _anonymous_4open_get_bytes("/api/repo/demo/zip", timeout_sec=30)
+
+
+def test_clone_timeout_uses_safe_default_and_env(monkeypatch) -> None:
+    monkeypatch.delenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC", raising=False)
+    assert _git_clone_timeout_sec({}) == 900
+    monkeypatch.setenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC", "12")
+    assert _git_clone_timeout_sec({}) == 12
+    assert _git_clone_timeout_sec({"git_clone_timeout_sec": 7}) == 7
+
+
+def test_partial_clone_source_dir_is_detected(tmp_path) -> None:
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+
+    assert not _source_dir_has_payload(source)
+    assert _source_dir_looks_partial_clone(source)
+
+    (source / "README.md").write_text("# ok\n", encoding="utf-8")
+    assert _source_dir_has_payload(source)
+    assert not _source_dir_looks_partial_clone(source)
+
+
+def test_remove_tree_best_effort_handles_readonly_git_files(tmp_path) -> None:
+    source = tmp_path / "source"
+    objects = source / ".git" / "objects"
+    objects.mkdir(parents=True)
+    locked = objects / "pack.idx"
+    locked.write_text("idx", encoding="utf-8")
+    locked.chmod(stat.S_IREAD)
+
+    assert _remove_tree_best_effort(source)
+    assert not source.exists()
 
 
 def test_extract_archive_bytes_flattens_single_root_and_blocks_traversal(tmp_path) -> None:
@@ -2366,6 +3573,137 @@ def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:
         (execution_root / "current" / "artifacts" / "execution_evidence.json").read_text(encoding="utf-8")
     )
     assert "node_duration_sec" in evidence["cost"]
+
+
+def test_run_execution_stage_records_pdf_download_failure(monkeypatch, tmp_path) -> None:
+    from fact_generation.execution.stage_runner import run_execution_stage
+
+    def fail_materialize(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError("paper_pdf_download_timeout")
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.materialize_paper_pdf", fail_materialize)
+
+    result = run_execution_stage(
+        run_dir=tmp_path / "run",
+        paper_key="slow_pdf",
+        paper_pdf="https://example.test/slow.pdf",
+        no_pdf_extract=True,
+        no_llm=True,
+        auto_tasks=True,
+        auto_tasks_force=True,
+        docker_enabled=False,
+        max_attempts=0,
+    )
+
+    assert result.status == "failed"
+    execution_root = tmp_path / "run" / "stages" / "fact_generation" / "execution"
+    assert (execution_root / "execution.json").exists()
+    issues = (execution_root / "current" / "issues.jsonl").read_text(encoding="utf-8")
+    assert "paper_pdf_unavailable" in issues
+
+
+def test_run_execution_stage_treats_openreview_forum_as_source_locator(monkeypatch, tmp_path) -> None:
+    from fact_generation.execution import stage_runner
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_orchestrator_async(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"success": False, "exit_status": "skipped", "state": {"run": {"dir": ""}}}
+
+    monkeypatch.setattr(stage_runner, "_run_orchestrator_async", fake_run_orchestrator_async)
+
+    result = stage_runner.run_execution_stage(
+        run_dir=tmp_path / "run",
+        paper_pdf="https://openreview.net/forum?id=YqFLsI44vN",
+        paper_key="bmas",
+        no_pdf_extract=True,
+        no_llm=True,
+        auto_tasks=True,
+        docker_enabled=False,
+        max_attempts=0,
+    )
+
+    assert result.status == "skipped"
+    assert captured["paper_pdf"] == ""
+    assert captured["paper_repo_url"] == "https://openreview.net/forum?id=YqFLsI44vN"
+
+
+def test_run_execution_stage_infers_key_from_source_locator(monkeypatch, tmp_path) -> None:
+    from fact_generation.execution import stage_runner
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_orchestrator_async(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"success": False, "exit_status": "skipped", "state": {"run": {"dir": ""}}}
+
+    monkeypatch.setattr(stage_runner, "_run_orchestrator_async", fake_run_orchestrator_async)
+
+    stage_runner.run_execution_stage(
+        run_dir=tmp_path / "run",
+        paper_pdf="https://openreview.net/forum?id=YqFLsI44vN",
+        no_pdf_extract=True,
+        no_llm=True,
+        auto_tasks=True,
+        docker_enabled=False,
+        max_attempts=0,
+    )
+
+    assert captured["paper_key"] == "YqFLsI44vN"
+
+
+def test_execution_stage_uses_active_dir_when_current_archive_is_locked(monkeypatch, tmp_path) -> None:
+    from fact_generation.execution.stage_runner import _archive_prior_current_dir
+
+    stage_root = tmp_path / "stage"
+    current = stage_root / "current"
+    current.mkdir(parents=True)
+    (current / "README.md").write_text("# stale\n", encoding="utf-8")
+    original_rename = Path.rename
+
+    def locked_rename(self: Path, target: str | Path) -> Path:
+        if self.resolve() == current.resolve():
+            raise PermissionError("locked current")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", locked_rename)
+
+    active = _archive_prior_current_dir(stage_root=stage_root, current_dir=current)
+
+    assert active.name.startswith("current.active.")
+    assert active.exists()
+    assert current.exists()
+    assert list(stage_root.glob("current_archive_warning.*.json"))
+
+
+def test_run_execution_stage_passes_resolved_llm_identity(monkeypatch, tmp_path) -> None:
+    from fact_generation.execution import stage_runner
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_orchestrator_async(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"success": False, "exit_status": "skipped", "state": {"run": {"dir": ""}}}
+
+    monkeypatch.setenv("MODEL_PROVIDER", "openai-codex")
+    monkeypatch.setenv("EXECUTION_OPENAI_MODEL", "gpt-5.5")
+    monkeypatch.setattr(stage_runner, "_run_orchestrator_async", fake_run_orchestrator_async)
+
+    result = stage_runner.run_execution_stage(
+        run_dir=tmp_path / "run",
+        paper_key="identity",
+        paper_pdf="https://example.test/paper.pdf",
+        no_pdf_extract=True,
+        no_llm=False,
+        auto_tasks=True,
+        docker_enabled=False,
+        max_attempts=0,
+    )
+
+    assert result.status == "skipped"
+    assert captured["llm_provider"] == "openai-codex"
+    assert captured["llm_model"] == "gpt-5.5"
 
 
 def test_explicit_source_does_not_load_same_key_demo_fixture(tmp_path) -> None:

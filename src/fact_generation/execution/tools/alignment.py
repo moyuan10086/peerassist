@@ -72,6 +72,35 @@ class AlignmentMatch:
 
 
 @dataclass(frozen=True)
+class AlignmentComparison:
+    """One paper-vs-run metric comparison, flattened for report/audit consumers."""
+
+    paper_key: str
+    observed_key: str
+    metric: str
+    dataset: str
+    split: str
+    paper_value: float
+    observed_value: float
+    paper_value_raw: float
+    observed_value_raw: float
+    delta: float
+    delta_abs: float
+    delta_pct: float
+    tolerance: float
+    within_tolerance: bool
+    passed: bool
+    direction: str
+    run_metrics_file: str
+    paper_table_id: str
+    paper_table_md_path: str
+    paper_row_label: str
+    paper_scoring_function: str
+    paper_metric_source: str = ""
+    paper_claim: str = ""
+
+
+@dataclass(frozen=True)
 class AlignmentResult:
     extracted_targets: int
     matched: int
@@ -80,6 +109,7 @@ class AlignmentResult:
     unmatched_run_metrics: list[str]
     critiques: list[dict[str, Any]]
     matches: list[dict[str, Any]]
+    comparisons: list[dict[str, Any]]
     notes: list[str]
 
 
@@ -225,6 +255,103 @@ def _within_tol(delta: dict[str, float], tol: AlignmentTolerance) -> dict[str, b
     return out
 
 
+def _metric_tolerance(metric: str, tol: AlignmentTolerance, *, delta: float | None = None) -> float:
+    key = _metric_key(metric)
+    if key == "mrr":
+        return float(tol.mrr)
+    if key in {"hits@10", "hits@10."}:
+        return float(tol.hits_at_10)
+    if key == "mr":
+        return float(tol.mr)
+    if key.startswith("hits@") or key in {"accuracy", "f1", "precision", "recall", "auc", "map", "ndcg"}:
+        return 0.02
+    if key in {"bleu", "rouge-l", "rouge-1", "rouge-2"}:
+        try:
+            return 2.0 if delta is not None and abs(float(delta)) > 1 else 0.02
+        except Exception:
+            return 0.02
+    if key in {"mae", "rmse", "mse", "perplexity", "loss", "fid", "error_rate"}:
+        return 0.05
+    return 0.05
+
+
+def _metric_direction(metric: str) -> str:
+    key = _metric_key(metric)
+    lower_is_better = {
+        "mr",
+        "error_rate",
+        "mae",
+        "rmse",
+        "mse",
+        "perplexity",
+        "loss",
+        "fid",
+        "wer",
+        "cer",
+        "latency",
+        "time",
+    }
+    return "lower_is_better" if key in lower_is_better else "higher_is_better"
+
+
+def _comparison_label(*, dataset: str, row_label: str, scoring_function: str, metric: str) -> str:
+    parts = [dataset, row_label, scoring_function, metric]
+    return " / ".join(str(p).strip() for p in parts if str(p).strip())
+
+
+def _build_comparisons_for_match(match: AlignmentMatch, *, tol: AlignmentTolerance) -> list[AlignmentComparison]:
+    rows: list[AlignmentComparison] = []
+    for metric, _delta in sorted(match.delta.items()):
+        if metric not in match.expected or metric not in match.observed:
+            continue
+        paper_raw = float(match.expected[metric])
+        observed_raw = float(match.observed[metric])
+        observed_cmp, paper_cmp = _scale_pair(metric, observed_raw, paper_raw)
+        delta_cmp = float(observed_cmp) - float(paper_cmp)
+        tolerance = _metric_tolerance(metric, tol, delta=delta_cmp)
+        within = bool(match.within_tolerance.get(metric, abs(delta_cmp) <= tolerance))
+        paper_key = _comparison_label(
+            dataset=match.dataset,
+            row_label=match.paper_row_label,
+            scoring_function=match.paper_scoring_function or match.score_func,
+            metric=metric,
+        )
+        observed_key = _comparison_label(
+            dataset=match.dataset,
+            row_label=match.score_func or match.paper_row_label,
+            scoring_function=match.opn,
+            metric=metric,
+        )
+        rows.append(
+            AlignmentComparison(
+                paper_key=paper_key,
+                observed_key=observed_key or f"{match.run_metrics_file}:{metric}",
+                metric=metric,
+                dataset=match.dataset,
+                split=match.split,
+                paper_value=float(paper_cmp),
+                observed_value=float(observed_cmp),
+                paper_value_raw=paper_raw,
+                observed_value_raw=observed_raw,
+                delta=delta_cmp,
+                delta_abs=abs(delta_cmp),
+                delta_pct=(abs(delta_cmp) / max(abs(float(paper_cmp)), 1e-9) * 100.0),
+                tolerance=tolerance,
+                within_tolerance=within,
+                passed=within,
+                direction=_metric_direction(metric),
+                run_metrics_file=match.run_metrics_file,
+                paper_table_id=match.paper_table_id,
+                paper_table_md_path=match.paper_table_md_path,
+                paper_row_label=match.paper_row_label,
+                paper_scoring_function=match.paper_scoring_function,
+                paper_metric_source=match.paper_metric_source,
+                paper_claim=match.paper_claim,
+            )
+        )
+    return rows
+
+
 def _is_metric_key(key: str) -> bool:
     canonical = _metric_key(key)
     return canonical in {
@@ -336,6 +463,7 @@ def run_alignment(
     metrics_files = _find_metrics_files(artifacts_dir)
 
     matches: list[AlignmentMatch] = []
+    comparisons: list[AlignmentComparison] = []
     unmatched: list[str] = []
     notes: list[str] = []
     critiques: list[dict[str, Any]] = []
@@ -381,26 +509,26 @@ def run_alignment(
         within = _within_tol(delta, tol)
         passed = all(within.values()) if within else False
 
-        matches.append(
-            AlignmentMatch(
-                run_metrics_file=rel_mf,
-                dataset=dataset,
-                split=split,
-                score_func=score_func,
-                opn=opn,
-                expected=exp,
-                observed=obs,
-                delta=delta,
-                within_tolerance=within,
-                passed=passed,
-                paper_table_id=tgt.paper_table_id,
-                paper_table_md_path=tgt.paper_table_md_path,
-                paper_row_label=tgt.method,
-                paper_scoring_function=tgt.scoring_function,
-                paper_metric_source=tgt.metric_source,
-                paper_claim=tgt.paper_claim,
-            )
+        match = AlignmentMatch(
+            run_metrics_file=rel_mf,
+            dataset=dataset,
+            split=split,
+            score_func=score_func,
+            opn=opn,
+            expected=exp,
+            observed=obs,
+            delta=delta,
+            within_tolerance=within,
+            passed=passed,
+            paper_table_id=tgt.paper_table_id,
+            paper_table_md_path=tgt.paper_table_md_path,
+            paper_row_label=tgt.method,
+            paper_scoring_function=tgt.scoring_function,
+            paper_metric_source=tgt.metric_source,
+            paper_claim=tgt.paper_claim,
         )
+        matches.append(match)
+        comparisons.extend(_build_comparisons_for_match(match, tol=tol))
 
         if not passed:
             # Severity is heuristic: large deltas on key metrics are "high".
@@ -443,6 +571,7 @@ def run_alignment(
         unmatched_run_metrics=unmatched,
         critiques=critiques,
         matches=[asdict(m) for m in matches],
+        comparisons=[asdict(c) for c in comparisons],
         notes=notes,
     )
 
@@ -479,6 +608,30 @@ def run_alignment(
             md_lines.append(json.dumps(asdict(m), ensure_ascii=False, indent=2))
             md_lines.append("```")
             md_lines.append("")
+
+    if comparisons:
+        md_lines.append("## Metric comparisons")
+        md_lines.append("")
+        md_lines.append("| Dataset | Metric | Paper | Reproduced | Delta | Tolerance | Result |")
+        md_lines.append("| --- | --- | ---: | ---: | ---: | ---: | --- |")
+        for c in comparisons:
+            result_label = "PASS" if c.passed else "FAIL"
+            md_lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        c.dataset or "n/a",
+                        c.metric,
+                        f"{c.paper_value:.6g}",
+                        f"{c.observed_value:.6g}",
+                        f"{c.delta:.6g}",
+                        f"{c.tolerance:.6g}",
+                        result_label,
+                    ]
+                )
+                + " |"
+            )
+        md_lines.append("")
 
     if critiques:
         md_lines.append("## Critiques (mismatches)")

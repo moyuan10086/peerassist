@@ -13,8 +13,43 @@ from common.pipeline_context import (
     read_json_file,
     write_json_file,
 )
+from llm.client import resolve_llm_config
 from schemas.execution import ExecutionExitStatus, ExecutionPayload, ExecutionStageStatus
 from schemas.stage import StageResult
+from util.paper_input import infer_paper_key, is_url
+
+
+def _url_looks_like_pdf_document(url: str) -> bool:
+    raw = str(url or "").strip()
+    if not is_url(raw):
+        return False
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(raw)
+    host = parsed.netloc.lower()
+    path = unquote(parsed.path or "").lower()
+    if host.endswith("arxiv.org") and (path.startswith("/abs/") or path.startswith("/pdf/")):
+        return True
+    return path.endswith(".pdf") or "/pdf/" in path
+
+
+def _url_looks_like_source_locator(url: str) -> bool:
+    raw = str(url or "").strip()
+    if not is_url(raw) or _url_looks_like_pdf_document(raw):
+        return False
+    from urllib.parse import urlparse
+
+    host = urlparse(raw).netloc.lower()
+    return any(
+        token in host
+        for token in (
+            "openreview.net",
+            "github.com",
+            "gitlab.com",
+            "bitbucket.org",
+            "anonymous.4open.science",
+        )
+    )
 
 
 def _load_execution_artifacts(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
@@ -25,27 +60,46 @@ def _load_execution_artifacts(state: dict[str, Any]) -> tuple[dict[str, Any], di
     return summary, alignment, str(run_dir) if run_dir else ""
 
 
-def _archive_prior_current_dir(*, stage_root: Path, current_dir: Path) -> None:
+def _archive_prior_current_dir(*, stage_root: Path, current_dir: Path) -> Path:
     """Set up an empty ``current/`` workspace, preserving the prior attempt
     by renaming it to ``current.<timestamp>`` instead of deleting outright.
     A separate ``history/`` tree (passed as ``run_root`` to the orchestrator)
     holds full per-attempt outputs; this archive only protects the most
-    recent in-place workspace from being silently wiped."""
+    recent in-place workspace from being silently wiped.
+
+    On Windows, an interrupted subprocess can leave transient handles under
+    ``current/.git``. If the archival rename is denied, do not crash the whole
+    stage: run in an isolated active directory and leave a warning artifact.
+    """
     resolved_stage = stage_root.resolve()
     resolved_current = current_dir.resolve()
     if resolved_current.parent != resolved_stage or resolved_current.name != "current":
         raise RuntimeError(f"refusing to reset unexpected execution current dir: {resolved_current}")
+    target_current = resolved_current
     if resolved_current.exists():
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         archived = resolved_current.with_name(f"current.{timestamp}")
-        resolved_current.rename(archived)
-    resolved_current.mkdir(parents=True, exist_ok=True)
+        try:
+            resolved_current.rename(archived)
+        except OSError as exc:
+            target_current = resolved_current.with_name(f"current.active.{timestamp}")
+            write_json_file(
+                resolved_stage / f"current_archive_warning.{timestamp}.json",
+                {
+                    "current_dir": str(resolved_current),
+                    "active_dir": str(target_current),
+                    "archive_dir": str(archived),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+    target_current.mkdir(parents=True, exist_ok=True)
+    return target_current
 
 
 async def _run_orchestrator_async(
     *,
     run_root: Path,
-    paper_pdf: Path | None,
+    paper_pdf: Path | str | None,
     paper_key: str,
     max_attempts: int,
     no_pdf_extract: bool,
@@ -61,6 +115,9 @@ async def _run_orchestrator_async(
     paper_budget_sec: int = 0,
     docker_enabled: bool | None = None,
     docker_build_timeout_sec: int = 0,
+    llm_provider: str = "",
+    llm_model: str = "",
+    llm_base_url: str = "",
 ) -> dict[str, Any]:
     from fact_generation.execution.graph import ExecutionOrchestrator
 
@@ -78,6 +135,9 @@ async def _run_orchestrator_async(
         docker_enabled=docker_enabled,
         docker_build_timeout_sec=docker_build_timeout_sec,
         paper_repo_url=paper_repo_url,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
     )
     return await orchestrator.run(
         paper_root=str(paper_root or ""),
@@ -94,7 +154,7 @@ async def _run_orchestrator_async(
 def run_execution_stage(
     *,
     run_dir: Path,
-    paper_pdf: Path | None = None,
+    paper_pdf: Path | str | None = None,
     paper_key: str | None = None,
     paper_root: str = "",
     paper_repo_url: str = "",
@@ -112,21 +172,42 @@ def run_execution_stage(
 ) -> StageResult:
     ensure_full_pipeline_context(run_dir=run_dir, allow_standalone=True, stage="execution")
     bridge = load_bridge_state(run_dir)
-    resolved_pdf = paper_pdf.resolve() if paper_pdf else (bridge.paper_pdf if bridge else None)
+    raw_pdf = str(paper_pdf or "").strip()
+    paper_pdf_for_orchestrator = ""
+    resolved_pdf: Path | None = None
+    if raw_pdf:
+        if is_url(raw_pdf):
+            if _url_looks_like_source_locator(raw_pdf):
+                if not str(paper_repo_url or "").strip():
+                    paper_repo_url = raw_pdf
+                raw_pdf = ""
+            else:
+                paper_pdf_for_orchestrator = raw_pdf
+        if raw_pdf and is_url(raw_pdf):
+            paper_pdf_for_orchestrator = raw_pdf
+        elif raw_pdf:
+            resolved_pdf = Path(raw_pdf).expanduser().resolve()
+            paper_pdf_for_orchestrator = str(resolved_pdf)
+    elif bridge:
+        resolved_pdf = bridge.paper_pdf
+        paper_pdf_for_orchestrator = str(resolved_pdf or "")
     resolved_key = (paper_key or "").strip() or (bridge.paper_key if bridge else "")
     source_hint = str(paper_root or paper_repo_url or "").strip()
 
-    if (resolved_pdf is None or not resolved_pdf.exists()) and not source_hint:
+    local_pdf_missing = resolved_pdf is not None and not resolved_pdf.exists()
+    if (not paper_pdf_for_orchestrator or local_pdf_missing) and not source_hint:
         raise FileNotFoundError(
             "paper_pdf is required for execution stage when bridge state is missing or invalid."
         )
     if not resolved_key:
         if resolved_pdf is not None:
             resolved_key = resolved_pdf.stem.strip()
+        elif paper_pdf_for_orchestrator:
+            resolved_key = infer_paper_key(paper_pdf_for_orchestrator)
         elif paper_root:
             resolved_key = Path(paper_root).resolve().name
         elif paper_repo_url:
-            resolved_key = str(paper_repo_url).rstrip("/").split("/")[-1].replace(".git", "")
+            resolved_key = infer_paper_key(paper_repo_url)
         resolved_key = resolved_key or "paper"
 
     stage_root = execution_stage_dir(run_dir)
@@ -136,16 +217,27 @@ def run_execution_stage(
     # timestamped subdir per attempt). The names are intentionally distinct.
     execution_run_dir = stage_root / "current"
     stage_run_root = stage_root / "history"
-    _archive_prior_current_dir(stage_root=stage_root, current_dir=execution_run_dir)
+    execution_run_dir = _archive_prior_current_dir(stage_root=stage_root, current_dir=execution_run_dir)
     settings = get_settings()
     resolved_refcheck = bool(
         settings.execution_enable_refcheck if enable_refcheck is None else enable_refcheck
     )
+    llm_provider = ""
+    llm_model = ""
+    llm_base_url = ""
+    if not no_llm:
+        try:
+            llm_cfg = resolve_llm_config()
+            llm_provider = llm_cfg.provider
+            llm_model = llm_cfg.model
+            llm_base_url = llm_cfg.base_url or ""
+        except Exception:
+            pass
 
     run_result = asyncio.run(
         _run_orchestrator_async(
             run_root=stage_run_root,
-            paper_pdf=resolved_pdf,
+            paper_pdf=paper_pdf_for_orchestrator,
             paper_key=resolved_key,
             paper_root=paper_root,
             paper_repo_url=paper_repo_url,
@@ -161,6 +253,9 @@ def run_execution_stage(
             paper_budget_sec=paper_budget_sec,
             docker_enabled=docker_enabled,
             docker_build_timeout_sec=docker_build_timeout_sec,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_base_url=llm_base_url,
         )
     )
 
@@ -190,7 +285,7 @@ def run_execution_stage(
 
     payload = ExecutionPayload(
         paper_key=resolved_key,
-        paper_pdf=str(resolved_pdf or ""),
+        paper_pdf=str(paper_pdf_for_orchestrator or resolved_pdf or ""),
         status=stage_status,
         success=bool(run_result.get("success")),
         exit_status=exit_status,

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import time
@@ -28,6 +29,13 @@ from ..tools.docker import _collect_repo_requirements_text, docker_ensure_paper_
 
 class DownloadLimitError(RuntimeError):
     pass
+
+
+class DownloadIncompleteError(OSError):
+    pass
+
+
+DEFAULT_GIT_CLONE_TIMEOUT_SEC = 900
 
 
 def _repo_root() -> Path:
@@ -377,6 +385,45 @@ def _generated_archive_dir_ignored(part: str) -> bool:
     return name in _ROOT_GENERATED_COPY_IGNORED or name.startswith(_ROOT_GENERATED_COPY_IGNORED_PREFIXES)
 
 
+def _source_dir_has_payload(path: Path) -> bool:
+    """Return true when a cloned/downloaded source dir has files outside VCS metadata."""
+    if not path.exists() or not path.is_dir():
+        return False
+    try:
+        for child in path.iterdir():
+            if child.name == ".git":
+                continue
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _source_dir_looks_partial_clone(path: Path) -> bool:
+    return (path / ".git").exists() and not _source_dir_has_payload(path)
+
+
+def _remove_tree_best_effort(path: Path) -> bool:
+    if not path.exists():
+        return True
+
+    def onerror(func: Any, raw_path: str, exc_info: Any) -> None:
+        try:
+            os.chmod(raw_path, stat.S_IWRITE)
+            func(raw_path)
+        except Exception:
+            pass
+
+    for target in [path, _extended_windows_path(path) if os.name == "nt" else path]:
+        try:
+            shutil.rmtree(target, ignore_errors=False, onerror=onerror)
+        except Exception:
+            pass
+        if not path.exists():
+            return True
+    return not path.exists()
+
+
 def _robocopy_tree(src: Path, dst: Path) -> bool:
     """Copy a source tree with robocopy on Windows."""
     if os.name != "nt":
@@ -637,23 +684,7 @@ def _anonymous_4open_get_json(path: str, timeout_sec: int = 60) -> Any:
 
 def _anonymous_4open_get_bytes(path: str, timeout_sec: int = 120) -> bytes:
     url = "https://anonymous.4open.science" + path
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        try:
-            req = Request(url, headers={"User-Agent": "FactReview execution"})
-            with urlopen(req, timeout=timeout_sec) as resp:
-                return resp.read()
-        except HTTPError as exc:
-            last_exc = exc
-            if exc.code not in {404, 429, 500, 502, 503, 504} or attempt >= 2:
-                raise
-            time.sleep(1.5 * (attempt + 1))
-        except Exception as exc:
-            last_exc = exc
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-    assert last_exc is not None
-    raise last_exc
+    return _download_url_bytes(url, timeout_sec=timeout_sec)
 
 
 def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> dict[str, Any]:
@@ -754,7 +785,7 @@ def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> 
                 walk(rel)
 
     if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
+        _remove_tree_best_effort(dest)
     dest.mkdir(parents=True, exist_ok=True)
     walk("")
     if not downloaded:
@@ -916,7 +947,7 @@ def _download_openreview_candidate_source(candidate_url: str, dest: Path, logs_d
     if _is_openreview_attachment_url(url) or urlparse(url).path.lower().endswith(
         (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2")
     ):
-        blob = _download_url_bytes(url, timeout_sec=300)
+        blob = _download_url_bytes(url, timeout_sec=_openreview_attachment_timeout_sec())
         archive_manifest = _extract_archive_bytes(blob, dest)
         return {
             "method": "candidate_archive",
@@ -936,7 +967,7 @@ def _download_openreview_candidate_source(candidate_url: str, dest: Path, logs_d
     if not clone_url:
         raise RuntimeError("candidate_url_unsupported")
     if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
+        _remove_tree_best_effort(dest)
     ensure_dir(dest.parent)
     use_blob_filter = (
         str(os.getenv("EXECUTION_GIT_CLONE_FILTER_BLOB_NONE") or "1").strip().lower()
@@ -946,14 +977,18 @@ def _download_openreview_candidate_source(candidate_url: str, dest: Path, logs_d
     if use_blob_filter:
         clone_cmd.extend(["--filter", "blob:none"])
     clone_cmd.extend([clone_url, str(dest)])
-    res = run_command(cmd=clone_cmd, cwd=str(dest.parent), timeout_sec=3600)
+    clone_timeout = _git_clone_timeout_sec({})
+    res = run_command(cmd=clone_cmd, cwd=str(dest.parent), timeout_sec=clone_timeout)
     persist_command_result(res, logs_dir, prefix=f"openreview_candidate_{index}_clone")
-    if res.returncode != 0 and use_blob_filter:
-        shutil.rmtree(dest, ignore_errors=True)
+    if res.returncode != 0 and res.returncode != 124 and use_blob_filter:
+        _remove_tree_best_effort(dest)
         fallback_cmd = ["git", "clone", "--depth", "1", clone_url, str(dest)]
-        res = run_command(cmd=fallback_cmd, cwd=str(dest.parent), timeout_sec=3600)
+        res = run_command(cmd=fallback_cmd, cwd=str(dest.parent), timeout_sec=clone_timeout)
         persist_command_result(res, logs_dir, prefix=f"openreview_candidate_{index}_clone_fallback")
     if res.returncode != 0:
+        _remove_tree_best_effort(dest)
+        if res.returncode == 124:
+            raise RuntimeError(f"candidate_git_clone_timeout:{clone_timeout}")
         raise RuntimeError(f"candidate_git_clone_failed:{res.returncode}")
     files, sample = _count_files_for_manifest(dest)
     return {
@@ -1021,6 +1056,24 @@ def _download_openreview_candidate_sources(
     raise RuntimeError(f"openreview_candidate_source_download_failed: {detail}")
 
 
+def _openreview_no_source_error(content_keys: list[str]) -> str:
+    if not content_keys:
+        return "openreview_metadata_empty_or_unavailable"
+    return f"openreview_no_supplementary_or_code_url: content_keys={','.join(content_keys)}"
+
+
+def _openreview_candidate_urls_for_retry(primary_url: str, candidate_urls: list[str]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for url in [primary_url, *list(candidate_urls or [])]:
+        token = str(url or "").strip()
+        if not token or token in seen:
+            continue
+        urls.append(token)
+        seen.add(token)
+    return urls
+
+
 def _download_max_bytes() -> int:
     raw = os.getenv("EXECUTION_DOWNLOAD_MAX_BYTES") or os.getenv("FACTREVIEW_DOWNLOAD_MAX_BYTES") or ""
     if raw:
@@ -1031,7 +1084,81 @@ def _download_max_bytes() -> int:
     return 300 * 1024 * 1024
 
 
+def _git_clone_timeout_sec(cfg: dict[str, Any]) -> int:
+    raw = cfg.get("git_clone_timeout_sec") or os.getenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC") or ""
+    if str(raw).strip():
+        try:
+            return max(int(raw), 1)
+        except Exception:
+            pass
+    return DEFAULT_GIT_CLONE_TIMEOUT_SEC
+
+
+def _download_backend() -> str:
+    return str(
+        os.getenv("EXECUTION_DOWNLOAD_BACKEND")
+        or os.getenv("FACTREVIEW_DOWNLOAD_BACKEND")
+        or "python"
+    ).strip().lower()
+
+
+def _openreview_attachment_timeout_sec() -> int:
+    raw = (
+        os.getenv("EXECUTION_OPENREVIEW_ATTACHMENT_TIMEOUT_SEC")
+        or os.getenv("FACTREVIEW_OPENREVIEW_ATTACHMENT_TIMEOUT_SEC")
+        or os.getenv("EXECUTION_DOWNLOAD_TIMEOUT_SEC")
+        or "600"
+    )
+    try:
+        return max(30, int(raw))
+    except Exception:
+        return 600
+
+
+def _download_url_bytes_curl(url: str, timeout_sec: int = 180) -> bytes:
+    exe = shutil.which("curl.exe") or shutil.which("curl")
+    if not exe:
+        raise OSError("curl_unavailable")
+    timeout = max(1, int(timeout_sec or 180))
+    cmd = [
+        exe,
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--connect-timeout",
+        str(min(30, timeout)),
+        "--max-time",
+        str(timeout),
+        "--user-agent",
+        "FactReview execution",
+        url,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout + 10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"download_curl_timeout: {url}") from exc
+    if result.returncode != 0:
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+        http_match = re.search(r"returned error:\s*(\d{3})", stderr, flags=re.IGNORECASE)
+        if http_match:
+            raise HTTPError(url, int(http_match.group(1)), stderr.strip() or "curl_http_error", hdrs=None, fp=None)
+        raise OSError(f"download_curl_failed: rc={result.returncode} {stderr.strip()}")
+    blob = result.stdout or b""
+    max_bytes = _download_max_bytes()
+    if len(blob) > max_bytes:
+        raise DownloadLimitError(f"download_too_large: {url} bytes_read={len(blob)} max_bytes={max_bytes}")
+    return blob
+
+
 def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
+    if _download_backend() in {"curl", "curl.exe"}:
+        return _download_url_bytes_curl(url, timeout_sec=timeout_sec)
     last_exc: Exception | None = None
     max_bytes = _download_max_bytes()
     for attempt in range(3):
@@ -1041,9 +1168,11 @@ def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
             chunks: list[bytes] = []
             with urlopen(req, timeout=min(10, max(1, int(timeout_sec or 180)))) as resp:
                 content_length = str(resp.headers.get("Content-Length") or "").strip()
+                expected_length: int | None = None
                 if content_length:
                     try:
-                        if int(content_length) > max_bytes:
+                        expected_length = int(content_length)
+                        if expected_length > max_bytes:
                             raise DownloadLimitError(
                                 f"download_too_large: {url} content_length={content_length} max_bytes={max_bytes}"
                             )
@@ -1055,6 +1184,10 @@ def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
                         raise TimeoutError(f"download_total_timeout: {url}")
                     chunk = resp.read(256 * 1024)
                     if not chunk:
+                        if expected_length is not None and total < expected_length:
+                            raise DownloadIncompleteError(
+                                f"download_incomplete: {url} bytes_read={total} content_length={expected_length}"
+                            )
                         return b"".join(chunks)
                     total += len(chunk)
                     if total > max_bytes:
@@ -1269,6 +1402,20 @@ def _extract_archive_bytes(blob: bytes, dest: Path) -> dict[str, Any]:
 
 def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path) -> dict[str, Any]:
     forum_id = _openreview_forum_id(raw_url)
+    write_text(
+        logs_dir / "openreview_supplementary_status.json",
+        json.dumps(
+            {
+                "status": "metadata_start",
+                "source": raw_url,
+                "forum_id": forum_id,
+                "ts": time.time(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
     content = _openreview_note_metadata(forum_id) if forum_id else {}
     candidate_urls = _openreview_candidate_source_urls(content)
     if _is_openreview_attachment_url(raw_url):
@@ -1277,8 +1424,25 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
         url = f"https://openreview.net/attachment?id={quote(forum_id, safe='')}&name=supplementary_material"
     else:
         raise ValueError("not_openreview_url")
+    write_text(
+        logs_dir / "openreview_supplementary_status.json",
+        json.dumps(
+            {
+                "status": "attachment_download_start",
+                "source": raw_url,
+                "attachment_url": url,
+                "forum_id": forum_id,
+                "candidate_source_urls": candidate_urls,
+                "content_keys": sorted(str(k) for k in content) if content else [],
+                "ts": time.time(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
     try:
-        blob = _download_url_bytes(url)
+        blob = _download_url_bytes(url, timeout_sec=_openreview_attachment_timeout_sec())
     except HTTPError as exc:
         if forum_id and candidate_urls:
             try:
@@ -1308,13 +1472,11 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
                 json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
             )
             if not candidate_urls:
-                raise RuntimeError(
-                    "openreview_no_supplementary_or_code_url: "
-                    f"content_keys={','.join(manifest['content_keys'])}"
-                ) from exc
+                raise RuntimeError(_openreview_no_source_error(manifest["content_keys"])) from exc
         raise RuntimeError(f"openreview_supplementary_http_{exc.code}") from exc
     except (URLError, TimeoutError, OSError, DownloadLimitError) as exc:
-        if forum_id and candidate_urls:
+        retry_urls = _openreview_candidate_urls_for_retry(url, candidate_urls)
+        if forum_id and retry_urls:
             try:
                 return _download_openreview_candidate_sources(
                     raw_url=raw_url,
@@ -1322,7 +1484,7 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
                     attachment_url=url,
                     attachment_status=0,
                     content=content,
-                    candidate_urls=candidate_urls,
+                    candidate_urls=retry_urls,
                     dest=dest,
                     logs_dir=logs_dir,
                 )
@@ -1331,6 +1493,22 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
         raise RuntimeError(f"openreview_supplementary_unavailable: {exc}") from exc
     archive_path = logs_dir / "openreview_supplementary.archive"
     archive_path.write_bytes(blob)
+    write_text(
+        logs_dir / "openreview_supplementary_status.json",
+        json.dumps(
+            {
+                "status": "archive_downloaded",
+                "source": raw_url,
+                "attachment_url": url,
+                "forum_id": forum_id,
+                "bytes": len(blob),
+                "ts": time.time(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
     try:
         manifest = _extract_archive_bytes(blob, dest)
     except RuntimeError as exc:
@@ -1780,7 +1958,14 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         paper_root = source_dir.resolve()
-        need_clone = (not source_dir.exists()) or (not any(source_dir.iterdir()))
+        if _source_dir_looks_partial_clone(source_dir):
+            append_event(
+                run_dir,
+                "prepare_partial_clone_removed",
+                {"source_dir": str(source_dir), "reason": "git_metadata_without_payload"},
+            )
+            _remove_tree_best_effort(source_dir)
+        need_clone = not _source_dir_has_payload(source_dir)
         if need_clone:
             repo_url = str(cfg.get("paper_repo_url") or "").strip()
             candidates: list[str] = []
@@ -1827,7 +2012,7 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
 
             ensure_dir(source_dir.parent)
             if source_dir.exists():
-                shutil.rmtree(source_dir, ignore_errors=True)
+                _remove_tree_best_effort(source_dir)
             anonymous_4open_id = _anonymous_4open_repo_id(repo_url)
             if anonymous_4open_id:
                 try:
@@ -1854,6 +2039,11 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
             openreview_id = _openreview_forum_id(repo_url)
             if need_clone and (openreview_id or _is_openreview_attachment_url(repo_url)):
                 try:
+                    append_event(
+                        run_dir,
+                        "prepare_openreview_supplementary_download_start",
+                        {"repo_url": repo_url, "dest": str(source_dir), "forum_id": openreview_id},
+                    )
                     manifest = _download_openreview_supplementary(repo_url, source_dir, logs_dir)
                 except Exception as exc:
                     msg = f"openreview_supplementary_download_failed: {type(exc).__name__}: {exc}"
@@ -1886,25 +2076,32 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
                 if use_blob_filter:
                     clone_cmd.extend(["--filter", "blob:none"])
                 clone_cmd.extend([repo_url, str(source_dir)])
-                clone_timeout = int(
-                    cfg.get("git_clone_timeout_sec")
-                    or os.getenv("EXECUTION_GIT_CLONE_TIMEOUT_SEC")
-                    or 3600
-                )
+                clone_timeout = _git_clone_timeout_sec(cfg)
                 res = run_command(cmd=clone_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
                 persist_command_result(res, logs_dir, prefix="clone")
-                if res.returncode != 0 and use_blob_filter:
-                    shutil.rmtree(source_dir, ignore_errors=True)
+                if res.returncode != 0 and res.returncode != 124 and use_blob_filter:
+                    _remove_tree_best_effort(source_dir)
                     fallback_cmd = ["git", "clone", "--depth", "1", repo_url, str(source_dir)]
                     res = run_command(cmd=fallback_cmd, cwd=str(baseline_dir), timeout_sec=clone_timeout)
                     persist_command_result(res, logs_dir, prefix="clone_fallback_depth_only")
                 if res.returncode != 0:
-                    msg = "git_clone_failed"
+                    msg = "git_clone_timeout" if res.returncode == 124 else "git_clone_failed"
+                    _remove_tree_best_effort(source_dir)
                     append_event(
-                        run_dir, "prepare_error", {"error": msg, "repo_url": repo_url, "rc": res.returncode}
+                        run_dir,
+                        "prepare_error",
+                        {
+                            "error": msg,
+                            "repo_url": repo_url,
+                            "rc": res.returncode,
+                            "timeout_sec": clone_timeout,
+                        },
                     )
                     state.setdefault("history", []).append(
-                        {"kind": "prepare_error", "data": {"error": msg, "repo_url": repo_url}}
+                        {
+                            "kind": "prepare_error",
+                            "data": {"error": msg, "repo_url": repo_url, "timeout_sec": clone_timeout},
+                        }
                     )
                     state["status"] = "failed"
                     return state

@@ -221,6 +221,19 @@ def _artifact_highlights(artifacts_index: dict[str, Any]) -> list[str]:
     return [str(x) for x in files[:12]]
 
 
+def _alignment_comparisons(artifacts_dir: Path) -> list[dict[str, Any]]:
+    payload = _load_json_if_exists(artifacts_dir / "alignment" / "alignment.json")
+    rows = payload.get("comparisons") if isinstance(payload, dict) else []
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def _fmt_metric_value(value: Any) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except Exception:
+        return str(value or "")
+
+
 def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     finalize_start = time.monotonic()
     run_info = state.get("run", {})
@@ -234,12 +247,32 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     if state.get("judge", {}).get("passed") is True and state.get("status") != "failed":
         state["status"] = "success"
     else:
-        # If we cannot judge due to missing baseline but the run itself succeeded, mark as inconclusive.
+        # Make reviewer-facing non-success outcomes explicit before writing summaries.
         results = (state.get("judge", {}) or {}).get("results") or []
         run_ok = bool((state.get("run_result", {}) or {}).get("success"))
+        has_deviation = isinstance(results, list) and any(
+            isinstance(r, dict)
+            and (
+                (
+                    r.get("type") in {"paper_metric_alignment", "paper_table_alignment"}
+                    and int(r.get("matched") or 0) > 0
+                    and int(r.get("failed_n") or 0) > 0
+                )
+                or (
+                    r.get("type") not in {"inconclusive_no_baseline", "llm_judge"}
+                    and r.get("passed") is False
+                    and r.get("type") not in {"paper_metric_alignment", "paper_table_alignment"}
+                )
+            )
+            for r in results
+        )
+        if state.get("status") != "failed" and run_ok and has_deviation:
+            state["status"] = "deviated"
+        # If we cannot judge due to missing baseline but the run itself succeeded, mark as inconclusive.
         if (
             state.get("status") != "failed"
             and run_ok
+            and not has_deviation
             and isinstance(results, list)
             and any(isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline" for r in results)
         ):
@@ -282,6 +315,7 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     task_summary = _summarize_tasks(tasks)
     judge_label, judge_notes, suggested_checks = _judge_highlights(judge, run_result)
     artifact_files = _artifact_highlights(artifacts_index)
+    alignment_comparisons = _alignment_comparisons(artifacts_dir)
 
     # main report (human-readable, reviewer-oriented)
     md_lines: list[str] = []
@@ -398,6 +432,30 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         )
         md_lines.append("")
 
+    if alignment_comparisons:
+        comparison_rows: list[list[str]] = []
+        for row in alignment_comparisons[:80]:
+            comparison_rows.append(
+                [
+                    str(row.get("dataset") or "n/a"),
+                    str(row.get("metric") or ""),
+                    _fmt_metric_value(row.get("paper_value")),
+                    _fmt_metric_value(row.get("observed_value")),
+                    _fmt_metric_value(row.get("delta")),
+                    _fmt_metric_value(row.get("tolerance")),
+                    "PASS" if row.get("passed") else "FAIL",
+                ]
+            )
+        md_lines.append("### Paper-vs-Run Metric Comparison")
+        md_lines.append("")
+        md_lines.extend(
+            _md_table(
+                ["Dataset", "Metric", "Paper", "Reproduced", "Delta", "Tolerance", "Result"],
+                comparison_rows,
+            )
+        )
+        md_lines.append("")
+
     if suggested_checks:
         md_lines.append("## Recommended Baseline Checks")
         md_lines.append("")
@@ -494,10 +552,20 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     md_lines.append("")
     md_lines.append("### 3. Quantitative Comparison")
     md_lines.append("")
-    md_lines.append(
-        "- Insert aligned paper-vs-run metric tables here once baseline checks and artifact metrics are available."
-    )
-    md_lines.append("- Prefer MRR, MR, Hits@1, Hits@3, and Hits@10 when those metrics exist.")
+    if alignment_comparisons:
+        for row in alignment_comparisons[:10]:
+            status = "within tolerance" if row.get("passed") else "outside tolerance"
+            md_lines.append(
+                "- "
+                f"{row.get('dataset') or 'n/a'} {row.get('metric')}: "
+                f"paper={_fmt_metric_value(row.get('paper_value'))}, "
+                f"reproduced={_fmt_metric_value(row.get('observed_value'))}, "
+                f"delta={_fmt_metric_value(row.get('delta'))} ({status})."
+            )
+    else:
+        md_lines.append(
+            "- No aligned paper-vs-run metric table is available yet; treat quantitative reproduction claims as inconclusive."
+        )
     md_lines.append("")
     md_lines.append("### 4. Deviations and Risks")
     md_lines.append("")
@@ -613,6 +681,7 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
                 "failed": r.get("failed_n", 0),
                 "unmatched_run_metrics": r.get("unmatched_run_metrics", []),
                 "critiques": r.get("critiques_n", 0),
+                "comparisons": r.get("comparisons_n", len(alignment_comparisons)),
                 "artifact": r.get("alignment_artifact", ""),
             }
 
@@ -629,6 +698,8 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         coverage_gaps.append(
             "No paper-metric alignment data available (paper_extracted/tables/ or metric artifacts may be missing)."
         )
+    elif not alignment_comparisons:
+        coverage_gaps.append("Paper-metric alignment ran but produced no metric-level comparison rows.")
     if isinstance(run_result, dict) and run_result.get("semantic_failure") == "semantic_no_metrics":
         coverage_gaps.append("An eval/reproduction task completed without machine-readable metric evidence.")
     eval_tasks = [t for t in tasks if _task_family(t) == "eval"]
@@ -687,6 +758,7 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         "task_summary": task_summary,
         "checks_summary": checks_summary,
         "alignment_summary": alignment_summary,
+        "alignment_comparisons": alignment_comparisons,
         "coverage_gaps": coverage_gaps,
         "paths": {
             "run_dir": str(run_dir),

@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from util.run_layout import slugify_run_key
 
 PDF_MAGIC = b"%PDF-"
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+DOWNLOAD_CHUNK_SIZE = 256 * 1024
+DEFAULT_PAPER_PDF_MAX_BYTES = 100 * 1024 * 1024
+DEFAULT_PAPER_PDF_TIMEOUT_SEC = 180
+
+
+class DownloadLimitError(RuntimeError):
+    """Raised when a remote paper PDF exceeds configured safety bounds."""
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,12 @@ def infer_paper_key(source: str | None, *, fallback: str = "paper") -> str:
         arxiv_id = _arxiv_id_from_path(parsed.path)
         if arxiv_id:
             return arxiv_id.replace("/", "_")
+        openreview_id = _openreview_id_from_url(parsed)
+        if openreview_id:
+            return _safe_source_key(openreview_id, fallback=fallback)
+        anonymous_id = _anonymous_4open_id_from_url(parsed)
+        if anonymous_id:
+            return _safe_source_key(anonymous_id, fallback=fallback)
         name = Path(unquote(parsed.path)).name
         if name:
             stem = name[:-4] if name.lower().endswith(".pdf") else Path(name).stem
@@ -109,6 +122,39 @@ def _arxiv_id_from_path(path: str) -> str:
     return ""
 
 
+def _openreview_id_from_url(parsed) -> str:
+    host = str(parsed.netloc or "").lower()
+    if not host.endswith("openreview.net"):
+        return ""
+    query = parse_qs(parsed.query or "")
+    for key in ("id", "forum"):
+        values = query.get(key) or []
+        for value in values:
+            value = str(value or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _anonymous_4open_id_from_url(parsed) -> str:
+    host = str(parsed.netloc or "").lower()
+    if not host.endswith("anonymous.4open.science"):
+        return ""
+    parts = [unquote(p).strip() for p in str(parsed.path or "").split("/") if p.strip()]
+    try:
+        idx = [p.lower() for p in parts].index("r")
+    except ValueError:
+        return ""
+    if idx + 1 < len(parts):
+        return parts[idx + 1]
+    return ""
+
+
+def _safe_source_key(value: str, *, fallback: str = "paper") -> str:
+    token = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip()).strip("._-")
+    return token or fallback
+
+
 def _filename_for_url(url: str, *, paper_key: str = "") -> str:
     parsed = urlparse(url)
     arxiv_id = _arxiv_id_from_path(parsed.path)
@@ -147,11 +193,27 @@ def _download_pdf(url: str, target: Path) -> None:
     request = Request(url, headers={"User-Agent": "FactReview/0.1"})
     temp = target.with_suffix(f"{target.suffix}.part")
     try:
-        with urlopen(request, timeout=60) as response, open(temp, "wb") as fh:
+        max_bytes = _download_max_bytes()
+        total_timeout = _download_timeout_sec()
+        deadline = time.monotonic() + total_timeout
+        with urlopen(request, timeout=min(10, total_timeout)) as response, open(temp, "wb") as fh:
+            content_length = _content_length(response)
+            if content_length is not None and max_bytes > 0 and content_length > max_bytes:
+                raise DownloadLimitError(
+                    f"paper_pdf_too_large: {url} content_length={content_length} max_bytes={max_bytes}"
+                )
+            total = 0
             while True:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"paper_pdf_download_timeout: {url} timeout_sec={total_timeout}")
                 chunk = response.read(DOWNLOAD_CHUNK_SIZE)
                 if not chunk:
                     break
+                total += len(chunk)
+                if max_bytes > 0 and total > max_bytes:
+                    raise DownloadLimitError(
+                        f"paper_pdf_too_large: {url} bytes_read={total} max_bytes={max_bytes}"
+                    )
                 fh.write(chunk)
         if not looks_like_pdf(temp):
             raise ValueError(f"downloaded content is not a valid PDF: {url}")
@@ -162,3 +224,51 @@ def _download_pdf(url: str, target: Path) -> None:
         except Exception:
             pass
         raise
+
+
+def _download_max_bytes() -> int:
+    raw = (
+        _env_value("EXECUTION_PAPER_PDF_MAX_BYTES")
+        or _env_value("FACTREVIEW_PAPER_PDF_MAX_BYTES")
+        or str(DEFAULT_PAPER_PDF_MAX_BYTES)
+    )
+    try:
+        return max(int(raw), 0)
+    except Exception:
+        return DEFAULT_PAPER_PDF_MAX_BYTES
+
+
+def _download_timeout_sec() -> int:
+    raw = (
+        _env_value("EXECUTION_PAPER_PDF_TIMEOUT_SEC")
+        or _env_value("FACTREVIEW_PAPER_PDF_TIMEOUT_SEC")
+        or str(DEFAULT_PAPER_PDF_TIMEOUT_SEC)
+    )
+    try:
+        return max(int(raw), 1)
+    except Exception:
+        return DEFAULT_PAPER_PDF_TIMEOUT_SEC
+
+
+def _env_value(name: str) -> str:
+    import os
+
+    return str(os.getenv(name) or "").strip()
+
+
+def _content_length(response: object) -> int | None:
+    headers = getattr(response, "headers", None)
+    raw = None
+    try:
+        raw = headers.get("Content-Length") if headers is not None else None
+    except Exception:
+        raw = None
+    if raw in (None, ""):
+        try:
+            raw = response.getheader("Content-Length")  # type: ignore[attr-defined]
+        except Exception:
+            raw = None
+    try:
+        return int(str(raw).strip()) if raw not in (None, "") else None
+    except Exception:
+        return None

@@ -92,6 +92,77 @@ def _ensure_task_output_roots(*, cwd: str, artifact_paths: list[Any]) -> None:
             continue
 
 
+def _archive_task_artifacts(
+    *,
+    artifact_paths: list[Any],
+    artifacts_dir: Path,
+    run_dir: Path,
+    task_id: str,
+    task_index: int,
+    task_total: int,
+    docker_enabled: bool,
+    cwd: str,
+    cwd_h: str,
+    pr: str,
+    pr_h: str,
+    pd: str,
+    pd_h: str,
+) -> list[str]:
+    if not isinstance(artifact_paths, list) or not artifact_paths:
+        return []
+    cwd_for_glob = cwd_h if docker_enabled else cwd
+    paper_root_for_glob = pr_h if docker_enabled else pr
+    expanded = _expand_artifact_paths(
+        cwd=cwd_for_glob,
+        paper_root=paper_root_for_glob,
+        items=[
+            str(x)
+            .replace("{paper_root}", paper_root_for_glob)
+            .replace("{paper_dir}", (pd_h if docker_enabled else pd))
+            .replace("{run_dir}", str(run_dir))
+            for x in artifact_paths
+            if isinstance(x, str | int | float)
+        ],
+    )
+    copied: list[str] = []
+    for p in expanded:
+        try:
+            rel = None
+            try:
+                root_for_rel = Path(pr_h if docker_enabled else pr).resolve()
+                cwd_for_rel = Path(cwd_h if docker_enabled else cwd).resolve()
+                if str(p.resolve()).lower().startswith(str(root_for_rel).lower()):
+                    rel = safe_relpath(p, root_for_rel)
+                else:
+                    rel = safe_relpath(p, cwd_for_rel)
+            except Exception:
+                rel = p.name
+            dest = Path(artifacts_dir) / rel
+            ensure_dir(dest.parent)
+            if p.is_dir():
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                shutil.copytree(p, dest, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            else:
+                shutil.copy2(p, dest)
+            copied.append(str(rel).replace("\\", "/"))
+        except Exception:
+            continue
+    if copied:
+        append_event(
+            run_dir,
+            "artifacts_archived",
+            {
+                "task": task_id,
+                "task_index": task_index,
+                "task_total": task_total,
+                "count": len(copied),
+                "paths": copied,
+            },
+        )
+    return copied
+
+
 def _task_result_base(task: dict[str, Any], task_id: str) -> dict[str, Any]:
     """Carry reviewer-facing task metadata into run_result."""
 
@@ -206,12 +277,53 @@ def _semantic_metric_failure(
     return ""
 
 
-def _resolve_host_python_cmd(cmd: list[str]) -> list[str]:
+def _run_dir_venv_python(run_dir: str | Path | None) -> str:
+    if not run_dir:
+        return ""
+    root = Path(run_dir)
+    marker = root / ".host_venv_path"
+    if marker.exists():
+        try:
+            venv_root = Path(marker.read_text(encoding="utf-8", errors="ignore").strip())
+            candidates = [
+                venv_root / "Scripts" / "python.exe",
+                venv_root / "bin" / "python",
+                venv_root / "bin" / "python3",
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    return str(candidate)
+        except Exception:
+            pass
+    candidates = [
+        root / ".venv" / "Scripts" / "python.exe",
+        root / ".venv" / "bin" / "python",
+        root / ".venv" / "bin" / "python3",
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return str(candidate)
+        except Exception:
+            continue
+    return ""
+
+
+def _resolve_host_python_cmd(cmd: list[str], run_dir: str | Path | None = None) -> list[str]:
     if not cmd:
         return cmd
     first = str(cmd[0] or "").strip().lower()
+    python_exe = _run_dir_venv_python(run_dir) or sys.executable
     if first in {"python", "python3"}:
-        return [sys.executable, *cmd[1:]]
+        return [python_exe, *cmd[1:]]
+    if (
+        first == "uv"
+        and len(cmd) >= 3
+        and str(cmd[1] or "").strip().lower() == "run"
+        and str(cmd[2] or "").strip().lower() in {"python", "python3"}
+        and not shutil.which("uv")
+    ):
+        return [python_exe, *cmd[3:]]
     if os.name == "nt" and first in {"bash", "sh"}:
         explicit = str(os.environ.get("EXECUTION_BASH_PATH") or os.environ.get("FACTREVIEW_BASH_PATH") or "").strip()
         candidates = [
@@ -230,12 +342,176 @@ def _resolve_host_python_cmd(cmd: list[str]) -> list[str]:
     return cmd
 
 
+def _path_inside(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except Exception:
+        return False
+
+
+def _extra_pythonpath_tokens(cfg: dict[str, Any]) -> list[str]:
+    raw = (
+        cfg.get("extra_pythonpath_dirs")
+        or cfg.get("extra_pythonpath")
+        or os.environ.get("EXECUTION_EXTRA_PYTHONPATH")
+        or os.environ.get("FACTREVIEW_EXTRA_PYTHONPATH")
+        or ""
+    )
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    tokens: list[str] = []
+    for chunk in text.replace("\n", os.pathsep).split(os.pathsep):
+        for item in chunk.split(","):
+            item = item.strip()
+            if item:
+                tokens.append(item)
+    return tokens
+
+
+def _repo_pythonpath_parts(paper_root: str | Path, cfg: dict[str, Any] | None = None) -> list[str]:
+    root = Path(paper_root or ".")
+    paths: list[str] = []
+    for path in [root, root / "src", root / "code", root / "python", root / "lib"]:
+        try:
+            if path.is_dir():
+                paths.append(str(path.resolve()))
+        except Exception:
+            continue
+    for raw in _extra_pythonpath_tokens(cfg or {}):
+        try:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = root / path
+            if path.is_dir() and _path_inside(path, root):
+                paths.append(str(path.resolve()))
+        except Exception:
+            continue
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = path.lower() if os.name == "nt" else path
+        if key in seen:
+            continue
+        deduped.append(path)
+        seen.add(key)
+    return deduped
+
+
+def _repo_container_pythonpath(paper_root: str | Path, cfg: dict[str, Any] | None = None) -> str:
+    root = Path(paper_root or ".")
+    parts = ["/app"]
+    for rel in ["src", "code", "python", "lib"]:
+        try:
+            if (root / rel).is_dir():
+                parts.append(f"/app/{rel}")
+        except Exception:
+            continue
+    for raw in _extra_pythonpath_tokens(cfg or {}):
+        try:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = root / path
+            if not path.is_dir() or not _path_inside(path, root):
+                continue
+            rel = path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+            if rel and rel != ".":
+                parts.append(f"/app/{rel}")
+        except Exception:
+            continue
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part in seen:
+            continue
+        deduped.append(part)
+        seen.add(part)
+    return ":".join(deduped)
+
+
+def _apply_execution_python_env_defaults(env: dict[str, str]) -> None:
+    # Paper code often writes Unicode logs while stdout is captured by a pipe.
+    # On Windows, Python may otherwise pick a legacy code page and fail before
+    # the task can complete.
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+
+
+def _run_local_jupyter_data_dirs(run_dir: str | Path | None, cfg: dict[str, Any]) -> list[str]:
+    prefixes: list[str] = []
+    raw_prefix = str(cfg.get("jupyter_kernel_prefix") or "").strip()
+    if raw_prefix:
+        prefixes.append(raw_prefix)
+    if run_dir:
+        marker = Path(run_dir) / ".jupyter_kernel_prefix"
+        if marker.exists():
+            try:
+                marked = marker.read_text(encoding="utf-8", errors="ignore").strip()
+                if marked:
+                    prefixes.append(marked)
+            except Exception:
+                pass
+
+    dirs: list[str] = []
+    for raw in prefixes:
+        try:
+            prefix = Path(raw).expanduser()
+            dirs.append(str((prefix / "share" / "jupyter").resolve(strict=False)))
+        except Exception:
+            continue
+
+    raw_dirs = cfg.get("jupyter_path_dirs") or cfg.get("jupyter_paths") or ""
+    if isinstance(raw_dirs, (list, tuple, set)):
+        tokens = [str(item).strip() for item in raw_dirs if str(item).strip()]
+    else:
+        tokens = []
+        for chunk in str(raw_dirs or "").replace("\n", os.pathsep).split(os.pathsep):
+            for item in chunk.split(","):
+                item = item.strip()
+                if item:
+                    tokens.append(item)
+    for raw in tokens:
+        try:
+            dirs.append(str(Path(raw).expanduser().resolve(strict=False)))
+        except Exception:
+            continue
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in dirs:
+        key = path.lower() if os.name == "nt" else path
+        if key in seen:
+            continue
+        deduped.append(path)
+        seen.add(key)
+    return deduped
+
+
+def _apply_run_local_jupyter_env(env: dict[str, str], run_dir: str | Path | None, cfg: dict[str, Any]) -> None:
+    data_dirs = _run_local_jupyter_data_dirs(run_dir, cfg)
+    if not data_dirs:
+        return
+    existing = [part for part in str(env.get("JUPYTER_PATH") or "").split(os.pathsep) if part]
+    parts = list(existing)
+    for path in reversed(data_dirs):
+        if path not in parts:
+            parts.insert(0, path)
+    env["JUPYTER_PATH"] = os.pathsep.join(parts)
+
+
 def _truthy_env(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _task_timeouts_disabled() -> bool:
+    return _truthy_env("EXECUTION_DISABLE_TASK_TIMEOUT") or _truthy_env("FACTREVIEW_DISABLE_TASK_TIMEOUT")
+
+
 def _effective_task_timeout(task: dict[str, Any], cfg: dict[str, Any]) -> int:
-    if _truthy_env("EXECUTION_DISABLE_TASK_TIMEOUT") or _truthy_env("FACTREVIEW_DISABLE_TASK_TIMEOUT"):
+    if _task_timeouts_disabled():
         return 0
     raw = cfg.get("task_timeout_sec")
     if raw in (None, ""):
@@ -249,6 +525,25 @@ def _effective_task_timeout(task: dict[str, Any], cfg: dict[str, Any]) -> int:
         return max(int(task.get("timeout_sec") or 3600), 0)
     except Exception:
         return 3600
+
+
+def _disable_embedded_command_timeouts(cmd: list[str]) -> list[str]:
+    rewritten: list[str] = []
+    skip_next = False
+    for index, token in enumerate(cmd):
+        if skip_next:
+            skip_next = False
+            continue
+        text = str(token)
+        if text == "--ExecutePreprocessor.timeout":
+            rewritten.extend([text, "-1"])
+            if index + 1 < len(cmd):
+                skip_next = True
+            continue
+        text = re.sub(r"(--ExecutePreprocessor\.timeout=)(?:-?\d+|None|null)", r"\g<1>-1", text)
+        text = re.sub(r"(\bExecutePreprocessor\.timeout\s*=\s*)(?:-?\d+|None|null)", r"\g<1>-1", text)
+        rewritten.append(text)
+    return rewritten
 
 
 def run_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -365,6 +660,8 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             item.update({"success": False, "error": "invalid_cmd"})
             results.append(item)
             continue
+        if timeout_sec <= 0:
+            cmd = _disable_embedded_command_timeouts(cmd)
 
         # Docker mode always runs inside container; ignore per-task use_conda.
         use_conda = bool(task.get("use_conda", True))
@@ -423,6 +720,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             continue
 
         env = os.environ.copy()
+        _apply_execution_python_env_defaults(env)
         env["EXECUTION_RUN_DIR"] = str(run_dir)
         env["EXECUTION_ARTIFACT_DIR"] = str(artifacts_dir)
         env["EXECUTION_PAPER_ROOT"] = pr_host
@@ -432,8 +730,21 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         env["EXECUTION_TASK_OUTPUT_DIR"] = str(run_dir / "outputs" / task_id)
         existing_pythonpath = str(env.get("PYTHONPATH") or "")
         pythonpath_parts = [part for part in existing_pythonpath.split(os.pathsep) if part]
-        if pr_host not in pythonpath_parts:
-            env["PYTHONPATH"] = os.pathsep.join([pr_host, *pythonpath_parts])
+        repo_pythonpath = _repo_pythonpath_parts(pr_host, cfg)
+        for path in reversed(repo_pythonpath):
+            if path not in pythonpath_parts:
+                pythonpath_parts.insert(0, path)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+        if not docker_enabled:
+            host_venv_python = _run_dir_venv_python(run_dir)
+            if host_venv_python:
+                host_venv_bin = str(Path(host_venv_python).resolve().parent)
+                path_parts = [part for part in str(env.get("PATH") or "").split(os.pathsep) if part]
+                if host_venv_bin not in path_parts:
+                    path_parts.insert(0, host_venv_bin)
+                env["PATH"] = os.pathsep.join(path_parts)
+                env.setdefault("VIRTUAL_ENV", str(Path(host_venv_bin).parent))
+            _apply_run_local_jupyter_env(env, run_dir, cfg)
         (run_dir / "outputs" / task_id).mkdir(parents=True, exist_ok=True)
         artifact_paths = task.get("artifact_paths") or []
         if isinstance(artifact_paths, list):
@@ -475,6 +786,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                     "EXECUTION_TASK_ID": task_id,
                     "EXECUTION_OUTPUT_DIR": f"/workspace/run_dir/outputs/{task_id}",
                     "EXECUTION_TASK_OUTPUT_DIR": f"/workspace/run_dir/outputs/{task_id}",
+                    "PYTHONPATH": _repo_container_pythonpath(pr_host, cfg),
+                    "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUTF8": "1",
                 },
                 env_passthrough=_docker_env_passthrough(cfg),
                 gpus=str(cfg.get("docker_gpus") or os.environ.get("EXECUTION_DOCKER_GPUS") or "").strip()
@@ -488,7 +802,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             )
             res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=timeout_sec, env=env)
         else:
-            res = run_command(cmd=_resolve_host_python_cmd(cmd), cwd=cwd, timeout_sec=timeout_sec, env=env)
+            res = run_command(cmd=_resolve_host_python_cmd(cmd, run_dir=run_dir), cwd=cwd, timeout_sec=timeout_sec, env=env)
         persist_command_result(res, logs_dir, prefix=f"{task_id}_attempt{attempt}")
         cmd_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_command.txt")
         stdout_log = str(Path(logs_dir) / f"{task_id}_attempt{attempt}_stdout.log")
@@ -552,6 +866,26 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             task_event["semantic_failure"] = semantic_failure
         append_event(run_dir, "task_done", task_event)
 
+        archived_artifacts = _archive_task_artifacts(
+            artifact_paths=artifact_paths,
+            artifacts_dir=artifacts_dir,
+            run_dir=run_dir,
+            task_id=task_id,
+            task_index=idx,
+            task_total=total_tasks,
+            docker_enabled=docker_enabled,
+            cwd=cwd,
+            cwd_h=cwd_h,
+            pr=pr,
+            pr_h=pr_h,
+            pd=pd,
+            pd_h=pd_h,
+        )
+        declared_metric_artifact = str(task.get("metric_artifact_path") or "").replace("\\", "/").strip()
+        if (not metric_artifact) and declared_metric_artifact and declared_metric_artifact in archived_artifacts:
+            metric_artifact = declared_metric_artifact
+            item["metric_artifact"] = metric_artifact
+
         if not ok:
             # stop at first failing task (simpler, deterministic); can be extended to continue.
             missing_metrics = semantic_failure == "semantic_no_metrics"
@@ -583,69 +917,6 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             append_event(run_dir, event_kind, state["run_result"])
             state.setdefault("history", []).append({"kind": event_kind, "data": state["run_result"]})
             return state
-
-        # Archive artifacts (optional per task)
-        if isinstance(artifact_paths, list) and artifact_paths:
-            # In docker mode, the task ran against a host-mounted paper_root (now mounted at /app),
-            # but artifact globbing must happen on the host paths.
-            cwd_for_glob = cwd_h if docker_enabled else cwd
-            paper_root_for_glob = pr_h if docker_enabled else pr
-            expanded = _expand_artifact_paths(
-                cwd=cwd_for_glob,
-                paper_root=paper_root_for_glob,
-                items=[
-                    str(x)
-                    .replace("{paper_root}", paper_root_for_glob)
-                    .replace("{paper_dir}", (pd_h if docker_enabled else pd))
-                    .replace("{run_dir}", str(run_dir))
-                    for x in artifact_paths
-                    if isinstance(x, str | int | float)
-                ],
-            )
-            copied = []
-            for p in expanded:
-                try:
-                    # preserve relative path under paper_root if possible, otherwise under cwd
-                    rel = None
-                    try:
-                        root_for_rel = Path(pr_h if docker_enabled else pr).resolve()
-                        cwd_for_rel = Path(cwd_h if docker_enabled else cwd).resolve()
-                        if str(p.resolve()).lower().startswith(str(root_for_rel).lower()):
-                            rel = safe_relpath(p, root_for_rel)
-                        else:
-                            rel = safe_relpath(p, cwd_for_rel)
-                    except Exception:
-                        rel = p.name
-                    dest = Path(artifacts_dir) / rel
-                    ensure_dir(dest.parent)
-                    if p.is_dir():
-                        # copy tree into destination parent with the folder name
-                        if dest.exists():
-                            import shutil
-
-                            shutil.rmtree(dest, ignore_errors=True)
-                        import shutil
-
-                        shutil.copytree(p, dest, ignore=shutil.ignore_patterns(".git", "__pycache__"))
-                    else:
-                        import shutil
-
-                        shutil.copy2(p, dest)
-                    copied.append(str(rel).replace("\\", "/"))
-                except Exception:
-                    continue
-            if copied:
-                append_event(
-                    run_dir,
-                    "artifacts_archived",
-                    {
-                        "task": task_id,
-                        "task_index": idx,
-                        "task_total": total_tasks,
-                        "count": len(copied),
-                        "paths": copied,
-                    },
-                )
 
     # Optional: generic summarization (if metrics JSONs were produced into artifacts).
     try:

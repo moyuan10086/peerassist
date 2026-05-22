@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,11 @@ def _is_identifier_path_part(raw: str) -> bool:
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw or ""))
 
 
+def _is_test_module_stem(stem: str) -> bool:
+    name = str(stem or "").strip().lower()
+    return name.startswith("test_") or name.endswith("_test")
+
+
 def _detect_python_import_targets(repo_root: Path) -> list[str]:
     """
     Detect importable local packages/modules for repos that ship as a library
@@ -168,7 +174,9 @@ def _detect_python_import_targets(repo_root: Path) -> list[str]:
                 modules = [
                     p.stem
                     for p in direct_py
-                    if _is_identifier_path_part(p.stem) and p.stem not in {"setup", "conftest"}
+                    if _is_identifier_path_part(p.stem)
+                    and p.stem not in {"setup", "conftest"}
+                    and not _is_test_module_stem(p.stem)
                 ]
                 if not modules:
                     continue
@@ -187,7 +195,7 @@ def _detect_python_import_targets(repo_root: Path) -> list[str]:
         if not p.is_file() or p.name.startswith("."):
             continue
         stem = p.stem
-        if stem in {"setup", "conftest"} or not _is_identifier_path_part(stem):
+        if stem in {"setup", "conftest"} or _is_test_module_stem(stem) or not _is_identifier_path_part(stem):
             continue
         if stem not in seen:
             out.append(stem)
@@ -515,14 +523,44 @@ def _infer_cwd_for_command(repo_root: Path, cmd: list[str]) -> str:
 def _script_path_for_command(repo_root: Path, cmd: list[str]) -> Path | None:
     if len(cmd) < 2:
         return None
-    executable = str(cmd[0] or "").strip().lower()
-    if executable not in {"python", "python3", "bash", "sh"}:
+    cmd = _unwrap_uv_run_command(cmd)
+    if len(cmd) < 2:
+        return None
+    executable = Path(str(cmd[0] or "").strip().lower()).name
+    if executable in {"pytest", "pytest.exe"}:
+        return _pytest_script_path_for_command(repo_root, cmd[1:])
+    if executable in {"python", "python3", "python.exe"} and len(cmd) >= 4 and cmd[1] == "-m" and cmd[2] == "pytest":
+        return _pytest_script_path_for_command(repo_root, cmd[3:])
+    if executable not in {"python", "python3", "python.exe", "bash", "sh"}:
         return None
     script = _normalize_repo_relative_script_token(repo_root, str(cmd[1] or "").strip())
-    if executable in {"python", "python3"} and not script.endswith(".py"):
+    if executable in {"python", "python3", "python.exe"} and not script.endswith(".py"):
         return None
     if executable in {"bash", "sh"} and not script.endswith(".sh"):
         return None
+    return _resolve_repo_file_token(repo_root, script)
+
+
+def _unwrap_uv_run_command(cmd: list[str]) -> list[str]:
+    if len(cmd) >= 3 and Path(str(cmd[0] or "").strip().lower()).name == "uv" and str(cmd[1] or "") == "run":
+        return cmd[2:]
+    return cmd
+
+
+def _pytest_script_path_for_command(repo_root: Path, args: list[str]) -> Path | None:
+    for token in args:
+        raw = str(token or "").strip()
+        if not raw or raw.startswith("-") or raw.startswith("$"):
+            continue
+        script = _normalize_repo_relative_script_token(repo_root, raw)
+        if script.endswith(".py"):
+            path = _resolve_repo_file_token(repo_root, script)
+            if path is not None:
+                return path
+    return None
+
+
+def _resolve_repo_file_token(repo_root: Path, script: str) -> Path | None:
     direct = (repo_root / script).resolve()
     if direct.exists() and direct.is_file():
         return direct
@@ -782,6 +820,10 @@ def _command_requires_external_api(repo_root: Path, raw_cmd: str, cmd: list[str]
 
     script_path = _script_path_for_command(repo_root, cmd)
     text = _api_scan_text_for_command(repo_root, raw_cmd, script_path)
+    for module in _extract_imported_modules_from_cmd(cmd):
+        path = _module_path_for_import(repo_root, module)
+        if path is not None and _path_requires_external_api(path):
+            return True
     return _text_requires_external_api(text)
 
 
@@ -1081,9 +1123,10 @@ def _cmd_executes_notebook(cmd: list[str]) -> bool:
 def _cmd_imports_from_namespace_root(cmd: list[str], package_names: set[str]) -> bool:
     if not package_names:
         return False
+    cmd = _unwrap_uv_run_command(cmd)
     text = _cmd_text(cmd)
     if len(cmd) >= 3 and (
-        (cmd[0] in {"python", "python3"} and cmd[1] == "-c")
+        (cmd[0] in {"python", "python3", "python.exe"} and cmd[1] == "-c")
         or (cmd[0] in {"bash", "sh"} and cmd[1] in {"-c", "-lc"})
     ):
         text = cmd[2]
@@ -1116,8 +1159,9 @@ def _module_path_for_import(repo_root: Path, module: str) -> Path | None:
 
 
 def _extract_imported_modules_from_cmd(cmd: list[str]) -> list[str]:
+    cmd = _unwrap_uv_run_command(cmd)
     if len(cmd) >= 3 and (
-        (cmd[0] in {"python", "python3"} and cmd[1] == "-c")
+        (cmd[0] in {"python", "python3", "python.exe"} and cmd[1] == "-c")
         or (cmd[0] in {"bash", "sh"} and cmd[1] in {"-c", "-lc"})
     ):
         text = cmd[2]
@@ -1132,6 +1176,12 @@ def _extract_imported_modules_from_cmd(cmd: list[str]) -> list[str]:
     seen: set[str] = set()
     for pattern in patterns:
         for match in re.finditer(pattern, text):
+            module = match.group(1).strip()
+            if module and module not in seen:
+                modules.append(module)
+                seen.add(module)
+    if "import_module" in text:
+        for match in re.finditer(r"['\"]([A-Za-z_][A-Za-z0-9_.]*)['\"]", text):
             module = match.group(1).strip()
             if module and module not in seen:
                 modules.append(module)
@@ -1200,6 +1250,64 @@ def _top_level_unresolved_names(path: Path) -> list[str]:
     return sorted(unresolved)
 
 
+def _qualified_call_name(func: ast.AST) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        parent = _qualified_call_name(func.value)
+        return f"{parent}.{func.attr}" if parent else func.attr
+    return ""
+
+
+def _is_main_guard_test(node: ast.AST) -> bool:
+    text = ast.unparse(node) if hasattr(ast, "unparse") else ""
+    return "__name__" in text and "__main__" in text
+
+
+def _call_looks_import_unsafe(name: str) -> bool:
+    value = str(name or "").strip()
+    if not value:
+        return False
+    leaf = value.rsplit(".", 1)[-1]
+    if leaf in {"open", "input", "exec", "eval"}:
+        return True
+    if leaf in {"parse_args", "fit", "train", "evaluate", "download", "main"}:
+        return True
+    if leaf.startswith(("load_", "read_", "run_", "train_", "eval_", "download_")):
+        return True
+    if value.endswith((".read_csv", ".read_excel", ".read_table", ".load", ".save", ".dump", ".dumps")):
+        return True
+    return False
+
+
+def _top_level_side_effect_calls(path: Path) -> list[str]:
+    source = _read_optional(path, max_chars=200000)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    calls: list[str] = []
+    seen: set[str] = set()
+
+    def note_from_stmt(stmt: ast.stmt) -> None:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        if isinstance(stmt, ast.If) and _is_main_guard_test(stmt.test):
+            return
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _qualified_call_name(node.func)
+            if not _call_looks_import_unsafe(name) or name in seen:
+                continue
+            calls.append(name)
+            seen.add(name)
+
+    for stmt in tree.body:
+        note_from_stmt(stmt)
+    return calls
+
+
 def _smoke_disabled_reason(task: dict[str, Any]) -> str:
     cmd = task.get("cmd")
     cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
@@ -1248,6 +1356,12 @@ def _apply_static_import_policy(tasks: list[dict[str, Any]], repo_root: Path) ->
                 task["enabled"] = False
                 _set_disabled_reason(task, "module_import_has_unresolved_top_level_names")
                 task["static_import_issues"] = {"module": module, "missing_names": missing[:12]}
+                break
+            side_effects = _top_level_side_effect_calls(path)
+            if side_effects:
+                task["enabled"] = False
+                _set_disabled_reason(task, "module_import_has_top_level_side_effects")
+                task["static_import_issues"] = {"module": module, "top_level_calls": side_effects[:12]}
                 break
     return tasks
 
@@ -1469,6 +1583,157 @@ def _build_notebook_tasks(repo_root: Path, notebook_paths: list[str], mode: str)
         task = _mark_external_api_task(task, _path_requires_external_api(nb_path))
         tasks.append(task)
     return tasks
+
+
+_NOTEBOOK_IMPORT_SKIP_PARTS = {
+    ".git",
+    ".ipynb_checkpoints",
+    "__MACOSX",
+    "__pycache__",
+    "checkpoints",
+    "dist",
+    "logs",
+    "outputs",
+    "results",
+    "runs",
+    "site-packages",
+}
+
+
+def _stdlib_module_roots() -> set[str]:
+    roots = set(sys.builtin_module_names)
+    roots.update(getattr(sys, "stdlib_module_names", set()))
+    roots.update({"__future__", "typing"})
+    return roots
+
+
+def _local_module_roots(repo_root: Path) -> set[str]:
+    roots: set[str] = set()
+    for base in [repo_root, repo_root / "src"]:
+        if not base.exists() or not base.is_dir():
+            continue
+        try:
+            children = list(base.iterdir())
+        except Exception:
+            continue
+        for child in children:
+            name = child.name
+            if not _is_identifier_path_part(name) or name in _IGNORED_SOURCE_DIR_NAMES:
+                continue
+            if child.is_file() and child.suffix == ".py":
+                roots.add(child.stem)
+            elif child.is_dir() and ((child / "__init__.py").exists() or any(child.glob("*.py"))):
+                roots.add(name)
+    return roots
+
+
+def _extract_import_roots_from_source(source: str) -> set[str]:
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return set()
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".", 1)[0] for alias in node.names if alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".", 1)[0])
+    return roots
+
+
+def _notebook_import_modules(repo_root: Path, notebook_paths: list[str], *, limit: int = 8) -> list[str]:
+    stdlib = _stdlib_module_roots()
+    local = _local_module_roots(repo_root)
+    found: set[str] = set()
+    paths: list[Path] = []
+    for rel in notebook_paths[:limit]:
+        path = repo_root / rel
+        if path.exists() and path.is_file():
+            paths.append(path)
+    if not paths:
+        paths = _notebook_candidates(repo_root)[:limit]
+    for path in paths:
+        try:
+            rel_parts = path.relative_to(repo_root).parts
+        except Exception:
+            rel_parts = path.parts
+        if any(part in _NOTEBOOK_IMPORT_SKIP_PARTS for part in rel_parts):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        cells = data.get("cells") if isinstance(data, dict) else None
+        if not isinstance(cells, list):
+            continue
+        for cell in cells:
+            if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+                continue
+            source = cell.get("source")
+            text = "".join(str(item) for item in source) if isinstance(source, list) else str(source or "")
+            for root in _extract_import_roots_from_source(text):
+                if (
+                    root
+                    and _is_identifier_path_part(root)
+                    and root not in stdlib
+                    and root not in local
+                    and not root.startswith("_")
+                ):
+                    found.add(root)
+    return sorted(found)
+
+
+def _build_notebook_dependency_smoke_task(
+    repo_root: Path, notebook_paths: list[str], mode: str
+) -> dict[str, Any] | None:
+    modules = _notebook_import_modules(repo_root, notebook_paths)
+    if not modules:
+        return None
+    runtime_modules = ["nbformat", "nbconvert", "IPython"]
+    ordered = []
+    seen: set[str] = set()
+    for module in [*runtime_modules, *modules]:
+        if module not in seen:
+            ordered.append(module)
+            seen.add(module)
+    script = (
+        "import importlib; "
+        f"mods={ordered!r}; "
+        "[importlib.import_module(m) for m in mods]; "
+        "print('notebook dependency imports ok:', ','.join(mods))"
+    )
+    task = {
+        "id": "notebook_dependency_smoke",
+        "family": "smoke",
+        "enabled": mode == "full",
+        "cwd": "{paper_root}",
+        "cmd": ["python", "-c", script],
+        "timeout_sec": 300,
+        "use_conda": True,
+        "artifact_paths": [],
+        "notebook_import_modules": ordered,
+    }
+    if mode != "full":
+        task["disabled_reason"] = "full_mode_required"
+    return task
+
+
+def _insert_task_before_first_notebook_run(tasks: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
+    if any(isinstance(item, dict) and str(item.get("id") or "") == str(task.get("id") or "") for item in tasks):
+        return tasks
+    for idx, item in enumerate(tasks):
+        cmd = item.get("cmd") if isinstance(item, dict) else None
+        if isinstance(cmd, list) and _cmd_executes_notebook([str(part) for part in cmd]):
+            return [*tasks[:idx], task, *tasks[idx:]]
+    first_non_prepare = next(
+        (
+            idx
+            for idx, item in enumerate(tasks)
+            if isinstance(item, dict) and str(item.get("family") or "").strip().lower() != "prepare"
+        ),
+        len(tasks),
+    )
+    return [*tasks[:first_non_prepare], task, *tasks[first_non_prepare:]]
 
 
 def _script_text(repo_root: Path, rel_path: str, max_chars: int = 12000) -> str:
@@ -1783,6 +2048,11 @@ def _finalize_tasks(
         if tid and tid not in existing_ids:
             tasks.append(task)
             existing_ids.add(tid)
+
+    notebook_dependency_task = _build_notebook_dependency_smoke_task(repo_root, notebook_paths, mode=mode)
+    if notebook_dependency_task is not None and str(notebook_dependency_task.get("id") or "") not in existing_ids:
+        tasks = _insert_task_before_first_notebook_run(tasks, notebook_dependency_task)
+        existing_ids.add(str(notebook_dependency_task.get("id") or ""))
 
     matrix_tasks = _build_readme_matrix_tasks(readme_example_cmds, datasets, mode=mode)
     if matrix_tasks:

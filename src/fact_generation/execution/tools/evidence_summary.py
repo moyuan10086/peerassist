@@ -138,6 +138,10 @@ def _stage_from_error_text(text: str) -> str:
         for token in [
             "docker_paper_image_build_failed",
             "docker_image_build_failed",
+            "docker_daemon_unavailable",
+            "docker_cli_unavailable",
+            "docker daemon",
+            "dockerdesktoplinuxengine",
             "docker_env_ensure_failed",
             "could not select device driver",
             "module not found",
@@ -358,6 +362,12 @@ def build_execution_evidence_summary(
         for r in _as_list(judge.get("results"))
         if isinstance(r, dict) and str(r.get("type") or "") in {"paper_metric_alignment", "paper_table_alignment"}
     ]
+    alignment_comparisons = 0
+    for result in alignment_results:
+        try:
+            alignment_comparisons += int(result.get("comparisons_n") or 0)
+        except Exception:
+            continue
 
     return {
         "schema_version": 1,
@@ -386,6 +396,7 @@ def build_execution_evidence_summary(
             "tasks_not_run": sum(1 for t in tasks if t.get("status") == "not_run"),
             "metric_artifacts": len(metric_artifacts),
             "alignment_results": len(alignment_results),
+            "alignment_comparisons": alignment_comparisons,
         },
         "tasks": tasks,
         "artifacts": {

@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
 
 from common.env import load_env_file
 from fact_generation.execution.stage_runner import run_execution_stage
-from util.paper_input import infer_paper_key, materialize_paper_pdf
+from util.paper_input import infer_paper_key
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +36,10 @@ def parse_args() -> argparse.Namespace:
         "--paper-budget-sec",
         type=int,
         default=0,
-        help="Soft per-paper execution budget; 0 disables the budget",
+        help=(
+            "Optional soft per-paper execution budget. Disabled unless "
+            "EXECUTION_ENABLE_PAPER_BUDGET=1 is set; 0 disables the budget."
+        ),
     )
     p.add_argument(
         "--docker-build-timeout-sec",
@@ -87,18 +90,9 @@ def main() -> None:
     paper_key = str(args.paper_key or "").strip() or (
         infer_paper_key(args.paper_pdf) if str(args.paper_pdf or "").strip() else ""
     )
-    paper_pdf = (
-        materialize_paper_pdf(
-            args.paper_pdf,
-            run_dir / "inputs" / "source_pdf",
-            paper_key=paper_key,
-        ).path
-        if str(args.paper_pdf or "").strip()
-        else None
-    )
     result = run_execution_stage(
         run_dir=run_dir,
-        paper_pdf=paper_pdf,
+        paper_pdf=str(args.paper_pdf or "").strip() or None,
         paper_key=paper_key,
         paper_root=str(args.paper_root or "").strip(),
         paper_repo_url=str(args.paper_repo_url or "").strip(),

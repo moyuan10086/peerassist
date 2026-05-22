@@ -20,6 +20,14 @@ from .nodes.run import run_node
 State = dict[str, Any]
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _paper_budget_enabled(cfg: dict[str, Any]) -> bool:
+    return _truthy(cfg.get("enable_paper_budget") or os.environ.get("EXECUTION_ENABLE_PAPER_BUDGET"))
+
+
 def _record_node_timing(state: State, node: str, duration_sec: float) -> None:
     duration = max(0.0, float(duration_sec or 0.0))
     timings = state.setdefault("node_timings", {})
@@ -83,15 +91,17 @@ def _compute_exit_status(state: State) -> str:
 
 
 def is_budget_exhausted(state: State) -> bool:
-    """Soft wall-clock budget check shared by run/judge nodes.
+    """Optional soft wall-clock budget check shared by run/judge nodes.
 
-    Returns True if ``cfg.paper_budget_sec > 0`` and the elapsed time since
-    ``cfg.t_start_monotonic`` exceeds it. Mutates ``state`` to record a
-    ``budget_exhausted`` history event the first time it fires.
+    The paper-level budget is disabled by default because real paper
+    reproduction often spends a long time in source download, task planning,
+    Docker build, or training before useful metrics appear. Set
+    ``EXECUTION_ENABLE_PAPER_BUDGET=1`` or ``cfg.enable_paper_budget`` to use
+    this as an explicit smoke/CI guard.
     """
     cfg = state.get("config") or {}
     budget = int(cfg.get("paper_budget_sec") or 0)
-    if budget <= 0:
+    if budget <= 0 or not _paper_budget_enabled(cfg):
         return False
     t0 = float(cfg.get("t_start_monotonic") or 0.0)
     if t0 <= 0.0:
@@ -167,16 +177,27 @@ def _route_after_judge(state: State) -> str:
         has_no_baseline = any(
             isinstance(r, dict) and r.get("type") == "inconclusive_no_baseline" for r in results
         )
-        alignment_failed = any(
+        alignment_metric_mismatch = any(
+            isinstance(r, dict)
+            and r.get("type") in {"paper_metric_alignment", "paper_table_alignment"}
+            and int(r.get("matched") or 0) > 0
+            and int(r.get("failed_n") or 0) > 0
+            for r in results
+        )
+        alignment_unmatched = any(
             isinstance(r, dict)
             and r.get("type") in {"paper_metric_alignment", "paper_table_alignment"}
             and (
-                int(r.get("failed_n") or 0) > 0
-                or (int(r.get("extracted_targets") or 0) > 0 and int(r.get("matched") or 0) == 0)
+                int(r.get("extracted_targets") or 0) > 0
+                and int(r.get("matched") or 0) == 0
             )
             for r in results
         )
-        if has_no_baseline and not alignment_failed:
+        # A matched metric that is outside tolerance is a reviewer-facing
+        # deviation, not an execution error to "repair" by changing the code.
+        if alignment_metric_mismatch:
+            return "finalize"
+        if has_no_baseline and not alignment_unmatched:
             return "finalize"
     return "fix"
 

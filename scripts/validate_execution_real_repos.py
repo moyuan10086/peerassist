@@ -72,7 +72,10 @@ def parse_args() -> argparse.Namespace:
         "--paper-budget-sec",
         type=int,
         default=0,
-        help="Soft per-paper budget for validation; 0 means no budget limit",
+        help=(
+            "Optional soft per-paper budget for smoke/CI validation. Disabled unless "
+            "EXECUTION_ENABLE_PAPER_BUDGET=1 is set; 0 means no budget limit."
+        ),
     )
     p.add_argument("--clone-timeout-sec", type=int, default=600)
     p.add_argument(

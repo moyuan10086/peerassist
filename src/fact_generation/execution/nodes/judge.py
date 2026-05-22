@@ -100,6 +100,7 @@ def judge_node(state: dict[str, Any]) -> dict[str, Any]:
                     "failed_n": ar.failed,
                     "unmatched_run_metrics": ar.unmatched_run_metrics,
                     "critiques_n": len(ar.critiques or []),
+                    "comparisons_n": len(ar.comparisons or []),
                     "alignment_artifact": "alignment/alignment.json",
                 }
             )

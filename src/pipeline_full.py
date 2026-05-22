@@ -450,7 +450,10 @@ def parse_args() -> argparse.Namespace:
         "--execution-paper-budget-sec",
         type=int,
         default=0,
-        help="Soft per-paper budget for execution tasks; 0 disables the budget.",
+        help=(
+            "Optional soft per-paper execution budget. Disabled unless "
+            "EXECUTION_ENABLE_PAPER_BUDGET=1 is set; 0 disables the budget."
+        ),
     )
     p.add_argument(
         "--execution-docker-build-timeout-sec",

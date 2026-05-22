@@ -1038,6 +1038,13 @@ def _docker_cli_env(cfg: dict) -> dict[str, str]:
     return env
 
 
+def _docker_probe_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        env.pop(key, None)
+    return env
+
+
 def _docker_build_args(cfg: dict) -> list[str]:
     proxy_values = _docker_proxy_env(cfg)
     values = {
@@ -1079,6 +1086,43 @@ def _docker_include_notebook_requirements(cfg: dict) -> bool:
     return mode != "smoke"
 
 
+def _docker_daemon_unavailable(result: object) -> bool:
+    text = " ".join(
+        [
+            str(getattr(result, "stdout", "") or ""),
+            str(getattr(result, "stderr", "") or ""),
+        ]
+    ).lower()
+    return any(
+        token in text
+        for token in [
+            "cannot connect to the docker daemon",
+            "is the docker daemon running",
+            "dockerdesktoplinuxengine",
+            "docker desktop linux engine",
+            "open //./pipe/docker",
+            "open \\\\.\\pipe\\docker",
+        ]
+    )
+
+
+def _docker_preflight_unavailable() -> str:
+    result = run_command(
+        docker_cmd(["version", "--format", "{{.Server.Version}}"]),
+        cwd=str(_repo_root()),
+        timeout_sec=15,
+        env=_docker_probe_env(),
+    )
+    if result.returncode == 0:
+        return ""
+    tail = (result.stderr or result.stdout or "")[-1200:].replace("\r", "")
+    if _docker_daemon_unavailable(result):
+        return f"docker_daemon_unavailable: {tail}"
+    if result.returncode == 127:
+        return f"docker_cli_unavailable: {tail}"
+    return ""
+
+
 def docker_ensure_paper_image(
     cfg: dict, *, paper_key: str, paper_root_host: str, python_spec: str, timeout_sec: int = 3600
 ) -> tuple[bool, str]:
@@ -1089,6 +1133,9 @@ def docker_ensure_paper_image(
     pr = Path(paper_root_host).resolve()
     if not pr.exists():
         return False, f"paper_root_not_found: {pr}"
+    unavailable = _docker_preflight_unavailable()
+    if unavailable:
+        return False, unavailable
     # Build tag is derived from dockerfile template + synthesized requirements
     # hash + python_spec. Many research repos document deps only in README or
     # rely on implicit lab environments, so root requirements.txt alone is too
@@ -1127,6 +1174,9 @@ def docker_ensure_paper_image(
     r = run_command(docker_cmd(["image", "inspect", image]), cwd=str(_repo_root()), timeout_sec=60, env=docker_env)
     if r.returncode == 0:
         return True, image
+    if _docker_daemon_unavailable(r):
+        tail = (r.stderr or r.stdout or "")[-1200:].replace("\r", "")
+        return False, f"docker_daemon_unavailable: {tail}"
 
     deployment_dir = pr / "deployment"
     legacy_deployment_dir = pr.parent / "deployment"
@@ -1299,6 +1349,8 @@ def docker_run_paper_image(
     default_env = {
         "PYTHONPATH": paper_root_container,
         "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
         "PYTHONPYCACHEPREFIX": f"{run_dir_container}/.pycache",
         "XDG_CACHE_HOME": f"{run_dir_container}/.cache",
         "HF_HOME": f"{run_dir_container}/.cache/huggingface",

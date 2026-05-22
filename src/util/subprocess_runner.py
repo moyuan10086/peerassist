@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -27,6 +28,161 @@ def _tail(text: str, n: int = 2000) -> str:
     return s[-n:]
 
 
+def _create_windows_kill_on_close_job(proc: subprocess.Popen[str]) -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class JobObjectBasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class JobObjectExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JobObjectBasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = JobObjectExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+        if not ok:
+            kernel32.CloseHandle(job)
+            return None
+        if not kernel32.AssignProcessToJobObject(job, int(proc._handle)):
+            kernel32.CloseHandle(job)
+            return None
+        return int(job)
+    except Exception:
+        return None
+
+
+def _close_windows_job(job_handle: int | None) -> None:
+    if os.name != "nt" or not job_handle:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(wintypes.HANDLE(job_handle))
+    except Exception:
+        pass
+
+
+def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    try:
+        if os.name == "nt":
+            ps_list_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$root = {int(proc.pid)}
+$front = @($root)
+$all = @()
+while ($front.Count -gt 0) {{
+    $children = Get-CimInstance Win32_Process | Where-Object {{ $front -contains $_.ParentProcessId }}
+    $ids = @($children | ForEach-Object {{ [int]$_.ProcessId }})
+    $all += $ids
+    $front = $ids
+}}
+(($all + $root) | Select-Object -Unique) -join "`n"
+"""
+            pids = [int(proc.pid)]
+            try:
+                listed = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_list_script],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=10,
+                    check=False,
+                )
+                discovered = [int(x.strip()) for x in (listed.stdout or "").splitlines() if x.strip().isdigit()]
+                # Kill children before parents, while we still have the original
+                # descendant PIDs. Once the parent dies, Windows can re-parent
+                # children and parent-id traversal loses them.
+                pids = list(dict.fromkeys([*discovered, int(proc.pid)]))
+            except Exception:
+                pids = [int(proc.pid)]
+            for pid in pids:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
+            ps_stop = " ".join(str(pid) for pid in pids)
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"Stop-Process -Id {ps_stop.replace(' ', ',')} -Force -ErrorAction SilentlyContinue",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def run_command(
     cmd: list[str],
     cwd: str,
@@ -44,30 +200,45 @@ def run_command(
         except Exception:
             pass
     try:
-        proc = subprocess.run(
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        )
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=effective_timeout,
             env=env or os.environ.copy(),
             shell=False,
-            check=False,
+            creationflags=creationflags,
+            start_new_session=os.name != "nt",
         )
-        rc = proc.returncode
-        out = proc.stdout or ""
-        err = proc.stderr or ""
-    except subprocess.TimeoutExpired as e:
-        rc = 124
-        out_raw = e.stdout or ""
-        err_raw = e.stderr or ""
-        out = out_raw.decode("utf-8", errors="replace") if isinstance(out_raw, bytes) else str(out_raw)
-        err_body = err_raw.decode("utf-8", errors="replace") if isinstance(err_raw, bytes) else str(err_raw)
-        err = f"TimeoutExpired: command exceeded timeout_sec={effective_timeout}"
-        if err_body.strip():
-            err = f"{err}\n{err_body}"
+        windows_job = _create_windows_kill_on_close_job(proc)
+        try:
+            out, err = proc.communicate(timeout=effective_timeout)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired as e:
+            _close_windows_job(windows_job)
+            windows_job = None
+            _kill_process_tree(proc)
+            try:
+                out, err = proc.communicate(timeout=5)
+            except Exception:
+                out = e.stdout or ""
+                err = e.stderr or ""
+            rc = 124
+            err = f"TimeoutExpired: command exceeded timeout_sec={effective_timeout}" + (
+                f"\n{err}" if str(err or "").strip() else ""
+            )
+        finally:
+            _close_windows_job(windows_job)
+        if rc is None:
+            rc = 124
+        out = out or ""
+        err = err or ""
     except Exception as e:
         # Never crash the workflow due to missing executables (WinError 2), permission issues, etc.
         rc = 127
