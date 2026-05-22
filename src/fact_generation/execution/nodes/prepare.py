@@ -26,6 +26,10 @@ from util.subprocess_runner import persist_command_result, run_command
 from ..tools.docker import _collect_repo_requirements_text, docker_ensure_paper_image, docker_strategy
 
 
+class DownloadLimitError(RuntimeError):
+    pass
+
+
 def _repo_root() -> Path:
     """Return the FactReview repository root (where ``demos/`` and ``runs/`` live)."""
     return Path(__file__).resolve().parents[4]
@@ -1017,22 +1021,50 @@ def _download_openreview_candidate_sources(
     raise RuntimeError(f"openreview_candidate_source_download_failed: {detail}")
 
 
+def _download_max_bytes() -> int:
+    raw = os.getenv("EXECUTION_DOWNLOAD_MAX_BYTES") or os.getenv("FACTREVIEW_DOWNLOAD_MAX_BYTES") or ""
+    if raw:
+        try:
+            return max(1_000_000, int(raw))
+        except Exception:
+            pass
+    return 300 * 1024 * 1024
+
+
 def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
     last_exc: Exception | None = None
+    max_bytes = _download_max_bytes()
     for attempt in range(3):
         try:
             req = Request(url, headers={"User-Agent": "FactReview execution"})
             deadline = time.monotonic() + max(30, int(timeout_sec or 180))
             chunks: list[bytes] = []
-            with urlopen(req, timeout=min(30, max(1, int(timeout_sec or 180)))) as resp:
+            with urlopen(req, timeout=min(10, max(1, int(timeout_sec or 180)))) as resp:
+                content_length = str(resp.headers.get("Content-Length") or "").strip()
+                if content_length:
+                    try:
+                        if int(content_length) > max_bytes:
+                            raise DownloadLimitError(
+                                f"download_too_large: {url} content_length={content_length} max_bytes={max_bytes}"
+                            )
+                    except ValueError:
+                        pass
+                total = 0
                 while True:
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"download_total_timeout: {url}")
-                    chunk = resp.read(1024 * 1024)
+                    chunk = resp.read(256 * 1024)
                     if not chunk:
                         return b"".join(chunks)
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise DownloadLimitError(
+                            f"download_too_large: {url} bytes_read={total} max_bytes={max_bytes}"
+                        )
                     chunks.append(chunk)
         except HTTPError:
+            raise
+        except DownloadLimitError:
             raise
         except Exception as exc:
             last_exc = exc
@@ -1281,7 +1313,21 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
                     f"content_keys={','.join(manifest['content_keys'])}"
                 ) from exc
         raise RuntimeError(f"openreview_supplementary_http_{exc.code}") from exc
-    except (URLError, TimeoutError, OSError) as exc:
+    except (URLError, TimeoutError, OSError, DownloadLimitError) as exc:
+        if forum_id and candidate_urls:
+            try:
+                return _download_openreview_candidate_sources(
+                    raw_url=raw_url,
+                    forum_id=forum_id,
+                    attachment_url=url,
+                    attachment_status=0,
+                    content=content,
+                    candidate_urls=candidate_urls,
+                    dest=dest,
+                    logs_dir=logs_dir,
+                )
+            except RuntimeError as candidate_exc:
+                raise candidate_exc from exc
         raise RuntimeError(f"openreview_supplementary_unavailable: {exc}") from exc
     archive_path = logs_dir / "openreview_supplementary.archive"
     archive_path.write_bytes(blob)

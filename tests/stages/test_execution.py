@@ -2185,6 +2185,42 @@ def test_openreview_download_falls_back_to_candidate_repo(monkeypatch, tmp_path)
     assert persisted["method"] == "candidate_git_clone"
 
 
+def test_openreview_download_falls_back_to_direct_attachment_after_timeout(monkeypatch, tmp_path) -> None:
+    blob_io = BytesIO()
+    with zipfile.ZipFile(blob_io, "w") as zf:
+        zf.writestr("repo-main/README.md", "# demo\n")
+
+    def fake_metadata(forum_id: str, timeout_sec: int = 30) -> dict[str, object]:
+        assert forum_id == "slow123"
+        return {
+            "supplementary_material": {"value": "/attachment/direct-hash.zip"},
+            "title": {"value": "Paper with direct attachment"},
+        }
+
+    def fake_download(url: str, timeout_sec: int = 180) -> bytes:
+        if "attachment?id=slow123" in url:
+            raise TimeoutError("download_total_timeout")
+        if url == "https://openreview.net/attachment/direct-hash.zip":
+            return blob_io.getvalue()
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._openreview_note_metadata", fake_metadata)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._download_url_bytes", fake_download)
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    manifest = _download_openreview_supplementary(
+        "https://openreview.net/forum?id=slow123",
+        tmp_path / "source",
+        logs_dir,
+    )
+
+    assert manifest["method"] == "candidate_archive"
+    assert manifest["attachment_http_status"] == 0
+    assert manifest["candidate_url"] == "https://openreview.net/attachment/direct-hash.zip"
+    assert (tmp_path / "source" / "README.md").exists()
+
+
 def test_extract_archive_bytes_flattens_single_root_and_blocks_traversal(tmp_path) -> None:
     blob_io = BytesIO()
     with zipfile.ZipFile(blob_io, "w") as zf:
