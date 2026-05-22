@@ -766,7 +766,232 @@ def _is_openreview_attachment_url(raw_url: str) -> bool:
         parsed = urlparse(str(raw_url or "").strip())
     except Exception:
         return False
-    return parsed.netloc.lower() == "openreview.net" and parsed.path.rstrip("/") == "/attachment"
+    return parsed.netloc.lower() == "openreview.net" and (
+        parsed.path.rstrip("/") == "/attachment" or parsed.path.startswith("/attachment/")
+    )
+
+
+def _openreview_content_value(item: Any) -> Any:
+    if isinstance(item, dict) and "value" in item:
+        return item.get("value")
+    return item
+
+
+def _openreview_note_metadata(forum_id: str, *, timeout_sec: int = 30) -> dict[str, Any]:
+    fid = str(forum_id or "").strip()
+    if not fid:
+        return {}
+    url = f"https://api2.openreview.net/notes?id={quote(fid, safe='')}"
+    try:
+        payload = json.loads(_download_url_bytes(url, timeout_sec=timeout_sec).decode("utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    notes = payload.get("notes") if isinstance(payload, dict) else None
+    if not isinstance(notes, list) or not notes or not isinstance(notes[0], dict):
+        return {}
+    content = notes[0].get("content")
+    if not isinstance(content, dict):
+        return {}
+    return content
+
+
+def _openreview_candidate_source_urls(content: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    source_key_re = re.compile(
+        r"(?:code|software|source|repo|repository|artifact|supplement|supplementary|data|dataset)",
+        flags=re.IGNORECASE,
+    )
+    url_re = re.compile(r"https?://[^\s<>'\")]+|/attachment(?:\?[^\s<>'\")]+|/[^\s<>'\")]+)")
+
+    def url_looks_source(url: str) -> bool:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        if host in {
+            "github.com",
+            "gitlab.com",
+            "bitbucket.org",
+            "huggingface.co",
+            "anonymous.4open.science",
+            "zenodo.org",
+            "figshare.com",
+            "osf.io",
+            "www.kaggle.com",
+            "kaggle.com",
+        }:
+            return True
+        if host == "openreview.net" and (
+            parsed.path.rstrip("/") == "/attachment" or parsed.path.startswith("/attachment/")
+        ):
+            query = parse_qs(parsed.query or "")
+            name = str((query.get("name") or [""])[0])
+            return parsed.path.startswith("/attachment/") or bool(source_key_re.search(name))
+        return False
+
+    for key, raw_value in (content or {}).items():
+        value = _openreview_content_value(raw_value)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            text = str(item or "")
+            if not text:
+                continue
+            for match in url_re.finditer(text):
+                url = match.group(0).rstrip(".,;")
+                if url.startswith("/attachment"):
+                    url = "https://openreview.net" + url
+                if not (source_key_re.search(str(key)) or url_looks_source(url)):
+                    continue
+                if url not in seen:
+                    candidates.append(url)
+                    seen.add(url)
+    return candidates
+
+
+def _normalize_cloneable_repo_url(raw_url: str) -> str:
+    try:
+        parsed = urlparse(str(raw_url or "").strip())
+    except Exception:
+        return ""
+    host = parsed.netloc.lower()
+    if host not in {"github.com", "gitlab.com", "bitbucket.org"}:
+        return ""
+    parts = [unquote(p).strip() for p in parsed.path.split("/") if p.strip()]
+    if len(parts) < 2:
+        return ""
+    owner = parts[0]
+    repo = parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not owner or not repo:
+        return ""
+    return f"https://{host}/{owner}/{repo}"
+
+
+def _count_files_for_manifest(root: Path, *, limit: int = 20) -> tuple[int, list[str]]:
+    count = 0
+    sample: list[str] = []
+    try:
+        for path in root.rglob("*"):
+            if ".git" in path.parts or not path.is_file():
+                continue
+            count += 1
+            if len(sample) < limit:
+                sample.append(str(path.relative_to(root)).replace("\\", "/"))
+    except Exception:
+        return count, sample
+    return count, sample
+
+
+def _download_openreview_candidate_source(candidate_url: str, dest: Path, logs_dir: Path, index: int) -> dict[str, Any]:
+    url = str(candidate_url or "").strip()
+    if not url:
+        raise RuntimeError("candidate_url_empty")
+    if _is_openreview_attachment_url(url) or urlparse(url).path.lower().endswith(
+        (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2")
+    ):
+        blob = _download_url_bytes(url, timeout_sec=300)
+        archive_manifest = _extract_archive_bytes(blob, dest)
+        return {
+            "method": "candidate_archive",
+            "candidate_url": url,
+            "files": archive_manifest.get("files", 0),
+            "sample_files": archive_manifest.get("sample_files", []),
+        }
+
+    anonymous_4open_id = _anonymous_4open_repo_id(url)
+    if anonymous_4open_id:
+        manifest = _download_anonymous_4open_repo(url, dest, logs_dir)
+        manifest["method"] = f"candidate_anonymous_4open:{manifest.get('method') or 'unknown'}"
+        manifest["candidate_url"] = url
+        return manifest
+
+    clone_url = _normalize_cloneable_repo_url(url)
+    if not clone_url:
+        raise RuntimeError("candidate_url_unsupported")
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    ensure_dir(dest.parent)
+    use_blob_filter = (
+        str(os.getenv("EXECUTION_GIT_CLONE_FILTER_BLOB_NONE") or "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    clone_cmd = ["git", "clone", "--depth", "1"]
+    if use_blob_filter:
+        clone_cmd.extend(["--filter", "blob:none"])
+    clone_cmd.extend([clone_url, str(dest)])
+    res = run_command(cmd=clone_cmd, cwd=str(dest.parent), timeout_sec=3600)
+    persist_command_result(res, logs_dir, prefix=f"openreview_candidate_{index}_clone")
+    if res.returncode != 0 and use_blob_filter:
+        shutil.rmtree(dest, ignore_errors=True)
+        fallback_cmd = ["git", "clone", "--depth", "1", clone_url, str(dest)]
+        res = run_command(cmd=fallback_cmd, cwd=str(dest.parent), timeout_sec=3600)
+        persist_command_result(res, logs_dir, prefix=f"openreview_candidate_{index}_clone_fallback")
+    if res.returncode != 0:
+        raise RuntimeError(f"candidate_git_clone_failed:{res.returncode}")
+    files, sample = _count_files_for_manifest(dest)
+    return {
+        "method": "candidate_git_clone",
+        "candidate_url": url,
+        "clone_url": clone_url,
+        "files": files,
+        "sample_files": sample,
+    }
+
+
+def _download_openreview_candidate_sources(
+    *,
+    raw_url: str,
+    forum_id: str,
+    attachment_url: str,
+    attachment_status: int,
+    content: dict[str, Any],
+    candidate_urls: list[str],
+    dest: Path,
+    logs_dir: Path,
+) -> dict[str, Any]:
+    attempts: list[dict[str, str]] = []
+    for index, candidate_url in enumerate(candidate_urls, start=1):
+        try:
+            manifest = _download_openreview_candidate_source(candidate_url, dest, logs_dir, index)
+        except Exception as exc:
+            attempts.append(
+                {
+                    "url": str(candidate_url),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        manifest.update(
+            {
+                "source": raw_url,
+                "attachment_url": attachment_url,
+                "attachment_http_status": attachment_status,
+                "forum_id": forum_id,
+                "content_keys": sorted(str(k) for k in content),
+                "candidate_source_urls": candidate_urls,
+                "candidate_attempts": attempts,
+            }
+        )
+        write_text(
+            logs_dir / "openreview_supplementary_download.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        )
+        return manifest
+    manifest = {
+        "source": raw_url,
+        "forum_id": forum_id,
+        "content_keys": sorted(str(k) for k in content),
+        "candidate_source_urls": candidate_urls,
+        "attachment_url": attachment_url,
+        "http_status": attachment_status,
+        "candidate_attempts": attempts,
+    }
+    write_text(
+        logs_dir / "openreview_supplementary_metadata.json",
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    )
+    detail = "; ".join(f"{a['url']} -> {a['error']}" for a in attempts[:5]) or "no_supported_candidate"
+    raise RuntimeError(f"openreview_candidate_source_download_failed: {detail}")
 
 
 def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
@@ -868,6 +1093,8 @@ def _extract_archive_bytes(blob: bytes, dest: Path) -> dict[str, Any]:
 
 def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path) -> dict[str, Any]:
     forum_id = _openreview_forum_id(raw_url)
+    content = _openreview_note_metadata(forum_id) if forum_id else {}
+    candidate_urls = _openreview_candidate_source_urls(content)
     if _is_openreview_attachment_url(raw_url):
         url = raw_url
     elif forum_id:
@@ -877,6 +1104,38 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
     try:
         blob = _download_url_bytes(url)
     except HTTPError as exc:
+        if forum_id and candidate_urls:
+            try:
+                return _download_openreview_candidate_sources(
+                    raw_url=raw_url,
+                    forum_id=forum_id,
+                    attachment_url=url,
+                    attachment_status=int(exc.code),
+                    content=content,
+                    candidate_urls=candidate_urls,
+                    dest=dest,
+                    logs_dir=logs_dir,
+                )
+            except RuntimeError as candidate_exc:
+                raise candidate_exc from exc
+        if forum_id:
+            manifest = {
+                "source": raw_url,
+                "forum_id": forum_id,
+                "content_keys": sorted(str(k) for k in content),
+                "candidate_source_urls": candidate_urls,
+                "attachment_url": url,
+                "http_status": exc.code,
+            }
+            write_text(
+                logs_dir / "openreview_supplementary_metadata.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            )
+            if not candidate_urls:
+                raise RuntimeError(
+                    "openreview_no_supplementary_or_code_url: "
+                    f"content_keys={','.join(manifest['content_keys'])}"
+                ) from exc
         raise RuntimeError(f"openreview_supplementary_http_{exc.code}") from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise RuntimeError(f"openreview_supplementary_unavailable: {exc}") from exc
@@ -887,6 +1146,10 @@ def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path)
     except RuntimeError as exc:
         raise RuntimeError(f"openreview_supplementary_extract_failed: {exc}") from exc
     manifest.update({"source": raw_url, "attachment_url": url, "forum_id": forum_id})
+    if content:
+        manifest["content_keys"] = sorted(str(k) for k in content)
+    if candidate_urls:
+        manifest["candidate_source_urls"] = candidate_urls
     write_text(
         logs_dir / "openreview_supplementary_download.json",
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",

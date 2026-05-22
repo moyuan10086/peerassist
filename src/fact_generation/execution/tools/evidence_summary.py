@@ -262,6 +262,9 @@ def _task_rows(run_result: dict[str, Any], planned_tasks: list[dict[str, Any]] |
                 "static_import_issues": task.get("static_import_issues")
                 if isinstance(task.get("static_import_issues"), dict)
                 else {},
+                "static_entrypoint_issues": task.get("static_entrypoint_issues")
+                if isinstance(task.get("static_entrypoint_issues"), dict)
+                else {},
                 "returncode": task.get("returncode"),
                 "duration_sec": task.get("duration_sec"),
                 "metric_artifact": str(task.get("metric_artifact") or ""),
@@ -294,6 +297,9 @@ def _task_rows(run_result: dict[str, Any], planned_tasks: list[dict[str, Any]] |
                 "requires_external_api": bool(planned.get("requires_external_api")),
                 "static_import_issues": planned.get("static_import_issues")
                 if isinstance(planned.get("static_import_issues"), dict)
+                else {},
+                "static_entrypoint_issues": planned.get("static_entrypoint_issues")
+                if isinstance(planned.get("static_entrypoint_issues"), dict)
                 else {},
                 "returncode": planned.get("returncode"),
                 "duration_sec": planned.get("duration_sec"),

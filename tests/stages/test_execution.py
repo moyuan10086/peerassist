@@ -14,6 +14,7 @@ import shutil
 import sys
 import zipfile
 from io import BytesIO
+from pathlib import Path
 from urllib.error import HTTPError
 
 import pytest
@@ -35,9 +36,11 @@ from fact_generation.execution.nodes.plan import _is_runtime_pip_install_cmd, _m
 from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
     _download_anonymous_4open_repo,
+    _download_openreview_supplementary,
     _extract_archive_bytes,
     _infer_python_spec_from_repo,
     _normalize_shell_script_line_endings,
+    _openreview_candidate_source_urls,
     _openreview_forum_id,
     _patch_api_placeholders_for_env,
 )
@@ -71,11 +74,12 @@ from fact_generation.execution.tools.metrics import compute_check
 from fact_generation.execution.tools.paper_tables import extract_paper_metric_targets
 from fact_generation.execution.tools.task_infer import (
     _apply_external_api_policy,
+    _apply_missing_entrypoint_policy,
     _apply_mode_policy,
     _apply_static_import_policy,
     infer_tasks_heuristic,
 )
-from util.subprocess_runner import run_command
+from util.subprocess_runner import CommandResult, run_command
 
 
 def test_extracts_generic_paper_metric_table(tmp_path) -> None:
@@ -1375,6 +1379,31 @@ def test_static_import_policy_disables_namespace_package_root_import(tmp_path) -
     assert tasks[1]["enabled"] is True
 
 
+def test_missing_entrypoint_policy_disables_nonexistent_script(tmp_path) -> None:
+    tasks = [
+        {
+            "id": "eval_missing",
+            "family": "eval",
+            "enabled": True,
+            "cmd": ["python", "compute_pareto_metrics.py", "--out_dir", "outputs/pareto_eval"],
+        },
+        {
+            "id": "train_ok",
+            "family": "train",
+            "enabled": True,
+            "cmd": ["python", "{paper_root}/run.py", "--help"],
+        },
+    ]
+    (tmp_path / "run.py").write_text("print('ok')\n", encoding="utf-8")
+
+    _apply_missing_entrypoint_policy(tasks, tmp_path)
+
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "script_entrypoint_not_found"
+    assert tasks[0]["static_entrypoint_issues"] == {"missing_script": "compute_pareto_metrics.py"}
+    assert tasks[1]["enabled"] is True
+
+
 def test_plan_detects_runtime_pip_installs_for_paper_image_patch() -> None:
     assert _is_runtime_pip_install_cmd(["python", "-m", "pip", "install", "iemm"])
     assert _is_runtime_pip_install_cmd(["pip", "install", "-r", "requirements.txt"])
@@ -2021,6 +2050,97 @@ def test_openreview_forum_id_parses_forum_and_attachment_links() -> None:
         == "wKPQXtVejB"
     )
     assert _openreview_forum_id("https://github.com/mainlp/explaind") == ""
+
+
+def test_openreview_candidate_source_urls_extracts_code_and_attachments() -> None:
+    urls = _openreview_candidate_source_urls(
+        {
+            "title": {"value": "A paper with https://example.com/not-code"},
+            "code": {"value": "https://github.com/org/repo."},
+            "supplementary_material": {"value": "/attachment?id=wKPQXtVejB&name=supplementary_material"},
+            "software": {"value": "/attachment/abc123.zip"},
+            "dataset": {"value": ["See https://huggingface.co/datasets/org/data,"]},
+        }
+    )
+
+    assert urls == [
+        "https://github.com/org/repo",
+        "https://openreview.net/attachment?id=wKPQXtVejB&name=supplementary_material",
+        "https://openreview.net/attachment/abc123.zip",
+        "https://huggingface.co/datasets/org/data",
+    ]
+
+
+def test_openreview_download_logs_metadata_when_no_public_supplement(monkeypatch, tmp_path) -> None:
+    def fake_metadata(forum_id: str, timeout_sec: int = 30) -> dict[str, object]:
+        assert forum_id == "E8HGf11jTn"
+        return {
+            "title": {"value": "Ransomware Detection on Android"},
+            "pdf": {"value": "/pdf?id=E8HGf11jTn"},
+            "abstract": {"value": "No public source field is present."},
+        }
+
+    def fake_download(url: str, timeout_sec: int = 180) -> bytes:
+        raise HTTPError(url, 404, "not found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._openreview_note_metadata", fake_metadata)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._download_url_bytes", fake_download)
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    with pytest.raises(RuntimeError, match="openreview_no_supplementary_or_code_url"):
+        _download_openreview_supplementary(
+            "https://openreview.net/forum?id=E8HGf11jTn",
+            tmp_path / "source",
+            logs_dir,
+        )
+
+    manifest = json.loads((logs_dir / "openreview_supplementary_metadata.json").read_text(encoding="utf-8"))
+    assert manifest["forum_id"] == "E8HGf11jTn"
+    assert manifest["http_status"] == 404
+    assert manifest["candidate_source_urls"] == []
+    assert manifest["content_keys"] == ["abstract", "pdf", "title"]
+
+
+def test_openreview_download_falls_back_to_candidate_repo(monkeypatch, tmp_path) -> None:
+    def fake_metadata(forum_id: str, timeout_sec: int = 30) -> dict[str, object]:
+        assert forum_id == "abc123"
+        return {
+            "code": {"value": "https://github.com/example/paper-code/tree/main"},
+            "title": {"value": "Paper with separate code"},
+        }
+
+    def fake_download(url: str, timeout_sec: int = 180) -> bytes:
+        assert "openreview.net/attachment" in url
+        raise HTTPError(url, 404, "not found", hdrs=None, fp=None)
+
+    def fake_run_command(cmd: list[str], cwd: str, timeout_sec: int | None = 3600, env=None) -> CommandResult:
+        assert cmd[:3] == ["git", "clone", "--depth"]
+        assert cmd[-2] == "https://github.com/example/paper-code"
+        dest = Path(cmd[-1])
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "README.md").write_text("# demo\n", encoding="utf-8")
+        return CommandResult(cmd=cmd, cwd=cwd, returncode=0, stdout="", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._openreview_note_metadata", fake_metadata)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._download_url_bytes", fake_download)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare.run_command", fake_run_command)
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    manifest = _download_openreview_supplementary(
+        "https://openreview.net/forum?id=abc123",
+        tmp_path / "source",
+        logs_dir,
+    )
+
+    assert manifest["method"] == "candidate_git_clone"
+    assert manifest["clone_url"] == "https://github.com/example/paper-code"
+    assert manifest["attachment_http_status"] == 404
+    assert manifest["candidate_source_urls"] == ["https://github.com/example/paper-code/tree/main"]
+    assert (tmp_path / "source" / "README.md").exists()
+    persisted = json.loads((logs_dir / "openreview_supplementary_download.json").read_text(encoding="utf-8"))
+    assert persisted["method"] == "candidate_git_clone"
 
 
 def test_extract_archive_bytes_flattens_single_root_and_blocks_traversal(tmp_path) -> None:

@@ -111,6 +111,7 @@ def _task_result_base(task: dict[str, Any], task_id: str) -> dict[str, Any]:
         "disabled_reason",
         "requires_external_api",
         "static_import_issues",
+        "static_entrypoint_issues",
     }
     out: dict[str, Any] = {"id": task_id}
     for key in keep:

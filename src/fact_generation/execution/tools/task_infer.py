@@ -518,7 +518,7 @@ def _script_path_for_command(repo_root: Path, cmd: list[str]) -> Path | None:
     executable = str(cmd[0] or "").strip().lower()
     if executable not in {"python", "python3", "bash", "sh"}:
         return None
-    script = str(cmd[1] or "").strip()
+    script = _normalize_repo_relative_script_token(repo_root, str(cmd[1] or "").strip())
     if executable in {"python", "python3"} and not script.endswith(".py"):
         return None
     if executable in {"bash", "sh"} and not script.endswith(".sh"):
@@ -539,6 +539,20 @@ def _script_path_for_command(repo_root: Path, cmd: list[str]) -> Path | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _normalize_repo_relative_script_token(repo_root: Path, token: str) -> str:
+    script = str(token or "").strip().strip("'\"").replace("\\", "/")
+    for prefix in ("{paper_root}/", "./"):
+        if script.startswith(prefix):
+            script = script[len(prefix) :]
+    try:
+        path = Path(script)
+        if path.is_absolute():
+            return path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except Exception:
+        pass
+    return script
+
+
 def _path_tokens(path: str) -> set[str]:
     return {
         tok
@@ -553,7 +567,7 @@ def _repair_missing_script_command(repo_root: Path, cmd: list[str]) -> list[str]
     executable = str(cmd[0] or "").strip().lower()
     if executable not in {"python", "python3", "bash", "sh"}:
         return cmd
-    script = str(cmd[1] or "").strip()
+    script = _normalize_repo_relative_script_token(repo_root, str(cmd[1] or "").strip())
     suffix = ".py" if executable in {"python", "python3"} else ".sh"
     if not script.endswith(suffix):
         return cmd
@@ -1238,6 +1252,36 @@ def _apply_static_import_policy(tasks: list[dict[str, Any]], repo_root: Path) ->
     return tasks
 
 
+def _missing_script_for_command(repo_root: Path, cmd: list[str]) -> str:
+    if len(cmd) < 2:
+        return ""
+    executable = str(cmd[0] or "").strip().lower()
+    if executable not in {"python", "python3", "bash", "sh"}:
+        return ""
+    script = _normalize_repo_relative_script_token(repo_root, str(cmd[1] or "").strip())
+    if executable in {"python", "python3"} and not script.endswith(".py"):
+        return ""
+    if executable in {"bash", "sh"} and not script.endswith(".sh"):
+        return ""
+    return script if _script_path_for_command(repo_root, cmd) is None else ""
+
+
+def _apply_missing_entrypoint_policy(tasks: list[dict[str, Any]], repo_root: Path) -> list[dict[str, Any]]:
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        cmd = task.get("cmd")
+        cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
+        missing = _missing_script_for_command(repo_root, cmd_list)
+        if not missing:
+            continue
+        task["static_entrypoint_issues"] = {"missing_script": missing}
+        if bool(task.get("enabled", True)):
+            task["enabled"] = False
+            _set_disabled_reason(task, "script_entrypoint_not_found")
+    return tasks
+
+
 def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     seen_cmds: set[str] = set()
@@ -1750,6 +1794,7 @@ def _finalize_tasks(
         tasks = non_train + matrix_tasks
     tasks = _append_eval_export_tasks(repo_root, tasks, paper_metric_targets=paper_metric_targets)
     tasks = _apply_external_api_policy(tasks, repo_root)
+    tasks = _apply_missing_entrypoint_policy(tasks, repo_root)
     tasks = _apply_static_import_policy(tasks, repo_root)
     return _apply_mode_policy(tasks, mode)
 
