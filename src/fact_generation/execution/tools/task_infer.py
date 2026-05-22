@@ -1295,8 +1295,10 @@ def _notebook_candidates(repo_root: Path) -> list[Path]:
         "__pycache__",
         ".ipynb_checkpoints",
         "site-packages",
+        "simpletransformers",
         "build",
         "dist",
+        "transformers",
         "runs",
         "outputs",
     }

@@ -503,6 +503,9 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
             }
         )
+        if res.returncode != 0 or semantic_failure:
+            item["stderr_tail"] = (res.stderr or "")[-2000:]
+            item["stdout_tail"] = (res.stdout or "")[-2000:]
         if semantic_failure:
             item["semantic_failure"] = semantic_failure
         metric_artifact = ""
@@ -563,13 +566,13 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 "stderr_tail": (res.stderr or "")[-2000:],
                 "stdout_tail": (res.stdout or "")[-2000:],
                 "logs": {"command": cmd_log, "stdout": stdout_log, "stderr": stderr_log},
+                "tasks": results,
             }
             if missing_metrics:
                 failure_result.update(
                     {
                         "inconclusive": True,
                         "reason": "metric_evidence_missing",
-                        "tasks": results,
                     }
                 )
             if semantic_failure:

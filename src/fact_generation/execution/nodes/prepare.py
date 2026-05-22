@@ -774,8 +774,16 @@ def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
     for attempt in range(3):
         try:
             req = Request(url, headers={"User-Agent": "FactReview execution"})
-            with urlopen(req, timeout=timeout_sec) as resp:
-                return resp.read()
+            deadline = time.monotonic() + max(30, int(timeout_sec or 180))
+            chunks: list[bytes] = []
+            with urlopen(req, timeout=min(30, max(1, int(timeout_sec or 180)))) as resp:
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"download_total_timeout: {url}")
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        return b"".join(chunks)
+                    chunks.append(chunk)
         except HTTPError:
             raise
         except Exception as exc:

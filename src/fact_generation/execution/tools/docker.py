@@ -358,7 +358,17 @@ def _import_requirement_lines(repo_root: Path, *, max_files: int = 500, max_byte
     local = _local_python_modules(repo_root)
     found: set[str] = set()
     scanned = 0
-    skip_parts = {".git", "__pycache__", "deployment", "outputs", "logs", "results", "checkpoints"}
+    skip_parts = {
+        ".git",
+        "__pycache__",
+        "deployment",
+        "outputs",
+        "logs",
+        "results",
+        "checkpoints",
+        "simpletransformers",
+        "transformers",
+    }
     for path in repo_root.rglob("*.py"):
         if scanned >= max_files:
             break
@@ -398,14 +408,7 @@ def _requirements_from_python_source(source: str, local: set[str]) -> set[str]:
     return found
 
 
-def _notebook_requirement_lines(repo_root: Path, *, max_files: int = 80, max_bytes: int = 2_000_000) -> list[str]:
-    if not repo_root.exists():
-        return []
-    local = _local_python_modules(repo_root)
-    found: set[str] = set()
-    scanned = 0
-    has_notebook = False
-    skip_parts = {
+_NOTEBOOK_SKIP_PARTS = {
         ".git",
         ".ipynb_checkpoints",
         "__MACOSX",
@@ -415,11 +418,36 @@ def _notebook_requirement_lines(repo_root: Path, *, max_files: int = 80, max_byt
         "logs",
         "results",
         "checkpoints",
-    }
+        "simpletransformers",
+        "transformers",
+}
+
+
+def _notebook_presence_requirement_lines(repo_root: Path, *, max_files: int = 200) -> list[str]:
+    if not repo_root.exists():
+        return []
+    scanned = 0
     for path in repo_root.rglob("*.ipynb"):
         if scanned >= max_files:
             break
-        if any(part in skip_parts for part in path.parts):
+        if any(part in _NOTEBOOK_SKIP_PARTS for part in path.parts):
+            continue
+        scanned += 1
+        return ["nbformat"]
+    return []
+
+
+def _notebook_requirement_lines(repo_root: Path, *, max_files: int = 80, max_bytes: int = 2_000_000) -> list[str]:
+    if not repo_root.exists():
+        return []
+    local = _local_python_modules(repo_root)
+    found: set[str] = set()
+    scanned = 0
+    has_notebook = False
+    for path in repo_root.rglob("*.ipynb"):
+        if scanned >= max_files:
+            break
+        if any(part in _NOTEBOOK_SKIP_PARTS for part in path.parts):
             continue
         try:
             if path.stat().st_size > max_bytes:
@@ -442,7 +470,7 @@ def _notebook_requirement_lines(repo_root: Path, *, max_files: int = 80, max_byt
                 text = str(source or "")
             found.update(_requirements_from_python_source(text, local))
     if has_notebook:
-        found.update({"ipykernel", "nbconvert"})
+        found.update({"ipykernel", "nbconvert", "nbformat"})
     return sorted(found)
 
 
@@ -452,6 +480,7 @@ def _collect_repo_requirements_text(repo_root: Path, *, include_notebook_runtime
     lines.extend(_pyproject_dependency_lines(repo_root))
     lines.extend(_readme_requirement_lines(repo_root))
     lines.extend(_import_requirement_lines(repo_root))
+    lines.extend(_notebook_presence_requirement_lines(repo_root))
     if include_notebook_runtime:
         lines.extend(_notebook_requirement_lines(repo_root))
     deduped = _dedupe_requirement_lines(lines)

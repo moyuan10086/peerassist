@@ -856,6 +856,43 @@ def test_run_node_keeps_disabled_task_metadata(tmp_path) -> None:
     assert task["static_import_issues"]["module"] == "demo"
 
 
+def test_run_node_failure_preserves_prior_task_results(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    repo.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {"id": "env_smoke", "family": "smoke", "cmd": ["python", "-c", "print('ok')"]},
+                {"id": "bad_import", "family": "smoke", "cmd": ["python", "-c", "import definitely_missing_pkg"]},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(repo),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+    tasks = out["run_result"]["tasks"]
+
+    assert out["status"] == "failed"
+    assert [task["id"] for task in tasks] == ["env_smoke", "bad_import"]
+    assert tasks[0]["success"] is True
+    assert tasks[1]["success"] is False
+    assert "ModuleNotFoundError" in tasks[1]["stderr_tail"]
+
+
 def test_task_timeout_can_be_disabled_by_env(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_DISABLE_TASK_TIMEOUT", "1")
 
@@ -1241,6 +1278,27 @@ def test_heuristic_disables_api_notebook_only_when_api_tasks_disabled(tmp_path, 
     assert task.get("requires_external_api") is True
     assert task.get("enabled") is False
     assert task.get("disabled_reason") == "external_api_or_model_server_required"
+
+
+def test_heuristic_ignores_vendored_notebooks(tmp_path) -> None:
+    notebooks = tmp_path / "notebooks"
+    notebooks.mkdir()
+    (notebooks / "paper.ipynb").write_text(
+        json.dumps({"cells": [{"cell_type": "code", "source": "print('paper')\n"}]}),
+        encoding="utf-8",
+    )
+    vendored = tmp_path / "simpletransformers" / "examples" / "t5"
+    vendored.mkdir(parents=True)
+    (vendored / "data_prep.ipynb").write_text(
+        json.dumps({"cells": [{"cell_type": "code", "source": "import openai\n"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("Run notebooks folder for the paper experiments.\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    assert result.evidence["notebook_paths"] == ["notebooks/paper.ipynb"]
+    assert not any("simpletransformers" in str(t.get("id") or "") for t in result.tasks)
 
 
 def test_task_mode_policy_keeps_smoke_fast_for_llm_generated_tasks() -> None:
@@ -1832,11 +1890,32 @@ def test_collect_repo_requirements_adds_notebook_runtime_and_imports(tmp_path) -
 
     req_text = _collect_repo_requirements_text(tmp_path)
 
+    assert "nbformat" in req_text
     assert "nbconvert" in req_text
     assert "ipykernel" in req_text
     assert "numpy" in req_text
     assert "pandas" in req_text
     assert "iemm" not in req_text
+
+
+def test_collect_repo_requirements_ignores_vendored_notebooks_and_sources(tmp_path) -> None:
+    vendored = tmp_path / "simpletransformers" / "examples"
+    vendored.mkdir(parents=True)
+    (vendored / "data_prep.ipynb").write_text(
+        json.dumps({"cells": [{"cell_type": "code", "source": "import openai\nimport pandas as pd\n"}]}),
+        encoding="utf-8",
+    )
+    transformers = tmp_path / "transformers"
+    transformers.mkdir()
+    (transformers / "client.py").write_text("import anthropic\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("import numpy as np\n", encoding="utf-8")
+
+    req_text = _collect_repo_requirements_text(tmp_path)
+
+    assert "numpy" in req_text
+    assert "openai" not in req_text
+    assert "pandas" not in req_text
+    assert "anthropic" not in req_text
 
 
 def test_collect_repo_requirements_can_skip_notebook_runtime_for_smoke(tmp_path) -> None:
@@ -1847,6 +1926,7 @@ def test_collect_repo_requirements_can_skip_notebook_runtime_for_smoke(tmp_path)
 
     req_text = _collect_repo_requirements_text(tmp_path, include_notebook_runtime=False)
 
+    assert "nbformat" in req_text
     assert "nbconvert" not in req_text
     assert "ipykernel" not in req_text
     assert "matplotlib" not in req_text
