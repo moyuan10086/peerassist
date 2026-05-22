@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import os
 import re
@@ -714,9 +715,23 @@ def _api_scan_text_for_command(repo_root: Path, raw_cmd: str, script_path: Path 
 
 
 _EXTERNAL_API_MARKERS = [
+    "anthropic",
+    "chat.completions",
+    "claude",
+    "client.chat",
+    "dashscope",
+    "deepseek",
     "from openai import",
+    "gemini",
+    "gpt-3.5",
+    "gpt-4",
+    "gpt-4o",
+    "gpt4",
+    "google-generativeai",
     "import openai",
     "asyncopenai",
+    "llm api",
+    "model server",
     "openai(",
     "google-genai",
     "google.genai",
@@ -772,6 +787,41 @@ def _mark_external_api_task(task: dict[str, Any], requires_api: bool) -> dict[st
             task["enabled"] = False
             task["disabled_reason"] = "external_api_or_model_server_required"
     return task
+
+
+def _set_disabled_reason(task: dict[str, Any], reason: str) -> None:
+    if reason and not str(task.get("disabled_reason") or "").strip():
+        task["disabled_reason"] = reason
+
+
+def _task_requires_external_api(repo_root: Path, task: dict[str, Any]) -> bool:
+    cmd = task.get("cmd")
+    cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
+    raw_parts = [
+        str(task.get("id") or ""),
+        str(task.get("family") or ""),
+        str(task.get("method") or ""),
+        str(task.get("model") or ""),
+        str(task.get("variant") or ""),
+        " ".join(cmd_list),
+    ]
+    claims = task.get("claims")
+    if isinstance(claims, list):
+        raw_parts.extend(str(item) for item in claims[:8])
+    requires = _command_requires_external_api(repo_root, "\n".join(raw_parts), cmd_list) if cmd_list else False
+    if not requires and _cmd_executes_notebook(cmd_list):
+        for token in cmd_list:
+            if str(token).lower().endswith(".ipynb"):
+                requires = _path_requires_external_api(repo_root / str(token))
+                break
+    return bool(task.get("requires_external_api")) or requires
+
+
+def _apply_external_api_policy(tasks: list[dict[str, Any]], repo_root: Path) -> list[dict[str, Any]]:
+    for task in tasks:
+        if isinstance(task, dict):
+            _mark_external_api_task(task, _task_requires_external_api(repo_root, task))
+    return tasks
 
 
 def _is_environment_management_command(raw: str) -> bool:
@@ -1026,6 +1076,116 @@ def _cmd_imports_from_namespace_root(cmd: list[str], package_names: set[str]) ->
     return any(re.search(rf"\bfrom\s+{re.escape(package)}\s+import\b", text) for package in package_names)
 
 
+def _module_path_for_import(repo_root: Path, module: str) -> Path | None:
+    parts = [p for p in (module or "").split(".") if p and _is_identifier_path_part(p)]
+    if not parts:
+        return None
+    candidates = [
+        repo_root.joinpath(*parts).with_suffix(".py"),
+        repo_root.joinpath(*parts) / "__init__.py",
+    ]
+    src_root = repo_root / "src"
+    if src_root.exists():
+        candidates.extend(
+            [
+                src_root.joinpath(*parts).with_suffix(".py"),
+                src_root.joinpath(*parts) / "__init__.py",
+            ]
+        )
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file() and repo_root.resolve() in candidate.resolve().parents:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _extract_imported_modules_from_cmd(cmd: list[str]) -> list[str]:
+    if len(cmd) >= 3 and (
+        (cmd[0] in {"python", "python3"} and cmd[1] == "-c")
+        or (cmd[0] in {"bash", "sh"} and cmd[1] in {"-c", "-lc"})
+    ):
+        text = cmd[2]
+    else:
+        return []
+    modules: list[str] = []
+    patterns = [
+        r"import_module\(\s*['\"]([A-Za-z_][A-Za-z0-9_.]*)['\"]\s*\)",
+        r"\bimport\s+([A-Za-z_][A-Za-z0-9_.]*)",
+        r"\bfrom\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\b",
+    ]
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            module = match.group(1).strip()
+            if module and module not in seen:
+                modules.append(module)
+                seen.add(module)
+    return modules
+
+
+def _names_in_ast(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+
+def _target_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        out: set[str] = set()
+        for elt in node.elts:
+            out.update(_target_names(elt))
+        return out
+    return set()
+
+
+def _top_level_unresolved_names(path: Path) -> list[str]:
+    source = _read_optional(path, max_chars=200000)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    defined = set(dir(builtins)) | {"__file__", "__name__", "__package__", "__doc__"}
+    unresolved: set[str] = set()
+
+    def note_missing(names: set[str]) -> None:
+        unresolved.update(name for name in names if name not in defined)
+
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                defined.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                if alias.name == "*":
+                    continue
+                defined.add(alias.asname or alias.name)
+        elif isinstance(stmt, ast.ClassDef):
+            for item in [*stmt.decorator_list, *stmt.bases, *[kw.value for kw in stmt.keywords]]:
+                note_missing(_names_in_ast(item))
+            defined.add(stmt.name)
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for item in [*stmt.decorator_list, *stmt.args.defaults, *stmt.args.kw_defaults]:
+                if item is not None:
+                    note_missing(_names_in_ast(item))
+            if stmt.returns is not None:
+                note_missing(_names_in_ast(stmt.returns))
+            defined.add(stmt.name)
+        elif isinstance(stmt, ast.Assign):
+            note_missing(_names_in_ast(stmt.value))
+            for target in stmt.targets:
+                defined.update(_target_names(target))
+        elif isinstance(stmt, ast.AnnAssign):
+            note_missing(_names_in_ast(stmt.annotation))
+            if stmt.value is not None:
+                note_missing(_names_in_ast(stmt.value))
+            defined.update(_target_names(stmt.target))
+        elif isinstance(stmt, ast.Expr):
+            note_missing(_names_in_ast(stmt.value))
+    return sorted(unresolved)
+
+
 def _smoke_disabled_reason(task: dict[str, Any]) -> str:
     cmd = task.get("cmd")
     cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
@@ -1050,22 +1210,31 @@ def _apply_mode_policy(tasks: list[dict[str, Any]], mode: str) -> list[dict[str,
         if not reason:
             continue
         task["enabled"] = False
-        task.setdefault("disabled_reason", reason)
+        _set_disabled_reason(task, reason)
     return tasks
 
 
 def _apply_static_import_policy(tasks: list[dict[str, Any]], repo_root: Path) -> list[dict[str, Any]]:
     namespace_roots = _namespace_package_roots(repo_root)
-    if not namespace_roots:
-        return tasks
     for task in tasks:
         if not isinstance(task, dict) or not bool(task.get("enabled", True)):
             continue
         cmd = task.get("cmd")
         cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
-        if _cmd_imports_from_namespace_root(cmd_list, namespace_roots):
+        if namespace_roots and _cmd_imports_from_namespace_root(cmd_list, namespace_roots):
             task["enabled"] = False
-            task.setdefault("disabled_reason", "namespace_package_root_import_unavailable")
+            _set_disabled_reason(task, "namespace_package_root_import_unavailable")
+            continue
+        for module in _extract_imported_modules_from_cmd(cmd_list):
+            path = _module_path_for_import(repo_root, module)
+            if path is None:
+                continue
+            missing = _top_level_unresolved_names(path)
+            if missing:
+                task["enabled"] = False
+                _set_disabled_reason(task, "module_import_has_unresolved_top_level_names")
+                task["static_import_issues"] = {"module": module, "missing_names": missing[:12]}
+                break
     return tasks
 
 
@@ -1578,6 +1747,7 @@ def _finalize_tasks(
         ]
         tasks = non_train + matrix_tasks
     tasks = _append_eval_export_tasks(repo_root, tasks, paper_metric_targets=paper_metric_targets)
+    tasks = _apply_external_api_policy(tasks, repo_root)
     tasks = _apply_static_import_policy(tasks, repo_root)
     return _apply_mode_policy(tasks, mode)
 

@@ -79,7 +79,32 @@ def _node_timings_from_events(events: list[dict[str, Any]]) -> dict[str, float]:
     return out
 
 
+def _read_planned_tasks(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "tasks.yaml"
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+    data: Any
+    try:
+        data = json.loads(text)
+    except Exception:
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(text)
+        except Exception:
+            return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
 def _status_from_task(task: dict[str, Any]) -> str:
+    if task.get("not_run"):
+        return "not_run"
     if task.get("skipped"):
         return "skipped"
     if task.get("success"):
@@ -100,6 +125,11 @@ def _stage_from_error_text(text: str) -> str:
             "paper_pdf_unavailable",
             "supplementary_download_failed",
             "supplementary_unavailable",
+            "anonymous_4open",
+            "no_files_downloaded",
+            "download_failed",
+            "http_404",
+            "http_410",
         ]
     ):
         return "access"
@@ -137,6 +167,8 @@ def _stage_from_error_text(text: str) -> str:
 
 def classify_task_failure(task: dict[str, Any]) -> str:
     if task.get("success"):
+        return ""
+    if task.get("not_run"):
         return ""
     if task.get("skipped"):
         return ""
@@ -181,25 +213,91 @@ def classify_run_failure(run_result: dict[str, Any], judge: dict[str, Any]) -> s
     return "run" if not bool(run_result.get("success")) else ""
 
 
-def _task_rows(run_result: dict[str, Any]) -> list[dict[str, Any]]:
+def _failure_stage_from_events(events: list[dict[str, Any]]) -> str:
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if not (kind.endswith("_error") or kind in {"prepare_error"}):
+            continue
+        text = json.dumps({"kind": kind, "data": event.get("data") or {}}, ensure_ascii=False)
+        return _stage_from_error_text(text)
+    return ""
+
+
+def _task_rows(run_result: dict[str, Any], planned_tasks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for task in _as_list(run_result.get("tasks")):
+    raw_tasks = _as_list(run_result.get("tasks"))
+    if not raw_tasks and run_result.get("failed_task"):
+        raw_tasks = [
+            {
+                "id": run_result.get("failed_task"),
+                "family": "",
+                "success": False,
+                "returncode": run_result.get("returncode"),
+                "duration_sec": run_result.get("duration_sec"),
+                "semantic_failure": run_result.get("semantic_failure"),
+                "stderr_tail": run_result.get("stderr_tail"),
+                "stdout_tail": run_result.get("stdout_tail"),
+            }
+        ]
+    seen_ids: set[str] = set()
+    for task in raw_tasks:
         if not isinstance(task, dict):
             continue
+        task_id = str(task.get("id") or "")
+        if task_id:
+            seen_ids.add(task_id)
         stage = classify_task_failure(task)
         expected = task.get("expected_metrics")
         rows.append(
             {
-                "id": str(task.get("id") or ""),
+                "id": task_id,
                 "family": str(task.get("family") or ""),
                 "dataset": str(task.get("dataset") or ""),
                 "method": str(task.get("method") or task.get("model") or task.get("variant") or ""),
                 "status": _status_from_task(task),
                 "failure_stage": stage,
                 "semantic_failure": str(task.get("semantic_failure") or ""),
+                "disabled_reason": str(task.get("disabled_reason") or ""),
+                "requires_external_api": bool(task.get("requires_external_api")),
+                "static_import_issues": task.get("static_import_issues")
+                if isinstance(task.get("static_import_issues"), dict)
+                else {},
                 "returncode": task.get("returncode"),
                 "duration_sec": task.get("duration_sec"),
                 "metric_artifact": str(task.get("metric_artifact") or ""),
+                "has_expected_metrics": isinstance(expected, dict) and bool(expected),
+                "expected_metric_keys": sorted(str(k) for k in expected) if isinstance(expected, dict) else [],
+            }
+        )
+    for task in planned_tasks or []:
+        task_id = str(task.get("id") or "")
+        if not task_id or task_id in seen_ids:
+            continue
+        planned = dict(task)
+        if bool(planned.get("enabled", True)):
+            planned["not_run"] = True
+        else:
+            planned["success"] = True
+            planned["skipped"] = True
+        stage = classify_task_failure(planned)
+        expected = planned.get("expected_metrics")
+        rows.append(
+            {
+                "id": task_id,
+                "family": str(planned.get("family") or ""),
+                "dataset": str(planned.get("dataset") or ""),
+                "method": str(planned.get("method") or planned.get("model") or planned.get("variant") or ""),
+                "status": _status_from_task(planned),
+                "failure_stage": stage,
+                "semantic_failure": str(planned.get("semantic_failure") or ""),
+                "disabled_reason": str(planned.get("disabled_reason") or ""),
+                "requires_external_api": bool(planned.get("requires_external_api")),
+                "static_import_issues": planned.get("static_import_issues")
+                if isinstance(planned.get("static_import_issues"), dict)
+                else {},
+                "returncode": planned.get("returncode"),
+                "duration_sec": planned.get("duration_sec"),
+                "metric_artifact": str(planned.get("metric_artifact") or ""),
                 "has_expected_metrics": isinstance(expected, dict) and bool(expected),
                 "expected_metric_keys": sorted(str(k) for k in expected) if isinstance(expected, dict) else [],
             }
@@ -226,7 +324,8 @@ def build_execution_evidence_summary(
     events = _read_events(run_dir)
     run_result = state.get("run_result") if isinstance(state.get("run_result"), dict) else {}
     judge = state.get("judge") if isinstance(state.get("judge"), dict) else {}
-    tasks = _task_rows(run_result)
+    planned_tasks = _read_planned_tasks(run_dir)
+    tasks = _task_rows(run_result, planned_tasks)
 
     stage_counts = {stage: 0 for stage in FAILURE_STAGES}
     for task in tasks:
@@ -234,6 +333,9 @@ def build_execution_evidence_summary(
         if stage in stage_counts:
             stage_counts[stage] += 1
     run_failure_stage = classify_run_failure(run_result, judge)
+    event_failure_stage = _failure_stage_from_events(events)
+    if run_failure_stage == "run" and event_failure_stage:
+        run_failure_stage = event_failure_stage
     if run_failure_stage in stage_counts and not any(stage_counts.values()):
         stage_counts[run_failure_stage] += 1
 
@@ -269,6 +371,7 @@ def build_execution_evidence_summary(
             "tasks_inconclusive": sum(1 for t in tasks if t.get("status") == "inconclusive"),
             "tasks_failed": sum(1 for t in tasks if t.get("status") == "failed"),
             "tasks_skipped": sum(1 for t in tasks if t.get("status") == "skipped"),
+            "tasks_not_run": sum(1 for t in tasks if t.get("status") == "not_run"),
             "metric_artifacts": len(metric_artifacts),
             "alignment_results": len(alignment_results),
         },

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,43 @@ def _pick_smoke_entrypoint(paper_root: str) -> str:
     return ""
 
 
+def _windows_bash_executable() -> str:
+    if os.name != "nt":
+        return ""
+    explicit = str(os.environ.get("EXECUTION_BASH_PATH") or os.environ.get("FACTREVIEW_BASH_PATH") or "").strip()
+    candidates = [
+        explicit,
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    found = next((p for p in candidates if p and Path(p).exists()), "")
+    if found:
+        return found
+    resolved = shutil.which("bash")
+    if resolved and "system32" not in resolved.lower():
+        return resolved
+    return ""
+
+
+def _single_string_looks_posix_shell(command: str) -> bool:
+    s = str(command or "")
+    return any(
+        marker in s
+        for marker in [
+            "&&",
+            "||",
+            "<<",
+            "$(",
+            "`",
+            "\n",
+            "export ",
+            "mkdir -p",
+            "python - <<",
+        ]
+    )
+
+
 def _normalize_llm_cmd_for_platform(cmd: list[str]) -> list[str]:
     """
     LLMs often emit a single-string shell command (a one-item list containing spaces).
@@ -58,10 +96,19 @@ def _normalize_llm_cmd_for_platform(cmd: list[str]) -> list[str]:
     """
     if not cmd:
         return cmd
+    if os.name == "nt":
+        exe = Path(str(cmd[0] or "")).name.lower()
+        if exe in {"bash", "sh"}:
+            bash = _windows_bash_executable()
+            if bash:
+                return [bash, *cmd[1:]]
     # If cmd is a single string with spaces, treat it as a shell command.
     if len(cmd) == 1 and (" " in cmd[0].strip()):
         s = cmd[0].strip()
         if os.name == "nt":
+            bash = _windows_bash_executable()
+            if bash and _single_string_looks_posix_shell(s):
+                return [bash, "-lc", s]
             return ["cmd", "/c", s]
         return ["bash", "-lc", s]
     return cmd
@@ -79,6 +126,68 @@ def _to_shell(cmd: list[str]) -> str:
             shell = " ".join([shell, *[shlex.quote(str(x)) for x in cmd[3:]]]).strip()
         return shell
     return shlex.join([str(x) for x in cmd if str(x).strip()])
+
+
+def _normalized_shell_for_compare(cmd: list[str]) -> str:
+    shell = _to_shell(cmd)
+    shell = re.sub(r"\s+", " ", shell).strip()
+    return shell
+
+
+def _is_rerun_failed_task_command(cmd: list[str], failed_cmd: Any) -> bool:
+    if not isinstance(failed_cmd, list) or not all(isinstance(x, str) for x in failed_cmd):
+        return False
+    current = _normalized_shell_for_compare(cmd)
+    failed = _normalized_shell_for_compare(failed_cmd)
+    if not current or not failed:
+        return False
+    return current == failed or current in {f"bash -lc {shlex.quote(failed)}", f"sh -lc {shlex.quote(failed)}"}
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _host_dependency_installs_allowed(cfg: dict[str, Any]) -> bool:
+    return _truthy(
+        cfg.get("allow_host_dependency_installs")
+        or os.environ.get("EXECUTION_ALLOW_HOST_DEP_INSTALLS")
+        or os.environ.get("FACTREVIEW_ALLOW_HOST_DEP_INSTALLS")
+        or ""
+    )
+
+
+_HOST_DEP_INSTALL_RE = re.compile(
+    r"("
+    r"\b(?:python(?:\.exe)?|python3|py)\s+(?:-\d+(?:\.\d+)?\s+)?-m\s+pip\s+"
+    r"(?:install|uninstall|download|wheel)\b"
+    r"|\bpip(?:3|\.exe)?\s+(?:install|uninstall|download|wheel)\b"
+    r"|\b(?:conda|mamba|micromamba)\s+(?:install|update|remove|create|env\s+create)\b"
+    r"|\buv\s+pip\s+(?:install|uninstall|sync)\b"
+    r"|\bpoetry\s+(?:install|add|update)\b"
+    r"|\bpipenv\s+(?:install|sync|update)\b"
+    r"|\b(?:apt-get|apt|yum|dnf|apk|brew)\s+(?:install|add|update|upgrade)\b"
+    r"|\bnpm\s+(?:install|i|ci)\b"
+    r"|\byarn\s+(?:install|add)\b"
+    r")",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_host_dependency_install_command(cmd: list[str]) -> bool:
+    return bool(_HOST_DEP_INSTALL_RE.search(_normalized_shell_for_compare(cmd)))
+
+
+def _resolve_max_attempts(state: dict[str, Any], cfg: dict[str, Any]) -> int:
+    raw = state.get("max_attempts")
+    if raw in (None, ""):
+        raw = cfg.get("max_attempts")
+    if raw in (None, ""):
+        raw = 5
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 5
 
 
 def _docker_runtime_kwargs(cfg: dict[str, Any]) -> dict[str, str | None]:
@@ -141,6 +250,23 @@ def _normalize_container_path_text(text: str, paper_root: str, run_dir: Path) ->
     for host_path, container_path in _container_path_pairs(paper_root, run_dir):
         patched = patched.replace(host_path, container_path)
     return patched
+
+
+def _container_cwd_to_host(cwd: str, paper_root: str, run_dir: Path) -> str:
+    raw = str(cwd or "").strip()
+    if not raw or raw in {".", "./"}:
+        return paper_root or "."
+    normalized = raw.replace("\\", "/")
+    mappings = [
+        ("/workspace/run_dir/artifacts", Path(run_dir) / "artifacts"),
+        ("/workspace/run_dir", Path(run_dir)),
+        ("/app", Path(paper_root or ".")),
+    ]
+    for container_prefix, host_prefix in mappings:
+        if normalized == container_prefix or normalized.startswith(container_prefix + "/"):
+            suffix = normalized[len(container_prefix) :].strip("/")
+            return str(host_prefix / Path(*suffix.split("/"))) if suffix else str(host_prefix)
+    return raw
 
 
 _PATH_REWRITE_TEXT_SUFFIXES = {
@@ -306,7 +432,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
 
     attempt = int(state.get("attempt") or 0) + 1
     state["attempt"] = attempt
-    max_attempts = int(state.get("max_attempts") or cfg.get("max_attempts") or 5)
+    max_attempts = _resolve_max_attempts(state, cfg)
 
     # Stop condition
     if attempt > max_attempts:
@@ -471,13 +597,21 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
     llm_cfg = resolve_llm_config(
         cfg.get("llm_provider") or "", cfg.get("llm_model") or "", cfg.get("llm_base_url") or ""
     )
+    path_constraints = {
+        "paper_root": "/app" if docker_enabled else str(Path(paper_root or ".").resolve()),
+        "run_dir": "/workspace/run_dir" if docker_enabled else str(run_dir.resolve()),
+        "artifact_dir": "/workspace/run_dir/artifacts"
+        if docker_enabled
+        else str((run_dir / "artifacts").resolve()),
+    }
     system = (
         "You are a senior engineer doing rigorous paper-code reproduction.\n"
         "Produce a fix plan ONLY in JSON. Do not include prose outside JSON.\n"
         "The plan must be safe and reproducible, prefer environment/command fixes before source edits.\n"
-        "When docker is enabled, commands run inside the paper container: use /app as the paper root "
-        "and /workspace/run_dir as the writable run directory. Do not create or reference host absolute "
-        "paths such as /data/..., C:\\..., or E:\\... inside container commands.\n"
+        "Use the execution paths supplied in the prompt. When docker is disabled, do not use container "
+        "paths such as /app or /workspace/run_dir.\n"
+        "When docker is disabled, do not install or upgrade packages in the host Python/system environment "
+        "unless the prompt explicitly says host dependency installs are allowed.\n"
     )
     prompt = {
         "attempt": attempt,
@@ -494,11 +628,9 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "prefer_wrapper_env_fixes": True,
             "avoid_core_source_changes": True,
             "must_be_reproducible": True,
-            "container_paths": {
-                "paper_root": "/app",
-                "run_dir": "/workspace/run_dir",
-                "artifact_dir": "/workspace/run_dir/artifacts",
-            },
+            "execution_environment": "docker" if docker_enabled else "host",
+            "paths": path_constraints,
+            "host_dependency_installs_allowed": _host_dependency_installs_allowed(cfg),
             "primary_goal": "make tasks produce metric artifacts that can be compared against paper_metric_targets",
         },
         "output_schema": {
@@ -563,6 +695,36 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 cmd = act.get("cmd")
                 if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
                     continue
+                if _is_rerun_failed_task_command(cmd, run_result.get("failed_task_cmd")):
+                    append_event(
+                        run_dir,
+                        "fix_command_skipped_rerun",
+                        {"cmd": cmd, "failed_task": failed_task},
+                    )
+                    state.setdefault("history", []).append(
+                        {
+                            "kind": "fix_command_skipped_rerun",
+                            "data": {"cmd": cmd, "failed_task": failed_task},
+                        }
+                    )
+                    continue
+                if (
+                    not docker_enabled
+                    and not _host_dependency_installs_allowed(cfg)
+                    and _is_host_dependency_install_command(cmd)
+                ):
+                    append_event(
+                        run_dir,
+                        "fix_command_skipped_host_dependency_install",
+                        {"cmd": cmd, "failed_task": failed_task},
+                    )
+                    state.setdefault("history", []).append(
+                        {
+                            "kind": "fix_command_skipped_host_dependency_install",
+                            "data": {"cmd": cmd, "failed_task": failed_task},
+                        }
+                    )
+                    continue
                 cwd = str(act.get("cwd") or "").strip()
                 if not cwd or cwd in {".", "./"}:
                     cwd = paper_root or "."
@@ -599,6 +761,14 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                     )
                     res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=timeout)
                 else:
+                    cwd_raw = cwd
+                    cwd = _container_cwd_to_host(cwd, paper_root, run_dir)
+                    if cwd != cwd_raw:
+                        append_event(
+                            run_dir,
+                            "fix_command_cwd_container_path_mapped",
+                            {"cmd_index": j, "cwd": cwd_raw, "mapped_cwd": cwd},
+                        )
                     argv = _normalize_llm_cmd_for_platform(cmd)
                     res = run_command(cmd=argv, cwd=cwd, timeout_sec=timeout)
                 persist_command_result(res, logs_dir, prefix=f"fix_cmd_{attempt}_{j}")

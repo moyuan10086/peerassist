@@ -108,6 +108,9 @@ def _task_result_base(task: dict[str, Any], task_id: str) -> dict[str, Any]:
         "paper_targets",
         "verification_target",
         "artifact_paths",
+        "disabled_reason",
+        "requires_external_api",
+        "static_import_issues",
     }
     out: dict[str, Any] = {"id": task_id}
     for key in keep:
@@ -208,6 +211,21 @@ def _resolve_host_python_cmd(cmd: list[str]) -> list[str]:
     first = str(cmd[0] or "").strip().lower()
     if first in {"python", "python3"}:
         return [sys.executable, *cmd[1:]]
+    if os.name == "nt" and first in {"bash", "sh"}:
+        explicit = str(os.environ.get("EXECUTION_BASH_PATH") or os.environ.get("FACTREVIEW_BASH_PATH") or "").strip()
+        candidates = [
+            explicit,
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ]
+        found = next((p for p in candidates if p and Path(p).exists()), "")
+        if not found:
+            resolved = shutil.which(cmd[0])
+            if resolved and "system32" not in resolved.lower():
+                found = resolved
+        if found:
+            return [found, *cmd[1:]]
     return cmd
 
 
@@ -370,6 +388,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
             item = _task_result_base(task, task_id)
             item.update({"success": True, "skipped": True})
             results.append(item)
+            reason = str(task.get("disabled_reason") or "enabled=false")
             append_event(
                 run_dir,
                 "task_skipped",
@@ -378,7 +397,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                     "task_index": idx,
                     "task_total": total_tasks,
                     "attempt": attempt,
-                    "reason": "enabled=false",
+                    "reason": reason,
                 },
             )
             continue

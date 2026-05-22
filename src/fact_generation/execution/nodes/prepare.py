@@ -153,7 +153,93 @@ def _infer_python_spec_from_requirements(req_path: Path) -> str:
     return _infer_python_spec_from_requirements_text(txt)
 
 
+def _python_spec_from_requires_python(specifier: str) -> str:
+    s = str(specifier or "").replace(" ", "")
+    if not s:
+        return ""
+    if re.search(r"(>=|==|~=)3\.12", s) or re.search(r">3\.11", s):
+        return "3.12"
+    if re.search(r"(>=|==|~=)3\.11", s) or re.search(r">3\.10", s):
+        return "3.11"
+    if re.search(r"(==|~=)3\.10", s):
+        return "3.10"
+    if re.search(r"(==|~=)3\.7", s):
+        return "3.7"
+    if re.search(r"<3\.8", s):
+        return "3.7"
+    if re.search(r"<3\.11", s):
+        return "3.10"
+    return ""
+
+
+def _infer_python_spec_from_pyproject(repo_root: Path) -> str:
+    pyproject = Path(repo_root) / "pyproject.toml"
+    if not pyproject.exists():
+        return ""
+    try:
+        import tomllib
+
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return ""
+    project = data.get("project") if isinstance(data, dict) else {}
+    if not isinstance(project, dict):
+        return ""
+    spec = _python_spec_from_requires_python(str(project.get("requires-python") or ""))
+    if spec:
+        return spec
+    classifiers = project.get("classifiers")
+    if isinstance(classifiers, list):
+        versions = {str(item).rsplit("::", 1)[-1].strip() for item in classifiers}
+        if "3.12" in versions and not any(v in versions for v in {"3.7", "3.8", "3.9", "3.10", "3.11"}):
+            return "3.12"
+    return ""
+
+
+def _environment_file_candidates(repo_root: Path, *, max_files: int = 20) -> list[Path]:
+    root = Path(repo_root)
+    patterns = ["environment.yml", "environment.yaml", "conda.yml", "conda.yaml", "env.yml", "env.yaml"]
+    out: list[Path] = []
+    for pattern in patterns:
+        out.extend(p for p in root.glob(pattern) if p.is_file())
+    if len(out) < max_files:
+        for p in root.rglob("*"):
+            if len(out) >= max_files:
+                break
+            if p.is_file() and p.name.lower() in patterns and p not in out:
+                out.append(p)
+    return out[:max_files]
+
+
+def _infer_python_spec_from_environment_files(repo_root: Path) -> str:
+    for path in _environment_file_candidates(repo_root):
+        text = _read_text(path)
+        for line in text.splitlines():
+            m = re.match(
+                r"^\s*-\s*python\s*(?:=|==|>=|<=|~=)?\s*([0-9]+\.[0-9]+)",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                return _normalize_python_version(m.group(1))
+        m = re.search(r"\bpython\s*=\s*['\"]?([0-9]+\.[0-9]+)", text, flags=re.IGNORECASE)
+        if m:
+            return _normalize_python_version(m.group(1))
+    return ""
+
+
+def _normalize_python_version(version: str) -> str:
+    m = re.match(r"^(\d+)\.(\d+)", str(version or "").strip())
+    return f"{m.group(1)}.{m.group(2)}" if m else ""
+
+
 def _infer_python_spec_from_repo(repo_root: Path) -> str:
+    pyproject_spec = _infer_python_spec_from_pyproject(repo_root)
+    if pyproject_spec:
+        return pyproject_spec
+    environment_spec = _infer_python_spec_from_environment_files(repo_root)
+    if environment_spec:
+        return environment_spec
     try:
         txt = _collect_repo_requirements_text(repo_root)
     except Exception:

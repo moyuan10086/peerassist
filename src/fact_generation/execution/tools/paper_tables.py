@@ -178,7 +178,6 @@ def _table_blocks(md_text: str) -> list[list[list[str]]]:
 
 
 def _header_role(cell: str) -> str:
-    c = _metric_key(cell)
     raw = _strip_md(cell).lower()
     if _is_metric_header(cell):
         return "metric"
@@ -318,7 +317,7 @@ def _extract_metric_row_markdown_tables(
             if dataset_col is not None and dataset_col < len(row):
                 dataset = _strip_md(row[dataset_col])
             for col, method in enumerate(header):
-                if col == metric_col or col == dataset_col:
+                if col in (metric_col, dataset_col):
                     continue
                 if col >= len(row):
                     continue

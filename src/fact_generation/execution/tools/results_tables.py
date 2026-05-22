@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from util.fs import ensure_dir, write_text
+
 from .paper_tables import _metric_key
 
 

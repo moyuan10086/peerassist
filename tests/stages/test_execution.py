@@ -9,23 +9,32 @@ doc's verification section).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import zipfile
 from io import BytesIO
+from urllib.error import HTTPError
 
 import pytest
 
 from fact_generation.execution.nodes.fix import (
+    _container_cwd_to_host,
+    _host_dependency_installs_allowed,
+    _is_host_dependency_install_command,
+    _is_rerun_failed_task_command,
     _missing_module_looks_local,
     _normalize_container_path_text,
+    _normalize_llm_cmd_for_platform,
     _pip_package_for_module,
+    _resolve_max_attempts,
     _rewrite_container_path_leaks,
     _to_shell,
 )
 from fact_generation.execution.nodes.plan import _is_runtime_pip_install_cmd, _merge_auto_baseline
 from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
+    _download_anonymous_4open_repo,
     _extract_archive_bytes,
     _infer_python_spec_from_repo,
     _normalize_shell_script_line_endings,
@@ -49,6 +58,7 @@ from fact_generation.execution.tools.docker import (
     _normalize_container_proxy,
     _paper_dockerfile_text,
     _paper_install_deps_py_text,
+    _select_python_image,
     docker_run_paper_image,
 )
 from fact_generation.execution.tools.evidence_summary import (
@@ -60,6 +70,7 @@ from fact_generation.execution.tools.log_metrics import extract_metrics_from_tex
 from fact_generation.execution.tools.metrics import compute_check
 from fact_generation.execution.tools.paper_tables import extract_paper_metric_targets
 from fact_generation.execution.tools.task_infer import (
+    _apply_external_api_policy,
     _apply_mode_policy,
     _apply_static_import_policy,
     infer_tasks_heuristic,
@@ -517,6 +528,145 @@ def test_execution_evidence_summary_classifies_metric_failure(tmp_path) -> None:
     assert summary["cost"]["node_duration_sec"]["run"] == 12.5
 
 
+def test_execution_evidence_summary_classifies_prepare_download_failure_as_access(tmp_path) -> None:
+    (tmp_path / "issues.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": 1.0,
+                "kind": "prepare_error",
+                "data": {
+                    "error": "anonymous_4open_download_failed: RuntimeError: anonymous_4open_no_files_downloaded: zip_http_404",
+                    "repo_url": "https://anonymous.4open.science/r/context-aware-clustering-E90C",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state = {
+        "status": "failed",
+        "attempt": 0,
+        "config": {"paper_key": "cactus"},
+        "run_result": {},
+        "judge": {},
+    }
+
+    summary = build_execution_evidence_summary(
+        state=state,
+        run_dir=tmp_path,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert summary["failure_stage"] == "access"
+    assert summary["failure_stage_counts"]["access"] == 1
+
+
+def test_execution_evidence_summary_synthesizes_failed_task_row(tmp_path) -> None:
+    state = {
+        "status": "failed",
+        "attempt": 1,
+        "config": {"paper_key": "fmp"},
+        "run_result": {
+            "success": False,
+            "failed_task": "check_python_and_core_deps",
+            "returncode": 1,
+            "semantic_failure": "python_traceback_in_output",
+            "stderr_tail": "ModuleNotFoundError: No module named 'torch'",
+        },
+        "judge": {},
+    }
+
+    summary = build_execution_evidence_summary(
+        state=state,
+        run_dir=tmp_path,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert summary["funnel"]["tasks_total"] == 1
+    assert summary["funnel"]["tasks_failed"] == 1
+    assert summary["tasks"][0]["id"] == "check_python_and_core_deps"
+    assert summary["failure_stage"] == "environment"
+    assert summary["failure_stage_counts"]["environment"] == 1
+
+
+def test_execution_evidence_summary_preserves_skipped_task_reason(tmp_path) -> None:
+    task = {
+        "id": "reproduce_notebook_demo",
+        "family": "reproduce",
+        "success": True,
+        "skipped": True,
+        "disabled_reason": "external_api_or_model_server_required",
+        "requires_external_api": True,
+        "static_import_issues": {"module": "demo", "missing_names": ["BasePolicy"]},
+    }
+    state = {
+        "status": "running",
+        "attempt": 0,
+        "config": {"paper_key": "api_notebook"},
+        "run_result": {"success": True, "tasks": [task]},
+        "judge": {},
+    }
+
+    summary = build_execution_evidence_summary(
+        state=state,
+        run_dir=tmp_path,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    row = summary["tasks"][0]
+    assert row["status"] == "skipped"
+    assert row["disabled_reason"] == "external_api_or_model_server_required"
+    assert row["requires_external_api"] is True
+    assert row["static_import_issues"]["missing_names"] == ["BasePolicy"]
+
+
+def test_execution_evidence_summary_includes_planned_tasks_after_early_failure(tmp_path) -> None:
+    (tmp_path / "tasks.yaml").write_text(
+        json.dumps(
+            [
+                {"id": "smoke_import", "family": "smoke", "enabled": True},
+                {
+                    "id": "full_api_eval",
+                    "family": "reproduce",
+                    "enabled": False,
+                    "disabled_reason": "external_api_or_model_server_required",
+                    "requires_external_api": True,
+                },
+                {"id": "full_cpu_eval", "family": "eval", "enabled": True},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "status": "failed",
+        "attempt": 1,
+        "config": {"paper_key": "early_fail"},
+        "run_result": {
+            "success": False,
+            "failed_task": "smoke_import",
+            "returncode": 1,
+            "semantic_failure": "python_traceback_in_output",
+            "stderr_tail": "ModuleNotFoundError: No module named 'gurobipy'",
+        },
+        "judge": {},
+    }
+
+    summary = build_execution_evidence_summary(
+        state=state,
+        run_dir=tmp_path,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    rows = {task["id"]: task for task in summary["tasks"]}
+
+    assert summary["funnel"]["tasks_total"] == 3
+    assert summary["funnel"]["tasks_failed"] == 1
+    assert summary["funnel"]["tasks_skipped"] == 1
+    assert summary["funnel"]["tasks_not_run"] == 1
+    assert rows["full_api_eval"]["status"] == "skipped"
+    assert rows["full_api_eval"]["requires_external_api"] is True
+    assert rows["full_cpu_eval"]["status"] == "not_run"
+
+
 def test_runtime_traceback_output_is_treated_as_failure() -> None:
     reason = _semantic_runtime_failure(
         stdout="",
@@ -635,6 +785,75 @@ def test_no_docker_python_tasks_use_current_interpreter() -> None:
 
     assert resolved[0] == sys.executable
     assert resolved[1:] == ["-V"]
+
+
+def test_no_docker_windows_bash_prefers_explicit_path(tmp_path, monkeypatch) -> None:
+    fake_bash = tmp_path / "bash.exe"
+    fake_bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("EXECUTION_BASH_PATH", str(fake_bash))
+
+    resolved = _resolve_host_python_cmd(["bash", "-lc", "echo ok"])
+
+    if os.name == "nt":
+        assert resolved == [str(fake_bash), "-lc", "echo ok"]
+    else:
+        assert resolved == ["bash", "-lc", "echo ok"]
+
+
+def test_llm_fix_windows_bash_prefers_explicit_path(tmp_path, monkeypatch) -> None:
+    fake_bash = tmp_path / "bash.exe"
+    fake_bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("EXECUTION_BASH_PATH", str(fake_bash))
+
+    resolved = _normalize_llm_cmd_for_platform(["bash", "-lc", "mkdir -p metrics && echo ok"])
+
+    if os.name == "nt":
+        assert resolved == [str(fake_bash), "-lc", "mkdir -p metrics && echo ok"]
+    else:
+        assert resolved == ["bash", "-lc", "mkdir -p metrics && echo ok"]
+
+
+def test_run_node_keeps_disabled_task_metadata(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    repo.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "api_notebook",
+                    "family": "reproduce",
+                    "enabled": False,
+                    "disabled_reason": "external_api_or_model_server_required",
+                    "requires_external_api": True,
+                    "static_import_issues": {"module": "demo", "missing_names": ["Client"]},
+                    "cmd": ["python", "-c", "print('should not run')"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(repo),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+    task = out["run_result"]["tasks"][0]
+
+    assert task["skipped"] is True
+    assert task["disabled_reason"] == "external_api_or_model_server_required"
+    assert task["requires_external_api"] is True
+    assert task["static_import_issues"]["module"] == "demo"
 
 
 def test_task_timeout_can_be_disabled_by_env(monkeypatch) -> None:
@@ -810,6 +1029,13 @@ def test_docker_install_deps_repairs_pydantic_core_mismatch() -> None:
     assert "pip_check_pydantic_repaired" in text
 
 
+def test_docker_python_image_does_not_fallback_to_wrong_minor(monkeypatch) -> None:
+    monkeypatch.setattr("fact_generation.execution.tools.docker._image_exists", lambda image: False)
+
+    assert _select_python_image({}, "3.12") == "python:3.12"
+    assert _select_python_image({}, "3.11") == "python:3.11"
+
+
 def test_dockerfile_installs_deps_globally_for_host_uid_runtime() -> None:
     text = _paper_install_deps_py_text()
     dockerfile = _paper_dockerfile_text(python_image="python:3.11")
@@ -824,6 +1050,33 @@ def test_llm_fix_shell_wrapper_preserves_shell_form_commands() -> None:
         "PYTHONDONTWRITEBYTECODE=1 python -m py_compile evaluate_acc.py"
     )
     assert _to_shell(["python", "-m", "pip", "install", "numpy<2"]) == "python -m pip install 'numpy<2'"
+
+
+def test_llm_fix_skips_commands_that_only_rerun_failed_task() -> None:
+    failed = ["bash", "run_for_dataset.sh"]
+
+    assert _is_rerun_failed_task_command(["bash", "run_for_dataset.sh"], failed)
+    assert _is_rerun_failed_task_command(["bash", "-lc", "bash run_for_dataset.sh"], failed)
+    assert not _is_rerun_failed_task_command(["python", "-m", "pip", "install", "numpy"], failed)
+
+
+def test_llm_fix_detects_host_dependency_install_commands(monkeypatch) -> None:
+    assert _is_host_dependency_install_command(["python", "-m", "pip", "install", "torch"])
+    assert _is_host_dependency_install_command(["bash", "-lc", "python -m pip install -r requirements.txt"])
+    assert _is_host_dependency_install_command(["conda", "install", "-y", "pytorch"])
+    assert not _is_host_dependency_install_command(["python", "-m", "py_compile", "main.py"])
+
+    monkeypatch.delenv("EXECUTION_ALLOW_HOST_DEP_INSTALLS", raising=False)
+    monkeypatch.delenv("FACTREVIEW_ALLOW_HOST_DEP_INSTALLS", raising=False)
+    assert not _host_dependency_installs_allowed({})
+    monkeypatch.setenv("EXECUTION_ALLOW_HOST_DEP_INSTALLS", "1")
+    assert _host_dependency_installs_allowed({})
+
+
+def test_llm_fix_respects_zero_max_attempts() -> None:
+    assert _resolve_max_attempts({"max_attempts": 0}, {}) == 0
+    assert _resolve_max_attempts({}, {"max_attempts": "0"}) == 0
+    assert _resolve_max_attempts({}, {}) == 5
 
 
 def test_llm_fix_container_path_normalization_uses_mount_paths(tmp_path) -> None:
@@ -862,6 +1115,18 @@ def test_llm_fix_rewrites_container_path_leaks_in_workspace(tmp_path) -> None:
     assert f"{run_dir.resolve()}" not in text
     assert 'HF_HOME="/app/.hf_cache"' in text
     assert '"/workspace/run_dir/artifacts/metrics.json"' in text
+
+
+def test_no_docker_llm_fix_maps_container_cwd_to_host_paths(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    paper_root = run_dir / "workspace" / "source"
+    paper_root.mkdir(parents=True)
+
+    assert _container_cwd_to_host("/app", str(paper_root), run_dir) == str(paper_root)
+    assert _container_cwd_to_host("/app/scripts", str(paper_root), run_dir) == str(paper_root / "scripts")
+    assert _container_cwd_to_host("/workspace/run_dir/artifacts", str(paper_root), run_dir) == str(
+        run_dir / "artifacts"
+    )
 
 
 def test_heuristic_tasks_use_paper_targets_and_readme_commands(tmp_path) -> None:
@@ -1007,6 +1272,13 @@ def test_task_mode_policy_keeps_smoke_fast_for_llm_generated_tasks() -> None:
             "enabled": True,
             "cmd": ["python", "-c", "import iemm.core; print('ok')"],
         },
+        {
+            "id": "eval_empty_reason",
+            "family": "eval",
+            "enabled": False,
+            "disabled_reason": "",
+            "cmd": ["python", "eval.py"],
+        },
     ]
 
     _apply_mode_policy(tasks, mode="smoke")
@@ -1016,6 +1288,7 @@ def test_task_mode_policy_keeps_smoke_fast_for_llm_generated_tasks() -> None:
     assert tasks[1]["enabled"] is False
     assert tasks[1]["disabled_reason"] == "full_mode_required"
     assert tasks[2]["enabled"] is True
+    assert tasks[3]["disabled_reason"] == "full_mode_required"
 
 
 def test_static_import_policy_disables_namespace_package_root_import(tmp_path) -> None:
@@ -1255,6 +1528,39 @@ def test_heuristic_can_disable_api_tasks_for_server_queues(tmp_path, monkeypatch
     assert table_task.get("enabled") is True
 
 
+def test_external_api_policy_marks_llm_generated_tasks_for_server_queues(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    script = tmp_path / "scripts" / "test" / "test_pipeline_gpt_4o_resume.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'export OPENAI_API_KEY="your api key"',
+                'MODEL_NAME="gpt-4o"',
+                "python -m tests.test_full_pipeline_resume",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tasks = [
+        {
+            "id": "reproduce_gpt_4o_resume_pipeline",
+            "family": "reproduce",
+            "enabled": False,
+            "disabled_reason": "full_mode_required",
+            "cmd": ["bash", "scripts/test/test_pipeline_gpt_4o_resume.sh"],
+            "method": "GPT-4o + ORGEval",
+        }
+    ]
+
+    _apply_external_api_policy(tasks, tmp_path)
+
+    assert tasks[0]["requires_external_api"] is True
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "external_api_or_model_server_required"
+
+
 def test_heuristic_marks_api_tasks_through_local_imports(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
     (tmp_path / "README.md").write_text("```bash\npython conversation.py\n```\n", encoding="utf-8")
@@ -1451,6 +1757,58 @@ def test_collect_repo_requirements_uses_readme_and_imports(tmp_path) -> None:
     assert _infer_python_spec_from_repo(tmp_path) == "3.10"
 
 
+def test_infer_python_spec_prefers_pyproject_requires_python(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[project]",
+                'name = "demo"',
+                'requires-python = ">=3.12"',
+                "dependencies = [",
+                '  "torch>=2.7.0",',
+                '  "numpy>=2.2.6",',
+                "]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _infer_python_spec_from_repo(tmp_path) == "3.12"
+    req_text = _collect_repo_requirements_text(tmp_path)
+    assert "torch>=2.7.0" in req_text
+    assert "numpy>=2.2.6" in req_text
+
+
+def test_environment_yml_informs_python_spec_and_docker_requirements(tmp_path) -> None:
+    (tmp_path / "environment.yml").write_text(
+        "\n".join(
+            [
+                "name: demo",
+                "dependencies:",
+                "  - python=3.12.2",
+                "  - pytorch=2.2.1=py3.12_cuda12.1",
+                "  - torchvision=0.17.1",
+                "  - pytorch-cuda=12.1",
+                "  - libpng=1.6.39",
+                "  - numpy=1.26.4",
+                "  - pyyaml=6.0.1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _infer_python_spec_from_repo(tmp_path) == "3.12"
+    req_text = _collect_repo_requirements_text(tmp_path)
+    assert "torch" in req_text
+    assert "torchvision" in req_text
+    assert "numpy" in req_text
+    assert "pyyaml" in req_text
+    assert "python" not in req_text
+    assert "pytorch-cuda" not in req_text
+    assert "libpng" not in req_text
+    assert "torch=" not in req_text
+
+
 def test_collect_repo_requirements_adds_notebook_runtime_and_imports(tmp_path) -> None:
     (tmp_path / "iemm").mkdir()
     (tmp_path / "iemm" / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -1602,6 +1960,66 @@ def test_extract_archive_bytes_flattens_single_root_and_blocks_traversal(tmp_pat
     assert (dest / "README.md").exists()
     assert (dest / "main.py").exists()
     assert not (tmp_path / "escape.txt").exists()
+
+
+def test_anonymous_4open_download_prefers_zip_archive(monkeypatch, tmp_path) -> None:
+    blob_io = BytesIO()
+    with zipfile.ZipFile(blob_io, "w") as zf:
+        zf.writestr("repo-main/README.md", "# demo\n")
+
+    def fake_get_bytes(path: str, timeout_sec: int = 120) -> bytes:
+        assert path == "/api/repo/FMP-AD84/zip"
+        return blob_io.getvalue()
+
+    def fail_get_json(path: str, timeout_sec: int = 60):
+        raise AssertionError(f"unexpected json API call: {path}")
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._anonymous_4open_get_bytes", fake_get_bytes)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._anonymous_4open_get_json", fail_get_json)
+
+    manifest = _download_anonymous_4open_repo(
+        "https://anonymous.4open.science/r/FMP-AD84/README.md",
+        tmp_path / "source",
+        tmp_path,
+    )
+
+    assert manifest["method"] == "zip"
+    assert manifest["files"] == 1
+    assert (tmp_path / "source" / "README.md").exists()
+
+
+def test_anonymous_4open_download_falls_back_to_files_api(monkeypatch, tmp_path) -> None:
+    def fake_get_bytes(path: str, timeout_sec: int = 120) -> bytes:
+        if path == "/api/repo/FMP-AD84/zip":
+            raise HTTPError(path, 404, "not found", hdrs=None, fp=None)
+        if path == "/api/repo/FMP-AD84/file/README.md?v=abc123":
+            return b"# demo\n"
+        raise AssertionError(f"unexpected bytes API call: {path}")
+
+    def fake_get_json(path: str, timeout_sec: int = 60):
+        if path == "/api/repo/FMP-AD84/options":
+            return {"lastUpdateDate": "2024-01-01T00:00:00.000Z"}
+        if path == "/api/repo/FMP-AD84/files/?path=&v=2024-01-01T00%3A00%3A00.000Z":
+            return [
+                {"name": "", "path": "", "size": 0},
+                {"name": ".DS_Store", "path": "", "size": 1, "sha": "ignored"},
+                {"name": "README.md", "path": "", "size": 7, "sha": "abc123"},
+            ]
+        raise AssertionError(f"unexpected json API call: {path}")
+
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._anonymous_4open_get_bytes", fake_get_bytes)
+    monkeypatch.setattr("fact_generation.execution.nodes.prepare._anonymous_4open_get_json", fake_get_json)
+
+    manifest = _download_anonymous_4open_repo(
+        "https://anonymous.4open.science/r/FMP-AD84/README.md",
+        tmp_path / "source",
+        tmp_path,
+    )
+
+    assert manifest["method"] == "files_api"
+    assert manifest["files"] == 1
+    assert (tmp_path / "source" / "README.md").read_text(encoding="utf-8") == "# demo\n"
+    assert not (tmp_path / "source" / ".DS_Store").exists()
 
 
 def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:

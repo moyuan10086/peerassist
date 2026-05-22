@@ -83,7 +83,6 @@ def _select_python_image(cfg: dict, py_tag: str) -> str:
     local_fallbacks = []
     if py_tag.startswith("3.7"):
         local_fallbacks.append("code-eval-paper-verify:3.7")
-    local_fallbacks.extend(["code-evaluation:latest", "code-eval-paper-verify:3.7"])
     for candidate in local_fallbacks:
         if _image_exists(candidate):
             return candidate
@@ -160,6 +159,8 @@ def _requirement_key(line: str) -> str:
 def _normalise_dependency_line(name: str, op: str = "", version: str = "") -> str:
     pkg = _canonical_package_name(name)
     op = str(op or "").strip()
+    if op == "=":
+        op = "=="
     version = str(version or "").strip().rstrip(".,;)")
     if pkg == "dgl" and "+cu" in version:
         # DGL CUDA local-version wheels need a custom find-links URL. Use the
@@ -168,6 +169,68 @@ def _normalise_dependency_line(name: str, op: str = "", version: str = "") -> st
     if op and version and "*" not in version:
         return f"{pkg}{op}{version}"
     return pkg
+
+
+_CONDA_SKIP_NAMES = {
+    "python",
+    "pip",
+    "setuptools",
+    "wheel",
+    "ca-certificates",
+    "certifi",
+    "openssl",
+    "readline",
+    "sqlite",
+    "tk",
+    "xz",
+    "zlib",
+    "ld_impl_linux-64",
+    "libgcc-ng",
+    "libstdcxx-ng",
+    "pytorch-cuda",
+    "pytorch-mutex",
+}
+
+_CONDA_SKIP_PREFIXES = (
+    "_",
+    "cuda-",
+    "libc",
+    "libd",
+    "libf",
+    "libg",
+    "libi",
+    "libj",
+    "libn",
+    "libp",
+    "libstd",
+    "libt",
+    "libu",
+    "libw",
+    "mkl",
+    "intel-",
+    "llvm-",
+    "ncurses",
+)
+
+_CONDA_TO_PIP = {
+    "pytorch": "torch",
+    "opencv": "opencv-python",
+    "opencv-python-headless": "opencv-python-headless",
+    "pillow": "pillow",
+    "pyyaml": "pyyaml",
+    "sklearn": "scikit-learn",
+}
+
+
+def _normalise_conda_dependency_name(name: str) -> str:
+    raw = str(name or "").strip().lower().replace("_", "-")
+    if not raw or raw in _CONDA_SKIP_NAMES or any(raw.startswith(prefix) for prefix in _CONDA_SKIP_PREFIXES):
+        return ""
+    mapped = _CONDA_TO_PIP.get(raw, raw)
+    # Conda build strings and channels do not map cleanly to PyPI. Keep these
+    # as broad package requirements; explicit requirements.txt/pyproject pins
+    # still win during de-duplication.
+    return _canonical_package_name(mapped)
 
 
 def _dedupe_requirement_lines(lines: list[str]) -> list[str]:
@@ -212,8 +275,30 @@ def _read_requirement_file_lines(repo_root: Path) -> list[str]:
                 m = re.match(r"^\s*-\s*([A-Za-z0-9_.-]+)\s*([<>=~!]{1,2})?\s*([A-Za-z0-9_.+*-]+)?", raw)
                 if not m:
                     continue
-                line = _normalise_dependency_line(m.group(1), m.group(2) or "", m.group(3) or "")
+                line = _normalise_conda_dependency_name(m.group(1))
+                if not line:
+                    continue
             lines.append(line)
+    return lines
+
+
+def _pyproject_dependency_lines(repo_root: Path) -> list[str]:
+    pyproject = Path(repo_root) / "pyproject.toml"
+    if not pyproject.exists():
+        return []
+    try:
+        import tomllib
+
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return []
+    project = data.get("project") if isinstance(data, dict) else {}
+    if not isinstance(project, dict):
+        return []
+    lines: list[str] = []
+    deps = project.get("dependencies")
+    if isinstance(deps, list):
+        lines.extend(str(dep).strip() for dep in deps if str(dep).strip())
     return lines
 
 
@@ -364,6 +449,7 @@ def _notebook_requirement_lines(repo_root: Path, *, max_files: int = 80, max_byt
 def _collect_repo_requirements_text(repo_root: Path, *, include_notebook_runtime: bool = True) -> str:
     lines = []
     lines.extend(_read_requirement_file_lines(repo_root))
+    lines.extend(_pyproject_dependency_lines(repo_root))
     lines.extend(_readme_requirement_lines(repo_root))
     lines.extend(_import_requirement_lines(repo_root))
     if include_notebook_runtime:
