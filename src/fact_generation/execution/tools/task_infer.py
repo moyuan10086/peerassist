@@ -96,6 +96,140 @@ def _guess_entrypoints(repo_root: Path) -> list[str]:
     return out
 
 
+_IGNORED_SOURCE_DIR_NAMES = {
+    ".git",
+    ".idea",
+    "__MACOSX",
+    "__pycache__",
+    "build",
+    "checkpoints",
+    "data",
+    "datasets",
+    "dist",
+    "doc",
+    "docs",
+    "examples",
+    "experiments",
+    "figs",
+    "logs",
+    "notebook",
+    "notebooks",
+    "outputs",
+    "results",
+    "runs",
+    "scripts",
+    "site-packages",
+    "simpletransformers",
+    "tests",
+    "transformers",
+}
+
+
+def _is_identifier_path_part(raw: str) -> bool:
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw or ""))
+
+
+def _detect_python_import_targets(repo_root: Path) -> list[str]:
+    """
+    Detect importable local packages/modules for repos that ship as a library
+    plus notebooks rather than a conventional train.py/eval.py entrypoint.
+    """
+
+    roots = [repo_root]
+    src_dir = repo_root / "src"
+    if src_dir.exists() and src_dir.is_dir():
+        roots.append(src_dir)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for base in roots:
+        try:
+            children = sorted(base.iterdir(), key=lambda p: p.name.lower())
+        except Exception:
+            continue
+        for child in children:
+            name = child.name
+            if (
+                not child.is_dir()
+                or name.startswith(".")
+                or name in _IGNORED_SOURCE_DIR_NAMES
+                or not _is_identifier_path_part(name)
+            ):
+                continue
+            direct_py = sorted(
+                p for p in child.glob("*.py") if p.is_file() and not p.name.startswith(".")
+            )
+            if not direct_py:
+                continue
+            if (child / "__init__.py").exists():
+                target = name
+            else:
+                modules = [
+                    p.stem
+                    for p in direct_py
+                    if _is_identifier_path_part(p.stem) and p.stem not in {"setup", "conftest"}
+                ]
+                if not modules:
+                    continue
+                preferred = next(
+                    (m for m in ["core", "model", "models", "utils", "main"] if m in modules),
+                    modules[0],
+                )
+                target = f"{name}.{preferred}"
+            if target not in seen:
+                out.append(target)
+                seen.add(target)
+            if len(out) >= 8:
+                return out
+
+    for p in sorted(repo_root.glob("*.py"), key=lambda item: item.name.lower()):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        stem = p.stem
+        if stem in {"setup", "conftest"} or not _is_identifier_path_part(stem):
+            continue
+        if stem not in seen:
+            out.append(stem)
+            seen.add(stem)
+        if len(out) >= 8:
+            break
+    return out
+
+
+def _namespace_package_roots(repo_root: Path) -> set[str]:
+    roots = [repo_root]
+    src_dir = repo_root / "src"
+    if src_dir.exists() and src_dir.is_dir():
+        roots.append(src_dir)
+    out: set[str] = set()
+    for base in roots:
+        try:
+            children = list(base.iterdir())
+        except Exception:
+            continue
+        for child in children:
+            name = child.name
+            if (
+                child.is_dir()
+                and not name.startswith(".")
+                and name not in _IGNORED_SOURCE_DIR_NAMES
+                and _is_identifier_path_part(name)
+                and not (child / "__init__.py").exists()
+                and any(p.is_file() for p in child.glob("*.py"))
+            ):
+                out.add(name)
+    return out
+
+
+def _import_smoke_cmd(import_target: str) -> list[str]:
+    script = (
+        "import importlib; "
+        f"importlib.import_module({import_target!r}); "
+        f"print('import ok: {import_target}')"
+    )
+    return ["python", "-c", script]
+
+
 def _clean_command_line(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
@@ -498,16 +632,73 @@ def _local_python_imports(repo_root: Path, script_path: Path, source: str) -> li
     return imports
 
 
+def _resolve_script_reference(repo_root: Path, base_dir: Path, ref: str) -> Path | None:
+    raw = str(ref or "").strip().strip("'\"")
+    if not raw or raw.startswith("-") or raw.startswith("$"):
+        return None
+    rel = Path(raw)
+    candidates = [base_dir / rel, repo_root / rel]
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            if resolved.exists() and resolved.is_file() and repo_root.resolve() in resolved.parents:
+                return resolved
+        except Exception:
+            continue
+    return None
+
+
+def _python_scripts_referenced_by_shell(repo_root: Path, base_dir: Path, source: str) -> list[Path]:
+    normalized = re.sub(r"\\\r?\n", " ", source or "")
+    scripts: list[Path] = []
+    seen: set[Path] = set()
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(line, posix=True)
+        except Exception:
+            tokens = line.split()
+        for idx, token in enumerate(tokens):
+            exe = Path(str(token)).name.lower()
+            if exe not in {"python", "python3"}:
+                continue
+            for candidate_token in tokens[idx + 1 :]:
+                if candidate_token == "-m":
+                    break
+                if str(candidate_token).startswith("-"):
+                    continue
+                if not str(candidate_token).endswith(".py"):
+                    break
+                path = _resolve_script_reference(repo_root, base_dir, str(candidate_token))
+                if path is not None and path not in seen:
+                    scripts.append(path)
+                    seen.add(path)
+                break
+        for match in re.finditer(r"(?:^|[\s($;])python3?\s+([A-Za-z0-9_./-]+\.py)\b", line):
+            path = _resolve_script_reference(repo_root, base_dir, match.group(1))
+            if path is not None and path not in seen:
+                scripts.append(path)
+                seen.add(path)
+    return scripts
+
+
 def _api_scan_text_for_command(repo_root: Path, raw_cmd: str, script_path: Path | None) -> str:
     haystacks = [str(raw_cmd or "")]
-    if script_path is None or script_path.suffix.lower() != ".py":
+    if script_path is None or script_path.suffix.lower() not in {".py", ".sh"}:
         if script_path is not None:
             haystacks.append(_read_optional(script_path, max_chars=30000))
         return "\n".join(haystacks)
 
-    queue = [script_path]
+    if script_path.suffix.lower() == ".sh":
+        shell_source = _read_optional(script_path, max_chars=60000)
+        haystacks.append(shell_source)
+        queue = _python_scripts_referenced_by_shell(repo_root, script_path.parent, shell_source)
+    else:
+        queue = [script_path]
     seen: set[Path] = set()
-    while queue and len(seen) < 16:
+    while queue and len(seen) < 64:
         path = queue.pop(0)
         try:
             resolved = path.resolve()
@@ -522,6 +713,37 @@ def _api_scan_text_for_command(repo_root: Path, raw_cmd: str, script_path: Path 
     return "\n".join(haystacks)
 
 
+_EXTERNAL_API_MARKERS = [
+    "from openai import",
+    "import openai",
+    "asyncopenai",
+    "openai(",
+    "google-genai",
+    "google.genai",
+    "genai.client",
+    "api_key",
+    "api key",
+    "apikey",
+    "base_url",
+    "localhost:8000/v1",
+    "127.0.0.1:8000/v1",
+    "vllm",
+]
+
+
+def _text_requires_external_api(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered.strip():
+        return False
+    if any(marker in lowered for marker in _EXTERNAL_API_MARKERS):
+        return True
+    return bool(re.search(r"\b(?:openai|anthropic|gemini|claude)_api_key\b", lowered))
+
+
+def _path_requires_external_api(path: Path) -> bool:
+    return _text_requires_external_api(_read_optional(path, max_chars=120000))
+
+
 def _command_requires_external_api(repo_root: Path, raw_cmd: str, cmd: list[str]) -> bool:
     """
     Conservative guard for README examples that require paid APIs or a local
@@ -530,28 +752,8 @@ def _command_requires_external_api(repo_root: Path, raw_cmd: str, cmd: list[str]
     """
 
     script_path = _script_path_for_command(repo_root, cmd)
-    text = _api_scan_text_for_command(repo_root, raw_cmd, script_path).lower()
-    if not text.strip():
-        return False
-    api_markers = [
-        "from openai import",
-        "import openai",
-        "asyncopenai",
-        "openai(",
-        "google-genai",
-        "google.genai",
-        "genai.client",
-        "api_key",
-        "api key",
-        "apikey",
-        "base_url",
-        "localhost:8000/v1",
-        "127.0.0.1:8000/v1",
-        "vllm",
-    ]
-    if any(marker in text for marker in api_markers):
-        return True
-    return bool(re.search(r"\b(?:openai|anthropic|gemini|claude)_api_key\b", text))
+    text = _api_scan_text_for_command(repo_root, raw_cmd, script_path)
+    return _text_requires_external_api(text)
 
 
 def _external_api_tasks_disabled() -> bool:
@@ -771,6 +973,102 @@ def _is_dependency_install_command(raw: str) -> bool:
     )
 
 
+def _cmd_text(cmd: list[str]) -> str:
+    return " ".join(str(x) for x in cmd if str(x).strip())
+
+
+def _cmd_has_help_flag(cmd: list[str]) -> bool:
+    return any(str(x).strip().lower() in {"-h", "--help"} for x in cmd)
+
+
+def _cmd_is_pip_install(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    lowered = [str(x).strip().lower() for x in cmd]
+    if len(lowered) >= 4 and lowered[0] in {"python", "python3"} and lowered[1:4] == ["-m", "pip", "install"]:
+        return True
+    if len(lowered) >= 2 and lowered[0] in {"pip", "pip3"} and lowered[1] == "install":
+        return True
+    if len(lowered) >= 3 and lowered[0] in {"bash", "sh"} and lowered[1] in {"-c", "-lc"}:
+        return bool(re.search(r"\b(?:python(?:3)?\s+-m\s+)?pip(?:3)?\s+install\b", lowered[2]))
+    return False
+
+
+def _cmd_executes_notebook(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    lowered = [str(x).strip().lower() for x in cmd]
+    text = " ".join(lowered)
+    if ".ipynb" not in text:
+        return False
+    if "nbconvert" in lowered and "--execute" in lowered:
+        return True
+    if re.search(r"\bjupyter\s+(?:notebook|lab)\b", text):
+        return True
+    if len(lowered) >= 3 and lowered[0] in {"bash", "sh"} and lowered[1] in {"-c", "-lc"}:
+        shell = lowered[2]
+        return ".ipynb" in shell and (
+            bool(re.search(r"\b(?:jupyter\s+)?nbconvert\b", shell) and "--execute" in shell)
+            or bool(re.search(r"\bjupyter\s+(?:notebook|lab)\b", shell))
+        )
+    return False
+
+
+def _cmd_imports_from_namespace_root(cmd: list[str], package_names: set[str]) -> bool:
+    if not package_names:
+        return False
+    text = _cmd_text(cmd)
+    if len(cmd) >= 3 and (
+        (cmd[0] in {"python", "python3"} and cmd[1] == "-c")
+        or (cmd[0] in {"bash", "sh"} and cmd[1] in {"-c", "-lc"})
+    ):
+        text = cmd[2]
+    return any(re.search(rf"\bfrom\s+{re.escape(package)}\s+import\b", text) for package in package_names)
+
+
+def _smoke_disabled_reason(task: dict[str, Any]) -> str:
+    cmd = task.get("cmd")
+    cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
+    family = str(task.get("family") or _command_family(_cmd_text(cmd_list))).strip().lower()
+    if _cmd_is_pip_install(cmd_list) or family == "prepare":
+        return "smoke_mode_prepare_disabled"
+    if _cmd_executes_notebook(cmd_list):
+        return "full_mode_required"
+    if family in {"train", "eval", "evaluate", "evaluation", "reproduce", "reproduction", "benchmark"}:
+        if not _cmd_has_help_flag(cmd_list):
+            return "full_mode_required"
+    return ""
+
+
+def _apply_mode_policy(tasks: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
+    if str(mode or "smoke").strip().lower() == "full":
+        return tasks
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        reason = _smoke_disabled_reason(task)
+        if not reason:
+            continue
+        task["enabled"] = False
+        task.setdefault("disabled_reason", reason)
+    return tasks
+
+
+def _apply_static_import_policy(tasks: list[dict[str, Any]], repo_root: Path) -> list[dict[str, Any]]:
+    namespace_roots = _namespace_package_roots(repo_root)
+    if not namespace_roots:
+        return tasks
+    for task in tasks:
+        if not isinstance(task, dict) or not bool(task.get("enabled", True)):
+            continue
+        cmd = task.get("cmd")
+        cmd_list = cmd if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd) else []
+        if _cmd_imports_from_namespace_root(cmd_list, namespace_roots):
+            task["enabled"] = False
+            task.setdefault("disabled_reason", "namespace_package_root_import_unavailable")
+    return tasks
+
+
 def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], mode: str) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     seen_cmds: set[str] = set()
@@ -817,6 +1115,144 @@ def _build_repo_prepare_tasks(repo_root: Path, readme_example_cmds: list[str], m
         if path.exists() and path.is_file():
             add_prepare(f"bash {rel.replace(os.sep, '/')}", rel)
 
+    return tasks
+
+
+def _notebook_candidates(repo_root: Path) -> list[Path]:
+    ignored_parts = {
+        ".git",
+        ".idea",
+        "__MACOSX",
+        "__pycache__",
+        ".ipynb_checkpoints",
+        "site-packages",
+        "build",
+        "dist",
+        "runs",
+        "outputs",
+    }
+    out: list[Path] = []
+    try:
+        paths = sorted(repo_root.rglob("*.ipynb"), key=lambda p: p.relative_to(repo_root).as_posix().lower())
+    except Exception:
+        return []
+    for path in paths:
+        rel = path.relative_to(repo_root)
+        if any(part in ignored_parts or part.startswith(".") for part in rel.parts):
+            continue
+        out.append(path)
+    return out
+
+
+def _resolve_notebook_reference(repo_root: Path, ref: str, candidates: list[Path]) -> Path | None:
+    cleaned = (ref or "").strip().strip("`'\"()[]{}.,:;")
+    if not cleaned or not cleaned.lower().endswith(".ipynb"):
+        return None
+    cleaned = cleaned.replace("\\", "/")
+    direct = repo_root / cleaned
+    if direct.exists() and direct.is_file():
+        return direct
+    basename = Path(cleaned).name.lower()
+    matches = [p for p in candidates if p.name.lower() == basename]
+    if len(matches) == 1:
+        return matches[0]
+    suffix_matches = [
+        p for p in candidates if p.relative_to(repo_root).as_posix().lower().endswith(cleaned.lower())
+    ]
+    return suffix_matches[0] if len(suffix_matches) == 1 else None
+
+
+def _extract_notebook_paths(repo_root: Path, readme_text: str, limit: int = 8) -> list[str]:
+    candidates = _notebook_candidates(repo_root)
+    if not candidates:
+        return []
+
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        rel = path.relative_to(repo_root).as_posix()
+        if rel in seen:
+            return
+        seen.add(rel)
+        out.append(rel)
+
+    for match in re.finditer(r"(?P<path>[\w./ -]+\.ipynb)", readme_text or "", flags=re.IGNORECASE):
+        add(_resolve_notebook_reference(repo_root, match.group("path"), candidates))
+        if len(out) >= limit:
+            return out
+
+    # If README names an experiments/notebooks folder but omits exact paths,
+    # preserve a few notebooks from that folder as disabled/full-mode candidates.
+    text = (readme_text or "").lower()
+    folder_hints = []
+    if "experiments/" in text or "experiments folder" in text:
+        folder_hints.append("experiments/")
+    if "notebooks/" in text or "notebooks folder" in text:
+        folder_hints.append("notebooks/")
+    for path in candidates:
+        rel = path.relative_to(repo_root).as_posix()
+        if folder_hints and not any(rel.lower().startswith(hint) for hint in folder_hints):
+            continue
+        add(path)
+        if len(out) >= limit:
+            break
+
+    if not out and len(candidates) <= 3:
+        for path in candidates:
+            add(path)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _build_notebook_tasks(repo_root: Path, notebook_paths: list[str], mode: str) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    for rel in notebook_paths[:8]:
+        task_id = f"reproduce_notebook_{_safe_id_part(rel)}"
+        output_dir = f"{{run_dir}}/outputs/{task_id}"
+        timeout = 7200
+        task = {
+            "id": task_id,
+            "family": "reproduce",
+            "enabled": mode == "full",
+            "cwd": "{paper_root}",
+            "cmd": [
+                "python",
+                "-m",
+                "jupyter",
+                "nbconvert",
+                "--to",
+                "notebook",
+                "--execute",
+                rel,
+                "--output-dir",
+                output_dir,
+                f"--ExecutePreprocessor.timeout={timeout}",
+            ],
+            "timeout_sec": timeout + 600,
+            "use_conda": True,
+            "artifact_paths": [
+                f"{output_dir}/*.ipynb",
+                f"{output_dir}/*.html",
+                "metrics/**",
+                "results/**",
+                "outputs/**",
+                "figs/**",
+                "figures/**",
+            ],
+            "metric_artifact_path": f"metrics/{task_id}_metrics.json",
+            "dataset": "",
+            "method": "",
+            "split": "",
+        }
+        if mode != "full":
+            task["disabled_reason"] = "full_mode_required"
+        nb_path = repo_root / rel
+        task = _mark_external_api_task(task, _path_requires_external_api(nb_path))
+        tasks.append(task)
     return tasks
 
 
@@ -1070,6 +1506,7 @@ def _finalize_tasks(
     tasks: list[dict[str, Any]],
     entrypoints: list[str],
     readme_example_cmds: list[str],
+    notebook_paths: list[str],
     datasets: list[str],
     mode: str,
     paper_metric_targets: list[dict[str, Any]] | None = None,
@@ -1125,6 +1562,13 @@ def _finalize_tasks(
             tasks.append(task)
             existing_ids.add(tid)
 
+    notebook_tasks = _build_notebook_tasks(repo_root, notebook_paths, mode=mode)
+    for task in notebook_tasks:
+        tid = str(task.get("id") or "")
+        if tid and tid not in existing_ids:
+            tasks.append(task)
+            existing_ids.add(tid)
+
     matrix_tasks = _build_readme_matrix_tasks(readme_example_cmds, datasets, mode=mode)
     if matrix_tasks:
         non_train = [
@@ -1133,7 +1577,9 @@ def _finalize_tasks(
             if isinstance(t, dict) and (not _is_training_task(t) or bool(t.get("expected_metrics")))
         ]
         tasks = non_train + matrix_tasks
-    return _append_eval_export_tasks(repo_root, tasks, paper_metric_targets=paper_metric_targets)
+    tasks = _append_eval_export_tasks(repo_root, tasks, paper_metric_targets=paper_metric_targets)
+    tasks = _apply_static_import_policy(tasks, repo_root)
+    return _apply_mode_policy(tasks, mode)
 
 
 def infer_tasks_heuristic(
@@ -1145,6 +1591,8 @@ def infer_tasks_heuristic(
     requirements_present = requirements_path.exists()
     entrypoints = _guess_entrypoints(root)
     examples = _extract_example_commands_from_readme(readme)
+    import_targets = _detect_python_import_targets(root)
+    notebook_paths = _extract_notebook_paths(root, readme)
     datasets = _detect_benchmark_datasets(root)
 
     # Default install step. We keep it lightweight and let the framework's prepare/fix deal with stdlib-in-req.
@@ -1165,13 +1613,19 @@ def infer_tasks_heuristic(
     # Smoke: check --help for a chosen entrypoint.
     ep = entrypoints[0] if entrypoints else ""
     if not ep:
-        # last resort: do nothing but print cwd (still validates the runner)
+        # Library-style research repos often expose package APIs plus notebooks
+        # instead of script entrypoints. Import the local package as the smoke.
+        cmd = _import_smoke_cmd(import_targets[0]) if import_targets else [
+            "python",
+            "-c",
+            "import os; print('cwd=', os.getcwd()); print('ok')",
+        ]
         tasks.append(
             {
                 "id": "repo_smoke",
                 "family": "smoke",
                 "cwd": "{paper_root}",
-                "cmd": ["python", "-c", "import os; print('cwd=', os.getcwd()); print('ok')"],
+                "cmd": cmd,
                 "timeout_sec": 60,
                 "use_conda": True,
             }
@@ -1204,6 +1658,7 @@ def infer_tasks_heuristic(
         tasks=tasks,
         entrypoints=entrypoints,
         readme_example_cmds=examples,
+        notebook_paths=notebook_paths,
         datasets=datasets,
         mode=mode,
         paper_metric_targets=paper_metric_targets,
@@ -1211,6 +1666,8 @@ def infer_tasks_heuristic(
     evidence = {
         "mode": mode,
         "entrypoints": entrypoints,
+        "python_import_targets": import_targets,
+        "notebook_paths": notebook_paths,
         "datasets_detected": datasets,
         "readme_has_content": bool(readme.strip()),
         "requirements_present": requirements_present,
@@ -1241,6 +1698,8 @@ def infer_tasks_llm(
     req = _read_optional(root / "requirements.txt", max_chars=8000)
     entrypoints = _guess_entrypoints(root)
     readme_example_cmds = _extract_example_commands_from_readme(readme)
+    import_targets = _detect_python_import_targets(root)
+    notebook_paths = _extract_notebook_paths(root, readme)
     datasets = _detect_benchmark_datasets(root)
     entrypoint_hints = _entrypoint_arg_hints(root, entrypoints)
 
@@ -1258,6 +1717,8 @@ def infer_tasks_llm(
         "files_top_level": [p.name for p in sorted(root.iterdir())][:200],
         "entrypoints_detected": entrypoints,
         "entrypoint_arg_hints": entrypoint_hints,
+        "python_import_targets_detected": import_targets,
+        "notebook_paths_detected": notebook_paths,
         "datasets_detected": datasets,
         "readme_example_commands": readme_example_cmds,
         "readme_md_excerpt": readme,
@@ -1295,6 +1756,7 @@ def infer_tasks_llm(
             "Do not propose source code edits.",
             "Tasks execute inside a Linux Docker container even when the host machine is Windows. Do not emit Windows-only wrappers like ['cmd','/c', ...] unless the repo itself explicitly requires Windows shells.",
             "Commands must be compatible with shell=False: use argv arrays. For multi-step shell pipelines use ['bash','-lc','...'] because execution is Linux-based.",
+            "For library-plus-notebook repos, include an import smoke task and use jupyter nbconvert execution for notebooks that reproduce paper experiments.",
             "When README lists multiple reproduction commands, preserve the full set of distinct commands instead of sampling only one or two representative examples.",
             "When datasets_detected contains multiple benchmark datasets and the training entrypoint supports a dataset flag, expand reproduction tasks across those datasets unless the README clearly restricts a command to one dataset.",
             "When a training command does not specify a run name but the CLI supports one, add a stable explicit run name so downstream checkpoints/logs can be located deterministically.",
@@ -1341,6 +1803,7 @@ def infer_tasks_llm(
         tasks=finalized,
         entrypoints=entrypoints,
         readme_example_cmds=readme_example_cmds,
+        notebook_paths=notebook_paths,
         datasets=datasets,
         mode=mode,
         paper_metric_targets=paper_metric_targets,
@@ -1350,6 +1813,8 @@ def infer_tasks_llm(
         "llm_used": True,
         "llm_provider": llm_cfg.provider,
         "llm_model": llm_cfg.model,
+        "python_import_targets": import_targets,
+        "notebook_paths": notebook_paths,
         "raw": resp,
         "paper_metric_targets_count": len(paper_metric_targets or []),
     }

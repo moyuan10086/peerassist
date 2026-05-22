@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -71,9 +72,26 @@ def _to_shell(cmd: list[str]) -> str:
         return ""
     if len(cmd) == 1:
         return cmd[0].strip()
-    if any((" " in (x or "").strip()) for x in cmd):
-        return " && ".join([x.strip() for x in cmd if x.strip()])
-    return " ".join([x.strip() for x in cmd if x.strip()])
+    exe = Path(cmd[0]).name.lower()
+    if exe in {"sh", "bash"} and len(cmd) >= 3 and cmd[1] in {"-c", "-lc"}:
+        shell = str(cmd[2] or "").strip()
+        if len(cmd) > 3:
+            shell = " ".join([shell, *[shlex.quote(str(x)) for x in cmd[3:]]]).strip()
+        return shell
+    return shlex.join([str(x) for x in cmd if str(x).strip()])
+
+
+def _docker_runtime_kwargs(cfg: dict[str, Any]) -> dict[str, str | None]:
+    return {
+        "gpus": str(cfg.get("docker_gpus") or os.environ.get("EXECUTION_DOCKER_GPUS") or "").strip()
+        or None,
+        "shm_size": str(
+            cfg.get("docker_shm_size") or os.environ.get("EXECUTION_DOCKER_SHM_SIZE") or ""
+        ).strip()
+        or None,
+        "ipc": str(cfg.get("docker_ipc") or os.environ.get("EXECUTION_DOCKER_IPC") or "").strip()
+        or None,
+    }
 
 
 def _normalize_shell_for_conda_env(shell: str) -> str:
@@ -88,11 +106,108 @@ def _normalize_shell_for_conda_env(shell: str) -> str:
     return s
 
 
+def _container_path_pairs(paper_root: str, run_dir: Path) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+
+    def add(host_path: str | Path, container_path: str) -> None:
+        raw = str(host_path or "").strip()
+        if not raw:
+            return
+        try:
+            resolved = str(Path(raw).resolve())
+        except Exception:
+            resolved = raw
+        variants = {raw, resolved, raw.replace("\\", "/"), resolved.replace("\\", "/")}
+        variants.update({v.replace("\\", "\\\\") for v in list(variants) if "\\" in v})
+        for variant in sorted(variants, key=len, reverse=True):
+            if variant:
+                pairs.append((variant, container_path))
+
+    run_dir = Path(run_dir)
+    add(Path(run_dir) / "artifacts", "/workspace/run_dir/artifacts")
+    add(paper_root, "/app")
+    add(run_dir, "/workspace/run_dir")
+
+    # Replace deeper paths first so /workspace/source maps to /app before the
+    # parent run directory maps to /workspace/run_dir.
+    dedup: dict[str, str] = {}
+    for host_path, container_path in sorted(pairs, key=lambda item: len(item[0]), reverse=True):
+        dedup.setdefault(host_path, container_path)
+    return list(dedup.items())
+
+
+def _normalize_container_path_text(text: str, paper_root: str, run_dir: Path) -> str:
+    patched = str(text or "")
+    for host_path, container_path in _container_path_pairs(paper_root, run_dir):
+        patched = patched.replace(host_path, container_path)
+    return patched
+
+
+_PATH_REWRITE_TEXT_SUFFIXES = {
+    "",
+    ".bash",
+    ".cfg",
+    ".conf",
+    ".env",
+    ".ini",
+    ".ipynb",
+    ".json",
+    ".md",
+    ".py",
+    ".sh",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+
+
+def _rewrite_container_path_leaks(paper_root: str, run_dir: Path) -> list[str]:
+    root = Path(paper_root or ".")
+    if not root.exists():
+        return []
+    changed: list[str] = []
+    skipped_parts = {".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache"}
+    for path in root.rglob("*"):
+        try:
+            if not path.is_file() or skipped_parts.intersection(path.parts):
+                continue
+            if path.stat().st_size > 2_000_000:
+                continue
+            if path.suffix.lower() not in _PATH_REWRITE_TEXT_SUFFIXES and path.name not in {
+                "Dockerfile",
+                "Makefile",
+                "README",
+            }:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            patched = _normalize_container_path_text(text, paper_root, run_dir)
+            if patched != text:
+                path.write_text(patched, encoding="utf-8", errors="ignore")
+                try:
+                    changed.append(str(path.relative_to(root)))
+                except Exception:
+                    changed.append(str(path))
+        except Exception:
+            continue
+    return changed
+
+
 def _pip_package_for_module(module: str) -> str:
     module = str(module or "").strip()
     if not module:
         return ""
-    return _MODULE_TO_PIP.get(module, module.replace("_", "-"))
+    root = module.split(".", 1)[0].strip()
+    key = root or module
+    return _MODULE_TO_PIP.get(module) or _MODULE_TO_PIP.get(key) or key.replace("_", "-")
+
+
+def _missing_module_looks_local(paper_root: str, module: str) -> bool:
+    root = str(module or "").strip().split(".", 1)[0]
+    if not root:
+        return False
+    pr = Path(paper_root or ".")
+    return (pr / root).is_dir() or (pr / f"{root}.py").is_file()
 
 
 def _add_extra_pip_package(cfg: dict[str, Any], package: str) -> bool:
@@ -263,6 +378,14 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
         append_event(run_dir, "fix_missing_module", {"module": missing})
         state.setdefault("history", []).append({"kind": "fix_missing_module", "data": {"module": missing}})
 
+    if missing and _missing_module_looks_local(paper_root, missing):
+        append_event(run_dir, "fix_missing_module_local_path", {"module": missing, "paper_root": paper_root})
+        state.setdefault("history", []).append(
+            {"kind": "fix_missing_module_local_path", "data": {"module": missing, "paper_root": paper_root}}
+        )
+        state["status"] = "running"
+        return state
+
     if missing and docker_enabled and missing != "torch_scatter":
         package = _pip_package_for_module(missing)
         if _add_extra_pip_package(cfg, package):
@@ -324,6 +447,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 cmd=["bash", "-lc", shell],
                 env={},
                 env_passthrough=_docker_env_passthrough(cfg),
+                **_docker_runtime_kwargs(cfg),
             )
             res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=900)
             persist_command_result(res, logs_dir, prefix=f"fix_torch_scatter_{attempt}")
@@ -351,6 +475,9 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
         "You are a senior engineer doing rigorous paper-code reproduction.\n"
         "Produce a fix plan ONLY in JSON. Do not include prose outside JSON.\n"
         "The plan must be safe and reproducible, prefer environment/command fixes before source edits.\n"
+        "When docker is enabled, commands run inside the paper container: use /app as the paper root "
+        "and /workspace/run_dir as the writable run directory. Do not create or reference host absolute "
+        "paths such as /data/..., C:\\..., or E:\\... inside container commands.\n"
     )
     prompt = {
         "attempt": attempt,
@@ -367,6 +494,11 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
             "prefer_wrapper_env_fixes": True,
             "avoid_core_source_changes": True,
             "must_be_reproducible": True,
+            "container_paths": {
+                "paper_root": "/app",
+                "run_dir": "/workspace/run_dir",
+                "artifact_dir": "/workspace/run_dir/artifacts",
+            },
             "primary_goal": "make tasks produce metric artifacts that can be compared against paper_metric_targets",
         },
         "output_schema": {
@@ -447,7 +579,14 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                         continue
                     # Per-paper image mode: run fixes inside /app.
                     # Avoid conda-specific wrappers.
-                    shell = _to_shell(cmd)
+                    shell_raw = _to_shell(cmd)
+                    shell = _normalize_container_path_text(shell_raw, paper_root, run_dir)
+                    if shell != shell_raw:
+                        append_event(
+                            run_dir,
+                            "fix_command_container_paths_normalized",
+                            {"cmd_index": j, "cwd": cwd},
+                        )
                     docker_cmd = docker_run_paper_image(
                         image=img_or_msg,
                         paper_root_host=str(Path(paper_root).resolve()),
@@ -456,6 +595,7 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                         cmd=["bash", "-lc", shell],
                         env={},
                         env_passthrough=_docker_env_passthrough(cfg),
+                        **_docker_runtime_kwargs(cfg),
                     )
                     res = run_command(cmd=docker_cmd, cwd=str(run_dir), timeout_sec=timeout)
                 else:
@@ -467,6 +607,20 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                 state.setdefault("history", []).append(
                     {"kind": "fix_command", "data": {"cmd": cmd, "cwd": cwd, "ok": ok, "rc": res.returncode}}
                 )
+                if ok and docker_enabled:
+                    rewritten = _rewrite_container_path_leaks(paper_root, run_dir)
+                    if rewritten:
+                        append_event(
+                            run_dir,
+                            "fix_rewrite_container_path_leaks",
+                            {"count": len(rewritten), "files": rewritten[:25]},
+                        )
+                        state.setdefault("history", []).append(
+                            {
+                                "kind": "fix_rewrite_container_path_leaks",
+                                "data": {"count": len(rewritten), "files": rewritten[:25]},
+                            }
+                        )
                 applied_any = applied_any or ok
             elif act.get("type") == "edit":
                 # Safety: only allow editing the tasks file (wrapper config), not paper code.
@@ -488,6 +642,8 @@ def fix_node(state: dict[str, Any]) -> dict[str, Any]:
                             target = Path(paper_root) / target
                     if str(target.resolve()).lower() != str(Path(tasks_path).resolve()).lower():
                         continue
+                    if docker_enabled:
+                        content = _normalize_container_path_text(content, paper_root, run_dir)
                     write_text(target, content)
                     write_text(
                         fixes_dir / f"fix_{attempt:03d}_edit_tasks.txt", f"Edited tasks file: {tasks_path}\n"

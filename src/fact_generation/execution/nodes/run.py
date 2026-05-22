@@ -145,18 +145,18 @@ def _semantic_runtime_failure(stdout: str, stderr: str) -> str:
 
 
 def _task_family(task: dict[str, Any], task_id: str = "") -> str:
+    ident = task_id.lower()
+    if ident.startswith("smoke_") or "smoke" in ident:
+        return "smoke"
     family = str(task.get("family") or "").strip().lower()
     if family:
         return family
-    ident = task_id.lower()
     if ident.startswith("eval_") or ident.startswith("evaluate_"):
         return "eval"
     if ident.startswith("reproduce_") or ident.startswith("reproduction_"):
         return "reproduce"
     if ident.startswith("train_"):
         return "train"
-    if ident.startswith("smoke_") or "smoke" in ident:
-        return "smoke"
     return ""
 
 
@@ -190,8 +190,9 @@ def _semantic_metric_failure(
     empty_summary = _looks_like_empty_metric_summary(text)
     if metric_artifact and metrics and not empty_summary:
         return ""
-    has_metric_contract = bool(expected) or _paper_targets_have_metrics(task) or bool(
-        str(task.get("metric_artifact_path") or "").strip()
+    metric_artifact_declared = bool(str(task.get("metric_artifact_path") or "").strip())
+    has_metric_contract = bool(expected) or _paper_targets_have_metrics(task) or (
+        metric_artifact_declared and family not in {"smoke", "prepare"}
     )
     if has_metric_contract and (not metrics or empty_summary):
         return "semantic_no_metrics"
@@ -409,6 +410,10 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
         env["EXECUTION_TASK_ID"] = task_id
         env["EXECUTION_OUTPUT_DIR"] = str(run_dir / "outputs" / task_id)
         env["EXECUTION_TASK_OUTPUT_DIR"] = str(run_dir / "outputs" / task_id)
+        existing_pythonpath = str(env.get("PYTHONPATH") or "")
+        pythonpath_parts = [part for part in existing_pythonpath.split(os.pathsep) if part]
+        if pr_host not in pythonpath_parts:
+            env["PYTHONPATH"] = os.pathsep.join([pr_host, *pythonpath_parts])
         (run_dir / "outputs" / task_id).mkdir(parents=True, exist_ok=True)
         artifact_paths = task.get("artifact_paths") or []
         if isinstance(artifact_paths, list):

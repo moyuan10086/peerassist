@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import os
 import re
+import warnings
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -101,6 +103,7 @@ _IMPORT_TO_PIP = {
     "pandas": "pandas",
     "PIL": "pillow",
     "scipy": "scipy",
+    "schemdraw": "schemdraw",
     "seaborn": "seaborn",
     "sentence_transformers": "sentence-transformers",
     "sklearn": "scikit-learn",
@@ -221,18 +224,45 @@ def _readme_requirement_lines(repo_root: Path) -> list[str]:
         text = _read_text_limited(path)
         if not text:
             continue
-        for m in _README_DEP_RE.finditer(text):
-            name = m.group("name") or ""
-            op = m.group("op") or ""
-            version = m.group("version") or ""
-            lines.append(_normalise_dependency_line(name, op, version))
+        dependency_context_budget = 0
+        for raw in text.splitlines():
+            line = raw.strip()
+            lower = line.lower()
+            if not line:
+                dependency_context_budget = 0
+                continue
+            if re.match(r"^#{1,6}\s+", line) and any(
+                key in lower for key in ["install", "setup", "requirement", "dependenc", "package"]
+            ):
+                dependency_context_budget = 40
+                continue
+            in_dependency_context = dependency_context_budget > 0 or any(
+                key in lower
+                for key in [
+                    "pip install",
+                    "conda install",
+                    "mamba install",
+                    "requirements.txt",
+                    "environment.yml",
+                    "environment.yaml",
+                ]
+            )
+            if not in_dependency_context:
+                continue
+            for m in _README_DEP_RE.finditer(line):
+                name = m.group("name") or ""
+                op = m.group("op") or ""
+                version = m.group("version") or ""
+                lines.append(_normalise_dependency_line(name, op, version))
+            if dependency_context_budget > 0 and line:
+                dependency_context_budget -= 1
     return lines
 
 
 def _local_python_modules(repo_root: Path) -> set[str]:
     local = {p.stem for p in repo_root.glob("*.py") if p.is_file()}
     for p in repo_root.iterdir() if repo_root.exists() else []:
-        if p.is_dir() and (p / "__init__.py").exists():
+        if p.is_dir() and ((p / "__init__.py").exists() or any(p.glob("*.py"))):
             local.add(p.name)
     return local
 
@@ -253,29 +283,91 @@ def _import_requirement_lines(repo_root: Path, *, max_files: int = 500, max_byte
         try:
             if path.stat().st_size > max_bytes:
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            source = path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names.extend(alias.name.split(".", 1)[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                names.append(node.module.split(".", 1)[0])
-            for name in names:
-                if name in local:
-                    continue
-                pkg = _IMPORT_TO_PIP.get(name)
-                if pkg:
-                    found.add(pkg)
+        found.update(_requirements_from_python_source(source, local))
     return sorted(found)
 
 
-def _collect_repo_requirements_text(repo_root: Path) -> str:
+def _requirements_from_python_source(source: str, local: set[str]) -> set[str]:
+    found: set[str] = set()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source or "")
+    except Exception:
+        return found
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names.extend(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module.split(".", 1)[0])
+        for name in names:
+            if name in local:
+                continue
+            pkg = _IMPORT_TO_PIP.get(name)
+            if pkg:
+                found.add(pkg)
+    return found
+
+
+def _notebook_requirement_lines(repo_root: Path, *, max_files: int = 80, max_bytes: int = 2_000_000) -> list[str]:
+    if not repo_root.exists():
+        return []
+    local = _local_python_modules(repo_root)
+    found: set[str] = set()
+    scanned = 0
+    has_notebook = False
+    skip_parts = {
+        ".git",
+        ".ipynb_checkpoints",
+        "__MACOSX",
+        "__pycache__",
+        "deployment",
+        "outputs",
+        "logs",
+        "results",
+        "checkpoints",
+    }
+    for path in repo_root.rglob("*.ipynb"):
+        if scanned >= max_files:
+            break
+        if any(part in skip_parts for part in path.parts):
+            continue
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        scanned += 1
+        has_notebook = True
+        cells = data.get("cells") if isinstance(data, dict) else None
+        if not isinstance(cells, list):
+            continue
+        for cell in cells:
+            if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+                continue
+            source = cell.get("source")
+            if isinstance(source, list):
+                text = "".join(str(x) for x in source)
+            else:
+                text = str(source or "")
+            found.update(_requirements_from_python_source(text, local))
+    if has_notebook:
+        found.update({"ipykernel", "nbconvert"})
+    return sorted(found)
+
+
+def _collect_repo_requirements_text(repo_root: Path, *, include_notebook_runtime: bool = True) -> str:
     lines = []
     lines.extend(_read_requirement_file_lines(repo_root))
     lines.extend(_readme_requirement_lines(repo_root))
     lines.extend(_import_requirement_lines(repo_root))
+    if include_notebook_runtime:
+        lines.extend(_notebook_requirement_lines(repo_root))
     deduped = _dedupe_requirement_lines(lines)
     return "\n".join(deduped) + ("\n" if deduped else "")
 
@@ -306,7 +398,6 @@ def _paper_dockerfile_text(*, python_image: str) -> str:
         "    } > /etc/pip.conf \\\n"
         " && (id -u user >/dev/null 2>&1 || useradd -m -u 1000 user) \\\n"
         " && python -m pip install --upgrade pip\n"
-        "USER user\n"
         'ENV PATH="/home/user/.local/bin:$PATH"\n'
         "ENV EXECUTION_DOCKER_EXTRA_PIP_PACKAGES=${EXECUTION_DOCKER_EXTRA_PIP_PACKAGES}\n"
         "ENTRYPOINT []\n"
@@ -340,6 +431,44 @@ def _paper_install_deps_py_text() -> str:
         "def _run(cmd: list[str]) -> int:\n"
         "    p = subprocess.run(cmd, check=False)\n"
         "    return int(p.returncode)\n"
+        "\n"
+        "\n"
+        "def _pip_check() -> tuple[int, str]:\n"
+        "    p = subprocess.run(\n"
+        "        [sys.executable, '-m', 'pip', 'check'],\n"
+        "        check=False,\n"
+        "        text=True,\n"
+        "        stdout=subprocess.PIPE,\n"
+        "        stderr=subprocess.STDOUT,\n"
+        "    )\n"
+        "    return int(p.returncode), (p.stdout or '')\n"
+        "\n"
+        "\n"
+        "def _repair_python_package_consistency() -> None:\n"
+        "    rc, out = _pip_check()\n"
+        "    if rc == 0:\n"
+        "        return\n"
+        "    low = out.lower()\n"
+        "    if 'pydantic' in low and ('pydantic-core' in low or 'typing-extensions' in low):\n"
+        "        fix_rc = _run([\n"
+        "            sys.executable,\n"
+        "            '-m',\n"
+        "            'pip',\n"
+        "            'install',\n"
+        "            '--no-cache-dir',\n"
+        "            '--upgrade',\n"
+        "            '--force-reinstall',\n"
+        "            'pydantic',\n"
+        "            'typing-extensions',\n"
+        "        ])\n"
+        "        if fix_rc == 0:\n"
+        "            rc2, out2 = _pip_check()\n"
+        "            if rc2 != 0:\n"
+        "                print('pip_check_after_pydantic_repair_failed_continuing', out2[-2000:])\n"
+        "            else:\n"
+        "                print('pip_check_pydantic_repaired')\n"
+        "            return\n"
+        "    print('pip_check_failed_continuing', out[-2000:])\n"
         "\n"
         "\n"
         "def _base_name(raw: str) -> str:\n"
@@ -431,7 +560,18 @@ def _paper_install_deps_py_text() -> str:
         "        import site\n"
         "        from pathlib import Path\n"
         "\n"
-        "        sp = site.getusersitepackages() or site.getsitepackages()[0]\n"
+        "        roots = []\n"
+        "        try:\n"
+        "            roots.extend(site.getsitepackages())\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        try:\n"
+        "            roots.append(site.getusersitepackages())\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        sp = next((x for x in roots if x), '')\n"
+        "        if not sp:\n"
+        "            return False\n"
         "        pkg = Path(sp) / 'torch_scatter'\n"
         "        pkg.mkdir(parents=True, exist_ok=True)\n"
         "        (pkg / '__init__.py').write_text(\n"
@@ -620,6 +760,7 @@ def _paper_install_deps_py_text() -> str:
         "            return 1\n"
         "\n"
         "    _clear_torch_executable_stack()\n"
+        "    _repair_python_package_consistency()\n"
         "    print('install_deps_ok')\n"
         "    return 0\n"
         "\n"
@@ -748,6 +889,18 @@ def _paper_image_tag(*, cfg: dict, paper_key: str, payload: str) -> str:
     return f"{_paper_image_prefix(cfg)}:{slugify_run_key(paper_key)}-{h}"
 
 
+def _docker_include_notebook_requirements(cfg: dict) -> bool:
+    raw = str(
+        cfg.get("docker_include_notebook_requirements")
+        or os.environ.get("EXECUTION_DOCKER_INCLUDE_NOTEBOOK_REQUIREMENTS")
+        or ""
+    ).strip()
+    if raw:
+        return raw.lower() in {"1", "true", "yes", "y", "on"}
+    mode = str(cfg.get("auto_tasks_mode") or os.environ.get("EXECUTION_AUTO_TASKS_MODE") or "").strip().lower()
+    return mode != "smoke"
+
+
 def docker_ensure_paper_image(
     cfg: dict, *, paper_key: str, paper_root_host: str, python_spec: str, timeout_sec: int = 3600
 ) -> tuple[bool, str]:
@@ -763,9 +916,13 @@ def docker_ensure_paper_image(
     # rely on implicit lab environments, so root requirements.txt alone is too
     # weak for reproducibility.
     try:
-        req_text = _collect_repo_requirements_text(pr)
+        include_notebook_runtime = _docker_include_notebook_requirements(cfg)
+        req_text = _collect_repo_requirements_text(
+            pr, include_notebook_runtime=include_notebook_runtime
+        )
         req_bytes = req_text.encode("utf-8", errors="ignore")
     except Exception:
+        include_notebook_runtime = True
         req_bytes = b""
     py_tag = _normalize_python_spec_for_image(python_spec)
     python_image = _select_python_image(cfg, py_tag)
@@ -781,6 +938,7 @@ def docker_ensure_paper_image(
         f"pip_extra_index_url={_cfg_or_env(cfg, 'docker_pip_extra_index_url', 'EXECUTION_DOCKER_PIP_EXTRA_INDEX_URL', 'PIP_EXTRA_INDEX_URL')}\n"
         f"pip_trusted_host={_cfg_or_env(cfg, 'docker_pip_trusted_host', 'EXECUTION_DOCKER_PIP_TRUSTED_HOST', 'PIP_TRUSTED_HOST')}\n"
         f"extra_pip_packages={_cfg_or_env(cfg, 'docker_extra_pip_packages', 'EXECUTION_DOCKER_EXTRA_PIP_PACKAGES')}\n"
+        f"include_notebook_runtime={include_notebook_runtime}\n"
         f"proxy_env_sha256={proxy_env_hash}\n"
         f"Dockerfile={dockerfile_text}\n"
     )
@@ -827,6 +985,32 @@ def docker_ensure_paper_image(
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _truthy(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _docker_run_user_args() -> list[str]:
+    raw = str(os.environ.get("EXECUTION_DOCKER_USER") or "").strip()
+    if raw:
+        if raw.lower() in {"auto"}:
+            pass
+        elif raw.lower() in {"image", "default", "none", "off", "false", "0"}:
+            return []
+        else:
+            return ["--user", raw]
+    if not _truthy(os.environ.get("EXECUTION_DOCKER_USER_AUTO", "1")):
+        return []
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if not callable(getuid) or not callable(getgid):
+        return []
+    uid = int(getuid())
+    gid = int(getgid())
+    if uid <= 0:
+        return []
+    return ["--user", f"{uid}:{gid}"]
+
+
 def _docker_env_passthrough(cfg: dict | None = None) -> list[str]:
     cfg = cfg or {}
     raw = str(
@@ -847,6 +1031,14 @@ def _docker_env_passthrough(cfg: dict | None = None) -> list[str]:
         "OPENAI_MODEL",
         "MODEL",
         "LLM_MODEL",
+        "HF_ENDPOINT",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HF_HUB_ENABLE_HF_TRANSFER",
+        "HF_HUB_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+        "TRANSFORMERS_CACHE",
+        "HF_DATASETS_CACHE",
     ]
     items = re.split(r"[\s,;]+", raw)
     out: list[str] = []
@@ -879,7 +1071,7 @@ def docker_run_paper_image(
     Run a command inside a per-paper image.
     Commands execute using the image's default python environment.
     """
-    env = env or {}
+    env = dict(env or {})
     proxy_env = _docker_proxy_env({})
     run_dir_host = str(Path(run_dir_host).resolve())
     paper_root_host = str(Path(paper_root_host).resolve())
@@ -896,6 +1088,7 @@ def docker_run_paper_image(
         "run",
         "--rm",
     ]
+    args.extend(_docker_run_user_args())
     if gpus:
         # e.g. "all" or "device=0"
         args.extend(["--gpus", str(gpus)])
@@ -923,7 +1116,19 @@ def docker_run_paper_image(
     )
     if mount_source:
         args[2:2] = ["-v", f"{paper_root_host}:{paper_root_container}"]
-    merged_env = {**proxy_env, **env}
+    default_env = {
+        "PYTHONPATH": paper_root_container,
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPYCACHEPREFIX": f"{run_dir_container}/.pycache",
+        "XDG_CACHE_HOME": f"{run_dir_container}/.cache",
+        "HF_HOME": f"{run_dir_container}/.cache/huggingface",
+        "MPLCONFIGDIR": f"{run_dir_container}/.cache/matplotlib",
+    }
+    if env.get("PYTHONPATH"):
+        parts = [part for part in str(env["PYTHONPATH"]).split(":") if part]
+        if paper_root_container not in parts:
+            env["PYTHONPATH"] = f"{paper_root_container}:{env['PYTHONPATH']}"
+    merged_env = {**default_env, **proxy_env, **env}
     for k, v in merged_env.items():
         if not k:
             continue

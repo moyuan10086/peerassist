@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 from util.fs import ensure_dir, write_text
 from util.meta import index_artifacts
 from util.recorder import append_event, write_issues_md
+
+from ..tools.evidence_summary import build_execution_evidence_summary
 
 
 def _load_json_if_exists(path: Path) -> dict[str, Any]:
@@ -17,6 +20,20 @@ def _load_json_if_exists(path: Path) -> dict[str, Any]:
     except Exception:
         pass
     return {}
+
+
+def _record_finalize_timing(state: dict[str, Any], run_dir: Path, duration_sec: float) -> None:
+    duration = round(max(0.0, float(duration_sec or 0.0)), 3)
+    timings = state.setdefault("node_timings", {})
+    if isinstance(timings, dict):
+        rows = timings.setdefault("finalize", [])
+        if isinstance(rows, list):
+            rows.append({"duration_sec": duration, "attempt": int(state.get("attempt") or 0)})
+    append_event(
+        run_dir,
+        "node_timing",
+        {"node": "finalize", "duration_sec": duration, "attempt": int(state.get("attempt") or 0)},
+    )
 
 
 def _read_text_if_exists(path: Path) -> str:
@@ -205,6 +222,7 @@ def _artifact_highlights(artifacts_index: dict[str, Any]) -> list[str]:
 
 
 def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
+    finalize_start = time.monotonic()
     run_info = state.get("run", {})
     run_dir = Path(run_info.get("dir") or "")
     artifacts_dir = Path(run_info.get("artifacts_dir") or (run_dir / "artifacts"))
@@ -227,7 +245,18 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         ):
             state["status"] = "inconclusive"
 
-    # 2) write a deterministic summary.json in run dir
+    # 2) write machine-readable execution evidence before indexing artifacts.
+    execution_evidence = build_execution_evidence_summary(
+        state=state,
+        run_dir=run_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    write_text(
+        artifacts_dir / "execution_evidence.json",
+        json.dumps(execution_evidence, ensure_ascii=False, indent=2) + "\n",
+    )
+
+    # 3) write a deterministic summary.json in run dir
     artifacts_index = index_artifacts(artifacts_dir)
     summary = {
         "run_id": run_info.get("id"),
@@ -235,11 +264,12 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         "attempts": state.get("attempt", 0),
         "run_result": state.get("run_result", {}),
         "judge": state.get("judge", {}),
+        "execution_evidence": execution_evidence,
         "artifacts": artifacts_index,
     }
     write_text(run_dir / "summary.json", json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
 
-    # 3) keep reviewer-facing report and diff summaries inside this execution run.
+    # 4) keep reviewer-facing report and diff summaries inside this execution run.
     paper_key = str((state.get("config") or {}).get("paper_key") or "paper")
     reports_dir = ensure_dir(run_dir / "reports")
     diffs_dir = ensure_dir(run_dir / "diffs")
@@ -675,6 +705,32 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         "This folder contains **facts-only** artifacts to support writing a final review.\n\n"
         f"- `facts.json`: structured evidence and pointers (paper_key={paper_key}, run_id={run_info.get('id')})\n",
     )
+
+    _record_finalize_timing(state, run_dir, time.monotonic() - finalize_start)
+    execution_evidence = build_execution_evidence_summary(
+        state=state,
+        run_dir=run_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    write_text(
+        artifacts_dir / "execution_evidence.json",
+        json.dumps(execution_evidence, ensure_ascii=False, indent=2) + "\n",
+    )
+    artifacts_index = index_artifacts(artifacts_dir)
+    summary.update(
+        {
+            "status": state.get("status"),
+            "run_result": state.get("run_result", {}),
+            "judge": state.get("judge", {}),
+            "execution_evidence": execution_evidence,
+            "artifacts": artifacts_index,
+        }
+    )
+    write_text(run_dir / "summary.json", json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    write_text(diffs_dir / "summary.json", json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    facts["artifacts_index"] = artifacts_index
+    facts["execution_evidence"] = execution_evidence
+    write_text(review_root / "facts.json", json.dumps(facts, ensure_ascii=False, indent=2) + "\n")
 
     append_event(run_dir, "finalize", {"report": str(report_path), "diff_dir": str(diffs_dir)})
     state.setdefault("history", []).append({"kind": "finalize", "data": {"report": str(report_path)}})

@@ -118,14 +118,43 @@ def resolve_llm_config(
 
 def _parse_json_response(text: str) -> dict[str, Any]:
     try:
-        return json.loads(text)
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {"status": "unknown", "raw": text}
     except Exception:
-        match = re.search(r"\{[\s\S]*\}", text or "")
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except Exception:
-                pass
+        pass
+
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    pos = 0
+    raw_text = text or ""
+    while pos < len(raw_text):
+        start = raw_text.find("{", pos)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(raw_text[start:])
+        except Exception:
+            pos = start + 1
+            continue
+        if isinstance(obj, dict):
+            objects.append(obj)
+        pos = start + max(end, 1)
+
+    for obj in objects:
+        if isinstance(obj.get("tasks"), list):
+            return obj
+    for obj in objects:
+        if obj:
+            return obj
+
+    match = re.search(r"\{[\s\S]*\}", raw_text)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
     return {"status": "unknown", "raw": text}
 
 

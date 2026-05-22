@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -9,8 +11,8 @@ from util.fs import write_text
 from util.meta import collect_meta, write_meta
 from util.recorder import append_event
 
-from ..tools.task_infer import infer_tasks_heuristic, infer_tasks_llm
 from ..tools.paper_tables import extract_paper_metric_targets
+from ..tools.task_infer import infer_tasks_heuristic, infer_tasks_llm
 from .prepare import (
     _ensure_default_baseline,
     _read_text,
@@ -18,6 +20,23 @@ from .prepare import (
     _write_tasks_risk_report,
     _write_yaml_or_json,
 )
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_runtime_pip_install_cmd(cmd: Any) -> bool:
+    if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
+        return False
+    lowered = [x.strip().lower() for x in cmd]
+    if len(lowered) >= 4 and lowered[0] in {"python", "python3"} and lowered[1:4] == ["-m", "pip", "install"]:
+        return True
+    if len(lowered) >= 2 and lowered[0] in {"pip", "pip3"} and lowered[1] == "install":
+        return True
+    if len(lowered) >= 3 and lowered[0] in {"bash", "sh"} and lowered[1] in {"-c", "-lc"}:
+        return bool(re.search(r"\b(?:python(?:3)?\s+-m\s+)?pip(?:3)?\s+install\b", lowered[2]))
+    return False
 
 
 def _default_tolerance(metric: str, expected: Any) -> float:
@@ -263,9 +282,11 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
             append_event(run_dir, "tasks_written", {"path": str(tasks_p), "count": len(ir.tasks)})
 
     # In per-paper image mode, dependencies are installed during image build.
-    # Disable any generic "python -m pip install -r ..." task to avoid reinstalling
-    # and mutating the environment at runtime.
-    if strategy == "paper_image":
+    # Disable runtime pip tasks from auto-generated plans by default; they can
+    # make a smoke run spend minutes in package resolution and mutate the image
+    # after the reproducible build step. Set EXECUTION_ALLOW_RUNTIME_INSTALL_TASKS=1
+    # for rare repos that truly need a run-time install command.
+    if strategy == "paper_image" and not _truthy_env("EXECUTION_ALLOW_RUNTIME_INSTALL_TASKS"):
         try:
             import yaml  # type: ignore
 
@@ -277,12 +298,9 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
                     if not isinstance(t, dict):
                         continue
                     cmd = t.get("cmd")
-                    if (
-                        isinstance(cmd, list)
-                        and cmd[:4] == ["python", "-m", "pip", "install"]
-                        and "-r" in cmd
-                    ):
+                    if _is_runtime_pip_install_cmd(cmd):
                         t["enabled"] = False
+                        t["disabled_reason"] = "runtime_install_disabled_in_paper_image"
                         changed = True
                 if changed:
                     tasks_p.write_text(
@@ -290,7 +308,7 @@ def plan_node(state: dict[str, Any]) -> dict[str, Any]:
                         encoding="utf-8",
                         errors="ignore",
                     )
-                    append_event(run_dir, "tasks_patch_disable_install_deps", {"path": str(tasks_p)})
+                    append_event(run_dir, "tasks_patch_disable_runtime_installs", {"path": str(tasks_p)})
         except Exception:
             pass
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from common import run_stats
+from llm.client import _parse_json_response
 from llm.codex_client import _extract_usage
 
 
@@ -71,6 +72,16 @@ def test_codex_sse_usage_extraction_handles_response_completed_payload() -> None
         "output_tokens": 45,
         "total_tokens": 168,
     }
+
+
+def test_parse_json_response_prefers_tasks_object_from_concatenated_json() -> None:
+    parsed = _parse_json_response(
+        '{"cmd": ["bash", "-lc", "inspect"]}'
+        '{"status": "scratch"}'
+        '{"tasks": [{"id": "repo_smoke", "cmd": ["python", "-V"]}], "notes": []}'
+    )
+
+    assert parsed["tasks"][0]["id"] == "repo_smoke"
 
 
 def test_codex_sse_usage_extraction_handles_direct_usage_payload() -> None:

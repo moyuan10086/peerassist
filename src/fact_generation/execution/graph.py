@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+
+from util.recorder import append_event
 
 from .nodes.finalize import finalize_node
 from .nodes.fix import fix_node
@@ -14,6 +18,36 @@ from .nodes.prepare import prepare_node
 from .nodes.run import run_node
 
 State = dict[str, Any]
+
+
+def _record_node_timing(state: State, node: str, duration_sec: float) -> None:
+    duration = max(0.0, float(duration_sec or 0.0))
+    timings = state.setdefault("node_timings", {})
+    if isinstance(timings, dict):
+        rows = timings.setdefault(node, [])
+        if isinstance(rows, list):
+            rows.append({"duration_sec": round(duration, 3), "attempt": int(state.get("attempt") or 0)})
+    run_info = state.get("run") if isinstance(state.get("run"), dict) else {}
+    run_dir = str(run_info.get("dir") or "").strip()
+    if run_dir:
+        try:
+            append_event(
+                Path(run_dir),
+                "node_timing",
+                {"node": node, "duration_sec": round(duration, 3), "attempt": int(state.get("attempt") or 0)},
+            )
+        except Exception:
+            pass
+
+
+def _timed_node(node: str, fn: Callable[[State], State]) -> Callable[[State], State]:
+    def wrapped(state: State) -> State:
+        start = time.monotonic()
+        out = fn(state)
+        _record_node_timing(out, node, time.monotonic() - start)
+        return out
+
+    return wrapped
 
 
 def _is_inconclusive_no_baseline(state: State) -> bool:
@@ -204,11 +238,11 @@ class ExecutionOrchestrator:
 
     def _build_workflow(self) -> StateGraph:
         g = StateGraph(State)
-        g.add_node("prepare", prepare_node)
-        g.add_node("plan", plan_node)
-        g.add_node("run", run_node)
-        g.add_node("judge", judge_node)
-        g.add_node("fix", fix_node)
+        g.add_node("prepare", _timed_node("prepare", prepare_node))
+        g.add_node("plan", _timed_node("plan", plan_node))
+        g.add_node("run", _timed_node("run", run_node))
+        g.add_node("judge", _timed_node("judge", judge_node))
+        g.add_node("fix", _timed_node("fix", fix_node))
         g.add_node("finalize", finalize_node)
 
         g.add_edge(START, "prepare")

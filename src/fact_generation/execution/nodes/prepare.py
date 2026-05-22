@@ -5,11 +5,14 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import time
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from preprocessing.parse.mineru import extract_with_mineru, mineru_available
@@ -506,8 +509,11 @@ def _anonymous_4open_get_json(path: str, timeout_sec: int = 60) -> Any:
             req = Request(url, headers={"User-Agent": "FactReview execution"})
             with urlopen(req, timeout=timeout_sec) as resp:
                 return json.loads(resp.read().decode("utf-8", errors="replace"))
-        except HTTPError:
-            raise
+        except HTTPError as exc:
+            last_exc = exc
+            if exc.code not in {404, 429, 500, 502, 503, 504} or attempt >= 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
         except Exception as exc:
             last_exc = exc
             if attempt < 2:
@@ -524,8 +530,11 @@ def _anonymous_4open_get_bytes(path: str, timeout_sec: int = 120) -> bytes:
             req = Request(url, headers={"User-Agent": "FactReview execution"})
             with urlopen(req, timeout=timeout_sec) as resp:
                 return resp.read()
-        except HTTPError:
-            raise
+        except HTTPError as exc:
+            last_exc = exc
+            if exc.code not in {404, 429, 500, 502, 503, 504} or attempt >= 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
         except Exception as exc:
             last_exc = exc
             if attempt < 2:
@@ -540,14 +549,40 @@ def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> 
         raise ValueError("not_anonymous_4open_url")
 
     repo_q = quote(repo_id, safe="")
+    errors: list[str] = []
+
     try:
-        options = _anonymous_4open_get_json(f"/api/repo/{repo_q}/options")
+        blob = _anonymous_4open_get_bytes(f"/api/repo/{repo_q}/zip", timeout_sec=300)
+        archive_manifest = _extract_archive_bytes(blob, dest)
+        manifest = {
+            "source": raw_url,
+            "repo_id": repo_id,
+            "files": archive_manifest.get("files", 0),
+            "sample_files": archive_manifest.get("sample_files", []),
+            "method": "zip",
+        }
+        write_text(
+            logs_dir / "anonymous_4open_download.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        )
+        return manifest
     except HTTPError as exc:
-        raise RuntimeError(f"anonymous_4open_options_http_{exc.code}") from exc
+        errors.append(f"zip_http_{exc.code}")
+    except Exception as exc:
+        errors.append(f"zip_failed:{type(exc).__name__}:{exc}")
+
+    options: dict[str, Any] = {}
+    try:
+        raw_options = _anonymous_4open_get_json(f"/api/repo/{repo_q}/options")
+    except HTTPError as exc:
+        errors.append(f"options_http_{exc.code}")
     except (URLError, TimeoutError, OSError) as exc:
-        raise RuntimeError(f"anonymous_4open_options_unavailable: {exc}") from exc
-    if not isinstance(options, dict):
-        raise RuntimeError("anonymous_4open_options_invalid")
+        errors.append(f"options_unavailable:{exc}")
+    else:
+        if isinstance(raw_options, dict):
+            options = raw_options
+        else:
+            errors.append("options_invalid")
 
     last_update = str(options.get("lastUpdateDate") or "")
     downloaded: list[str] = []
@@ -559,7 +594,15 @@ def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> 
         visited.add(rel_dir)
         path_q = quote(rel_dir, safe="")
         version_q = quote(last_update, safe="")
-        data = _anonymous_4open_get_json(f"/api/repo/{repo_q}/files/?path={path_q}&v={version_q}")
+        url = f"/api/repo/{repo_q}/files/?path={path_q}&v={version_q}"
+        try:
+            data = _anonymous_4open_get_json(url)
+        except HTTPError as exc:
+            errors.append(f"files_http_{exc.code}:{rel_dir or '/'}")
+            return []
+        except (URLError, TimeoutError, OSError) as exc:
+            errors.append(f"files_unavailable:{rel_dir or '/'}:{exc}")
+            return []
         return data if isinstance(data, list) else []
 
     def walk(rel_dir: str) -> None:
@@ -573,12 +616,23 @@ def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> 
             rel = f"{parent}/{name}".strip("/")
             if not rel or rel.startswith("../") or "/../" in rel or Path(rel).is_absolute():
                 continue
+            safe_rel = _safe_archive_member_path(rel)
+            if safe_rel is None:
+                continue
+            rel = str(safe_rel).replace("\\", "/")
             size = item.get("size")
             sha = str(item.get("sha") or "")
             if sha and size is not None:
                 rel_q = quote(rel, safe="/")
                 version_q = quote(sha, safe="")
-                blob = _anonymous_4open_get_bytes(f"/api/repo/{repo_q}/file/{rel_q}?v={version_q}")
+                try:
+                    blob = _anonymous_4open_get_bytes(f"/api/repo/{repo_q}/file/{rel_q}?v={version_q}")
+                except HTTPError as exc:
+                    errors.append(f"file_http_{exc.code}:{rel}")
+                    continue
+                except (URLError, TimeoutError, OSError) as exc:
+                    errors.append(f"file_unavailable:{rel}:{exc}")
+                    continue
                 out_path = dest / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_bytes(blob)
@@ -591,14 +645,158 @@ def _download_anonymous_4open_repo(raw_url: str, dest: Path, logs_dir: Path) -> 
     dest.mkdir(parents=True, exist_ok=True)
     walk("")
     if not downloaded:
-        raise RuntimeError("anonymous_4open_no_files_downloaded")
+        detail = "; ".join(errors[:8]) if errors else "no_files_listed"
+        raise RuntimeError(f"anonymous_4open_no_files_downloaded: {detail}")
     manifest = {
         "source": raw_url,
         "repo_id": repo_id,
         "files": len(downloaded),
         "last_update": last_update,
+        "method": "files_api",
+        "errors": errors[:20],
     }
     write_text(logs_dir / "anonymous_4open_download.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    return manifest
+
+
+def _openreview_forum_id(raw_url: str) -> str:
+    try:
+        parsed = urlparse(str(raw_url or "").strip())
+    except Exception:
+        return ""
+    if parsed.netloc.lower() != "openreview.net":
+        return ""
+    query = parse_qs(parsed.query or "")
+    forum_id = str((query.get("id") or [""])[0]).strip()
+    if forum_id:
+        return forum_id
+    if parsed.path.rstrip("/").endswith("/pdf"):
+        return str((query.get("id") or [""])[0]).strip()
+    return ""
+
+
+def _is_openreview_attachment_url(raw_url: str) -> bool:
+    try:
+        parsed = urlparse(str(raw_url or "").strip())
+    except Exception:
+        return False
+    return parsed.netloc.lower() == "openreview.net" and parsed.path.rstrip("/") == "/attachment"
+
+
+def _download_url_bytes(url: str, timeout_sec: int = 180) -> bytes:
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = Request(url, headers={"User-Agent": "FactReview execution"})
+            with urlopen(req, timeout=timeout_sec) as resp:
+                return resp.read()
+        except HTTPError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
+
+
+def _safe_archive_member_path(name: str) -> Path | None:
+    clean = unquote(str(name or "")).replace("\\", "/").strip("/")
+    if not clean or clean.startswith("__MACOSX/"):
+        return None
+    parts = [p for p in clean.split("/") if p and p not in {".", ".."}]
+    if not parts or len(parts) != len([p for p in clean.split("/") if p]):
+        return None
+    if any(part == ".DS_Store" or part.startswith("._") for part in parts):
+        return None
+    rel = Path(*parts)
+    return None if rel.is_absolute() else rel
+
+
+def _flatten_single_extracted_root(dest: Path) -> None:
+    children = [p for p in dest.iterdir() if p.name != "__MACOSX"]
+    if len(children) != 1 or not children[0].is_dir():
+        return
+    nested = children[0]
+    tmp = dest.with_name(dest.name + "_flat_tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    for child in nested.iterdir():
+        shutil.move(str(child), str(tmp / child.name))
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+
+
+def _extract_archive_bytes(blob: bytes, dest: Path) -> dict[str, Any]:
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    files: list[str] = []
+    stream = BytesIO(blob)
+    if zipfile.is_zipfile(stream):
+        stream.seek(0)
+        with zipfile.ZipFile(stream) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                rel = _safe_archive_member_path(info.filename)
+                if rel is None:
+                    continue
+                out_path = dest / rel
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(zf.read(info))
+                files.append(str(rel).replace("\\", "/"))
+    else:
+        stream.seek(0)
+        try:
+            with tarfile.open(fileobj=stream, mode="r:*") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    rel = _safe_archive_member_path(member.name)
+                    if rel is None:
+                        continue
+                    fh = tf.extractfile(member)
+                    if fh is None:
+                        continue
+                    out_path = dest / rel
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_bytes(fh.read())
+                    files.append(str(rel).replace("\\", "/"))
+        except tarfile.TarError as exc:
+            raise RuntimeError("archive_format_unsupported") from exc
+    if not files:
+        raise RuntimeError("archive_no_files_extracted")
+    _flatten_single_extracted_root(dest)
+    return {"files": len(files), "sample_files": files[:20]}
+
+
+def _download_openreview_supplementary(raw_url: str, dest: Path, logs_dir: Path) -> dict[str, Any]:
+    forum_id = _openreview_forum_id(raw_url)
+    if _is_openreview_attachment_url(raw_url):
+        url = raw_url
+    elif forum_id:
+        url = f"https://openreview.net/attachment?id={quote(forum_id, safe='')}&name=supplementary_material"
+    else:
+        raise ValueError("not_openreview_url")
+    try:
+        blob = _download_url_bytes(url)
+    except HTTPError as exc:
+        raise RuntimeError(f"openreview_supplementary_http_{exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"openreview_supplementary_unavailable: {exc}") from exc
+    archive_path = logs_dir / "openreview_supplementary.archive"
+    archive_path.write_bytes(blob)
+    try:
+        manifest = _extract_archive_bytes(blob, dest)
+    except RuntimeError as exc:
+        raise RuntimeError(f"openreview_supplementary_extract_failed: {exc}") from exc
+    manifest.update({"source": raw_url, "attachment_url": url, "forum_id": forum_id})
+    write_text(
+        logs_dir / "openreview_supplementary_download.json",
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    )
     return manifest
 
 
@@ -1106,6 +1304,29 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
                     {"repo_url": repo_url, "dest": str(source_dir), **manifest},
                 )
                 need_clone = False
+            openreview_id = _openreview_forum_id(repo_url)
+            if need_clone and (openreview_id or _is_openreview_attachment_url(repo_url)):
+                try:
+                    manifest = _download_openreview_supplementary(repo_url, source_dir, logs_dir)
+                except Exception as exc:
+                    msg = f"openreview_supplementary_download_failed: {type(exc).__name__}: {exc}"
+                    append_event(
+                        run_dir,
+                        "prepare_error",
+                        {"error": msg, "repo_url": repo_url, "forum_id": openreview_id},
+                    )
+                    state.setdefault("history", []).append(
+                        {"kind": "prepare_error", "data": {"error": msg, "repo_url": repo_url}}
+                    )
+                    state["status"] = "failed"
+                    return state
+                cfg["paper_repo_url"] = repo_url
+                append_event(
+                    run_dir,
+                    "prepare_openreview_supplementary_download_ok",
+                    {"repo_url": repo_url, "dest": str(source_dir), **manifest},
+                )
+                need_clone = False
             if not need_clone:
                 pass
             else:
@@ -1263,12 +1484,22 @@ def prepare_node(state: dict[str, Any]) -> dict[str, Any]:
         docker_build_timeout = int(
             docker_build_timeout_raw
         )
+        append_event(
+            run_dir,
+            "prepare_docker_image_build_start",
+            {"paper_key": paper_key, "python_spec": python_spec, "timeout_sec": docker_build_timeout},
+        )
         ok_img, img_or_msg = docker_ensure_paper_image(
             cfg,
             paper_key=paper_key,
             paper_root_host=str(paper_root),
             python_spec=python_spec,
             timeout_sec=docker_build_timeout,
+        )
+        append_event(
+            run_dir,
+            "prepare_docker_image_build_done",
+            {"ok": ok_img, "detail": img_or_msg if ok_img else str(img_or_msg)[-1200:]},
         )
         if not ok_img:
             err = "docker_paper_image_build_failed"

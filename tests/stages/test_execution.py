@@ -11,19 +11,31 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import zipfile
+from io import BytesIO
 
 import pytest
 
-from fact_generation.execution.nodes.plan import _merge_auto_baseline
+from fact_generation.execution.nodes.fix import (
+    _missing_module_looks_local,
+    _normalize_container_path_text,
+    _pip_package_for_module,
+    _rewrite_container_path_leaks,
+    _to_shell,
+)
+from fact_generation.execution.nodes.plan import _is_runtime_pip_install_cmd, _merge_auto_baseline
 from fact_generation.execution.nodes.prepare import (
     _anonymous_4open_repo_id,
+    _extract_archive_bytes,
     _infer_python_spec_from_repo,
     _normalize_shell_script_line_endings,
+    _openreview_forum_id,
     _patch_api_placeholders_for_env,
 )
 from fact_generation.execution.nodes.run import (
     _effective_task_timeout,
     _resolve_host_python_cmd,
+    _semantic_metric_failure,
     _semantic_runtime_failure,
     run_node,
 )
@@ -32,14 +44,26 @@ from fact_generation.execution.tools.docker import (
     _collect_repo_requirements_text,
     _docker_build_args,
     _docker_env_passthrough,
+    _docker_include_notebook_requirements,
+    _docker_run_user_args,
     _normalize_container_proxy,
+    _paper_dockerfile_text,
     _paper_install_deps_py_text,
     docker_run_paper_image,
+)
+from fact_generation.execution.tools.evidence_summary import (
+    build_execution_evidence_summary,
+    classify_run_failure,
+    classify_task_failure,
 )
 from fact_generation.execution.tools.log_metrics import extract_metrics_from_text, write_task_metric_artifact
 from fact_generation.execution.tools.metrics import compute_check
 from fact_generation.execution.tools.paper_tables import extract_paper_metric_targets
-from fact_generation.execution.tools.task_infer import infer_tasks_heuristic
+from fact_generation.execution.tools.task_infer import (
+    _apply_mode_policy,
+    _apply_static_import_policy,
+    infer_tasks_heuristic,
+)
 from util.subprocess_runner import run_command
 
 
@@ -369,10 +393,128 @@ def test_run_node_marks_eval_without_metrics_inconclusive(tmp_path) -> None:
     assert out["run_result"]["tasks"][0]["semantic_failure"] == "semantic_no_metrics"
 
 
+def test_run_node_accepts_smoke_task_even_if_llm_labeled_eval(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    paper_root.mkdir()
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "smoke_list_entrypoints",
+                    "family": "eval",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "-c", "print('usage: train.py [--help]')"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    assert out["run_result"]["success"] is True
+    assert out["run_result"]["tasks"][0]["success"] is True
+    assert "semantic_failure" not in out["run_result"]["tasks"][0]
+
+
+def test_run_node_adds_paper_root_to_pythonpath_for_nested_scripts(tmp_path) -> None:
+    paper_root = tmp_path / "repo"
+    package = paper_root / "evaluate"
+    package.mkdir(parents=True)
+    (package / "_utils.py").write_text("VALUE = 42\n", encoding="utf-8")
+    (package / "evaluate_code.py").write_text(
+        "from evaluate._utils import VALUE\nprint(f'value={VALUE}')\n",
+        encoding="utf-8",
+    )
+    tasks_p = tmp_path / "tasks.json"
+    run_dir = tmp_path / "run"
+    tasks_p.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "smoke_evaluate_code_help",
+                    "family": "smoke",
+                    "cwd": "{paper_root}",
+                    "cmd": ["python", "evaluate/evaluate_code.py"],
+                    "timeout_sec": 30,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "config": {
+            "paper_root": str(paper_root),
+            "tasks_path": str(tasks_p),
+            "docker_enabled": False,
+        },
+        "run": {
+            "dir": str(run_dir),
+            "logs_dir": str(run_dir / "logs"),
+            "artifacts_dir": str(run_dir / "artifacts"),
+        },
+    }
+
+    out = run_node(state)
+
+    assert out["run_result"]["success"] is True
+    assert out["run_result"]["tasks"][0]["success"] is True
+
+
 def test_graph_exit_status_preserves_run_inconclusive() -> None:
     from fact_generation.execution.graph import _compute_exit_status
 
     assert _compute_exit_status({"status": "inconclusive", "run_result": {"success": False}}) == "inconclusive"
+
+
+def test_execution_evidence_summary_classifies_metric_failure(tmp_path) -> None:
+    task = {
+        "id": "eval_readme",
+        "family": "eval",
+        "success": False,
+        "semantic_failure": "semantic_no_metrics",
+        "duration_sec": 12.5,
+    }
+    state = {
+        "status": "inconclusive",
+        "attempt": 1,
+        "config": {"paper_key": "demo"},
+        "run_result": {
+            "success": False,
+            "inconclusive": True,
+            "semantic_failure": "semantic_no_metrics",
+            "tasks": [task],
+        },
+        "judge": {},
+        "node_timings": {"run": [{"duration_sec": 12.5, "attempt": 0}]},
+    }
+
+    summary = build_execution_evidence_summary(
+        state=state,
+        run_dir=tmp_path,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert classify_task_failure(task) == "metric"
+    assert classify_run_failure(state["run_result"], state["judge"]) == "metric"
+    assert summary["failure_stage"] == "metric"
+    assert summary["failure_stage_counts"]["metric"] == 1
+    assert summary["cost"]["node_duration_sec"]["run"] == 12.5
 
 
 def test_runtime_traceback_output_is_treated_as_failure() -> None:
@@ -386,6 +528,55 @@ def test_runtime_traceback_output_is_treated_as_failure() -> None:
     )
 
     assert reason == "python_traceback_in_output"
+
+
+def test_semantic_metric_failure_allows_smoke_evidence_json_without_numeric_metric() -> None:
+    task = {
+        "id": "import_smoke",
+        "family": "smoke",
+        "metric_artifact_path": "artifacts/metrics/import_smoke_metrics.json",
+    }
+
+    reason = _semantic_metric_failure(
+        task=task,
+        task_id="import_smoke",
+        stdout='{"status": "ok", "imports": {"iemm.core": true}}\n',
+        stderr="",
+        metric_artifact="",
+    )
+
+    assert reason == ""
+
+
+def test_semantic_metric_failure_requires_metrics_for_eval_contract() -> None:
+    task = {
+        "id": "eval_model",
+        "family": "eval",
+        "metric_artifact_path": "metrics/eval_model_metrics.json",
+    }
+
+    reason = _semantic_metric_failure(
+        task=task,
+        task_id="eval_model",
+        stdout='{"status": "ok"}\n',
+        stderr="",
+        metric_artifact="",
+    )
+
+    assert reason == "semantic_no_metrics"
+
+
+def test_missing_dotted_module_maps_to_root_package() -> None:
+    assert _pip_package_for_module("evaluate._utils") == "evaluate"
+    assert _pip_package_for_module("sklearn.metrics") == "scikit-learn"
+
+
+def test_missing_module_local_path_is_not_treated_as_pypi_package(tmp_path) -> None:
+    (tmp_path / "evaluate").mkdir()
+    (tmp_path / "evaluate" / "_utils.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert _missing_module_looks_local(str(tmp_path), "evaluate._utils")
+    assert not _missing_module_looks_local(str(tmp_path), "gurobipy")
 
 
 def test_masked_startup_failure_output_is_treated_as_failure() -> None:
@@ -513,6 +704,45 @@ def test_docker_runtime_injects_host_proxy(monkeypatch, tmp_path) -> None:
     assert "-e HTTPS_PROXY=http://host.docker.internal:7897" in joined
 
 
+def test_docker_runtime_maps_explicit_user_and_writable_cache(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("EXECUTION_DOCKER_USER", "123:456")
+
+    cmd = docker_run_paper_image(
+        image="paper:test",
+        paper_root_host=str(tmp_path),
+        run_dir_host=str(tmp_path),
+        cwd_container="/app",
+        cmd=["python", "-V"],
+    )
+
+    joined = " ".join(cmd)
+    assert "--user 123:456" in joined
+    assert "-e PYTHONPATH=/app" in joined
+    assert "-e PYTHONUNBUFFERED=1" in joined
+    assert "-e PYTHONPYCACHEPREFIX=/workspace/run_dir/.pycache" in joined
+    assert "-e XDG_CACHE_HOME=/workspace/run_dir/.cache" in joined
+
+
+def test_docker_runtime_keeps_paper_root_on_custom_pythonpath(tmp_path) -> None:
+    cmd = docker_run_paper_image(
+        image="paper:test",
+        paper_root_host=str(tmp_path),
+        run_dir_host=str(tmp_path),
+        cwd_container="/app",
+        cmd=["python", "-V"],
+        env={"PYTHONPATH": "/extra/path"},
+    )
+
+    joined = " ".join(cmd)
+    assert "-e PYTHONPATH=/app:/extra/path" in joined
+
+
+def test_docker_runtime_user_mapping_can_use_image_default(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DOCKER_USER", "image")
+
+    assert _docker_run_user_args() == []
+
+
 def test_docker_runtime_passes_selected_env_names_without_values(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "secret-value")
     monkeypatch.setenv("EXECUTION_DOCKER_ENV_PASSTHROUGH", "OPENAI_API_KEY,OPENAI_BASE_URL")
@@ -572,6 +802,68 @@ def test_docker_install_deps_clears_old_torch_execstack() -> None:
     assert "torch_execstack_cleared" in text
 
 
+def test_docker_install_deps_repairs_pydantic_core_mismatch() -> None:
+    text = _paper_install_deps_py_text()
+
+    assert "def _repair_python_package_consistency()" in text
+    assert "pydantic-core" in text
+    assert "pip_check_pydantic_repaired" in text
+
+
+def test_dockerfile_installs_deps_globally_for_host_uid_runtime() -> None:
+    text = _paper_install_deps_py_text()
+    dockerfile = _paper_dockerfile_text(python_image="python:3.11")
+
+    assert "USER user" not in dockerfile
+    assert "python deployment/install_deps.py" in dockerfile
+    assert "site.getsitepackages()" in text
+
+
+def test_llm_fix_shell_wrapper_preserves_shell_form_commands() -> None:
+    assert _to_shell(["sh", "-lc", "PYTHONDONTWRITEBYTECODE=1 python -m py_compile evaluate_acc.py"]) == (
+        "PYTHONDONTWRITEBYTECODE=1 python -m py_compile evaluate_acc.py"
+    )
+    assert _to_shell(["python", "-m", "pip", "install", "numpy<2"]) == "python -m pip install 'numpy<2'"
+
+
+def test_llm_fix_container_path_normalization_uses_mount_paths(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    paper_root = run_dir / "workspace" / "source"
+    paper_root.mkdir(parents=True)
+
+    shell = (
+        f"mkdir -p {paper_root.resolve()}/.hf_cache && "
+        f"cp {run_dir.resolve()}/logs/output.txt {paper_root.resolve()}/result.txt"
+    )
+    patched = _normalize_container_path_text(shell, str(paper_root), run_dir)
+
+    assert f"{paper_root.resolve()}" not in patched
+    assert f"{run_dir.resolve()}" not in patched
+    assert "mkdir -p /app/.hf_cache" in patched
+    assert "cp /workspace/run_dir/logs/output.txt /app/result.txt" in patched
+
+
+def test_llm_fix_rewrites_container_path_leaks_in_workspace(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    paper_root = run_dir / "workspace" / "source"
+    paper_root.mkdir(parents=True)
+    script = paper_root / "run.sh"
+    script.write_text(
+        f'export HF_HOME="{paper_root.resolve()}/.hf_cache"\n'
+        f'python eval.py --out "{run_dir.resolve()}/artifacts/metrics.json"\n',
+        encoding="utf-8",
+    )
+
+    rewritten = _rewrite_container_path_leaks(str(paper_root), run_dir)
+
+    assert rewritten == ["run.sh"]
+    text = script.read_text(encoding="utf-8")
+    assert f"{paper_root.resolve()}" not in text
+    assert f"{run_dir.resolve()}" not in text
+    assert 'HF_HOME="/app/.hf_cache"' in text
+    assert '"/workspace/run_dir/artifacts/metrics.json"' in text
+
+
 def test_heuristic_tasks_use_paper_targets_and_readme_commands(tmp_path) -> None:
     (tmp_path / "README.md").write_text(
         "\n".join(
@@ -625,6 +917,166 @@ def test_heuristic_smoke_uses_unique_top_level_python_file(tmp_path) -> None:
 
     task = next(t for t in result.tasks if t.get("id") == "repo_smoke")
     assert task.get("cmd") == ["python", "-m", "py_compile", "dinov2_moe_new.py"]
+
+
+def test_heuristic_smoke_imports_library_repo_and_records_notebook(tmp_path) -> None:
+    pkg = tmp_path / "iemm"
+    pkg.mkdir()
+    (pkg / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (pkg / "utils.py").write_text("VALUE = 2\n", encoding="utf-8")
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    (experiments / "very_simple_example.ipynb").write_text(
+        json.dumps({"cells": [{"cell_type": "code", "source": "print('ok')"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text(
+        "Start with `very_simple_example.ipynb` using `jupyter notebook very_simple_example.ipynb`.\n",
+        encoding="utf-8",
+    )
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="smoke")
+
+    smoke = next(t for t in result.tasks if t.get("id") == "repo_smoke")
+    assert smoke.get("cmd") == [
+        "python",
+        "-c",
+        "import importlib; importlib.import_module('iemm.core'); print('import ok: iemm.core')",
+    ]
+    notebook = next(t for t in result.tasks if t.get("id") == "reproduce_notebook_experiments_very_simple_example_ipynb")
+    assert notebook.get("enabled") is False
+    assert notebook.get("disabled_reason") == "full_mode_required"
+    assert "jupyter" in notebook.get("cmd", [])
+    assert result.evidence["python_import_targets"] == ["iemm.core"]
+    assert result.evidence["notebook_paths"] == ["experiments/very_simple_example.ipynb"]
+
+
+def test_heuristic_disables_api_notebook_only_when_api_tasks_disabled(tmp_path, monkeypatch) -> None:
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    (experiments / "main.ipynb").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "source": "from openai import OpenAI\nclient = OpenAI(api_key='x')\n",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("Run `experiments/main.ipynb` for the paper results.\n", encoding="utf-8")
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("id") == "reproduce_notebook_experiments_main_ipynb")
+    assert task.get("requires_external_api") is True
+    assert task.get("enabled") is False
+    assert task.get("disabled_reason") == "external_api_or_model_server_required"
+
+
+def test_task_mode_policy_keeps_smoke_fast_for_llm_generated_tasks() -> None:
+    tasks = [
+        {
+            "id": "install_deps",
+            "family": "prepare",
+            "enabled": True,
+            "cmd": ["python", "-m", "pip", "install", "iemm", "jupyter"],
+        },
+        {
+            "id": "smoke_execute_notebook",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": [
+                "python",
+                "-m",
+                "jupyter",
+                "nbconvert",
+                "--to",
+                "notebook",
+                "--execute",
+                "experiments/main.ipynb",
+            ],
+        },
+        {
+            "id": "smoke_import",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": ["python", "-c", "import iemm.core; print('ok')"],
+        },
+    ]
+
+    _apply_mode_policy(tasks, mode="smoke")
+
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "smoke_mode_prepare_disabled"
+    assert tasks[1]["enabled"] is False
+    assert tasks[1]["disabled_reason"] == "full_mode_required"
+    assert tasks[2]["enabled"] is True
+
+
+def test_static_import_policy_disables_namespace_package_root_import(tmp_path) -> None:
+    pkg = tmp_path / "iemm"
+    pkg.mkdir()
+    (pkg / "core.py").write_text("class IEMM: pass\n", encoding="utf-8")
+    tasks = [
+        {
+            "id": "bad_root_import",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": ["python", "-c", "from iemm import IEMM; print(IEMM)"],
+        },
+        {
+            "id": "good_module_import",
+            "family": "smoke",
+            "enabled": True,
+            "cmd": ["python", "-c", "import iemm.core; print('ok')"],
+        },
+    ]
+
+    _apply_static_import_policy(tasks, tmp_path)
+
+    assert tasks[0]["enabled"] is False
+    assert tasks[0]["disabled_reason"] == "namespace_package_root_import_unavailable"
+    assert tasks[1]["enabled"] is True
+
+
+def test_plan_detects_runtime_pip_installs_for_paper_image_patch() -> None:
+    assert _is_runtime_pip_install_cmd(["python", "-m", "pip", "install", "iemm"])
+    assert _is_runtime_pip_install_cmd(["pip", "install", "-r", "requirements.txt"])
+    assert _is_runtime_pip_install_cmd(["bash", "-lc", "python -m pip install -e ."])
+    assert not _is_runtime_pip_install_cmd(["python", "-c", "import iemm"])
+
+
+def test_heuristic_marks_shell_script_external_api_through_python_imports(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_DISABLE_EXTERNAL_API_TASKS", "1")
+    (tmp_path / "README.md").write_text("```bash\nbash run_for_dataset.sh\n```\n", encoding="utf-8")
+    for idx in range(20):
+        (tmp_path / f"helper_{idx}.py").write_text("print('helper')\n", encoding="utf-8")
+    (tmp_path / "run_for_dataset.sh").write_text(
+        "\n".join(
+            [f"python helper_{idx}.py" for idx in range(20)]
+            + ["output=$(python inferencer.py --dataset sst5)"]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "inferencer.py").write_text(
+        "from src.models.api_client import run_api\nprint(run_api)\n",
+        encoding="utf-8",
+    )
+    api_dir = tmp_path / "src" / "models"
+    api_dir.mkdir(parents=True)
+    (api_dir / "api_client.py").write_text("import openai\n\ndef run_api():\n    return openai\n", encoding="utf-8")
+
+    result = infer_tasks_heuristic(str(tmp_path), mode="full")
+
+    task = next(t for t in result.tasks if t.get("cmd") == ["bash", "run_for_dataset.sh"])
+    assert task.get("requires_external_api") is True
+    assert task.get("enabled") is False
+    assert task.get("disabled_reason") == "external_api_or_model_server_required"
 
 
 def test_heuristic_smoke_finds_nested_main_script(tmp_path) -> None:
@@ -967,6 +1419,8 @@ def test_collect_repo_requirements_uses_readme_and_imports(tmp_path) -> None:
                 "## Python Packages",
                 "* pytorch==1.12.1",
                 "* dgl==1.0.1+cu113",
+                "",
+                "This benchmark evaluates several datasets but does not use the datasets package.",
             ]
         ),
         encoding="utf-8",
@@ -977,6 +1431,7 @@ def test_collect_repo_requirements_uses_readme_and_imports(tmp_path) -> None:
                 "import numpy as np",
                 "import torch",
                 "from sklearn.metrics import accuracy_score",
+                "import schemdraw",
                 "from utils import local_helper",
             ]
         ),
@@ -990,8 +1445,55 @@ def test_collect_repo_requirements_uses_readme_and_imports(tmp_path) -> None:
     assert "dgl==1.0.1" in req_text
     assert "numpy" in req_text
     assert "scikit-learn" in req_text
+    assert "schemdraw" in req_text
     assert "utils" not in req_text
+    assert "datasets" not in req_text
     assert _infer_python_spec_from_repo(tmp_path) == "3.10"
+
+
+def test_collect_repo_requirements_adds_notebook_runtime_and_imports(tmp_path) -> None:
+    (tmp_path / "iemm").mkdir()
+    (tmp_path / "iemm" / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "experiment.ipynb").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "source": [
+                            "import numpy as np\n",
+                            "import pandas as pd\n",
+                            "from iemm.core import VALUE\n",
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    req_text = _collect_repo_requirements_text(tmp_path)
+
+    assert "nbconvert" in req_text
+    assert "ipykernel" in req_text
+    assert "numpy" in req_text
+    assert "pandas" in req_text
+    assert "iemm" not in req_text
+
+
+def test_collect_repo_requirements_can_skip_notebook_runtime_for_smoke(tmp_path) -> None:
+    (tmp_path / "experiment.ipynb").write_text(
+        json.dumps({"cells": [{"cell_type": "code", "source": "import matplotlib.pyplot as plt\n"}]}),
+        encoding="utf-8",
+    )
+
+    req_text = _collect_repo_requirements_text(tmp_path, include_notebook_runtime=False)
+
+    assert "nbconvert" not in req_text
+    assert "ipykernel" not in req_text
+    assert "matplotlib" not in req_text
+    assert _docker_include_notebook_requirements({"auto_tasks_mode": "smoke"}) is False
+    assert _docker_include_notebook_requirements({"auto_tasks_mode": "full"}) is True
 
 
 def test_patch_api_placeholders_reads_runtime_env_without_writing_secret(tmp_path) -> None:
@@ -1074,6 +1576,34 @@ def test_anonymous_4open_repo_id_parses_repo_links() -> None:
     assert _anonymous_4open_repo_id("https://github.com/mainlp/explaind") == ""
 
 
+def test_openreview_forum_id_parses_forum_and_attachment_links() -> None:
+    assert _openreview_forum_id("https://openreview.net/forum?id=wKPQXtVejB") == "wKPQXtVejB"
+    assert (
+        _openreview_forum_id("https://openreview.net/attachment?id=wKPQXtVejB&name=supplementary_material")
+        == "wKPQXtVejB"
+    )
+    assert _openreview_forum_id("https://github.com/mainlp/explaind") == ""
+
+
+def test_extract_archive_bytes_flattens_single_root_and_blocks_traversal(tmp_path) -> None:
+    blob_io = BytesIO()
+    with zipfile.ZipFile(blob_io, "w") as zf:
+        zf.writestr("repo-main/README.md", "# demo\n")
+        zf.writestr("repo-main/main.py", "print('ok')\n")
+        zf.writestr("repo-main/.DS_Store", "mac cruft\n")
+        zf.writestr("repo-main/._README.md", "mac cruft\n")
+        zf.writestr("__MACOSX/repo-main/README.md", "mac cruft\n")
+        zf.writestr("../escape.txt", "bad\n")
+
+    dest = tmp_path / "source"
+    manifest = _extract_archive_bytes(blob_io.getvalue(), dest)
+
+    assert manifest["files"] == 2
+    assert (dest / "README.md").exists()
+    assert (dest / "main.py").exists()
+    assert not (tmp_path / "escape.txt").exists()
+
+
 def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:
     from fact_generation.execution.stage_runner import run_execution_stage
 
@@ -1095,7 +1625,12 @@ def test_run_execution_stage_accepts_repo_without_pdf(tmp_path) -> None:
     )
 
     assert result.status in {"ok", "inconclusive"}
-    assert (tmp_path / "run" / "stages" / "fact_generation" / "execution" / "execution.json").exists()
+    execution_root = tmp_path / "run" / "stages" / "fact_generation" / "execution"
+    assert (execution_root / "execution.json").exists()
+    evidence = json.loads(
+        (execution_root / "current" / "artifacts" / "execution_evidence.json").read_text(encoding="utf-8")
+    )
+    assert "node_duration_sec" in evidence["cost"]
 
 
 def test_explicit_source_does_not_load_same_key_demo_fixture(tmp_path) -> None:
