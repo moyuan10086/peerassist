@@ -19,7 +19,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agent_runtime.runner import augment_claims_with_assessment_status
+from agent_runtime.runner import (
+    augment_claims_with_assessment_status,
+    augment_experiment_with_eval_status,
+)
 from common.config import get_settings
 from common.pipeline_context import (
     ensure_full_pipeline_context,
@@ -38,6 +41,9 @@ from review.report.claim_audit import audit_review_markdown
 from review.report.pdf_renderer import build_review_report_pdf
 from schemas.stage import StageResult
 from util.fs import copy_file_if_exists
+
+_EXECUTION_BLOCK_START = "<!-- execution-reproduction-check:start -->"
+_EXECUTION_BLOCK_END = "<!-- execution-reproduction-check:end -->"
 
 
 def _read_text(path: Path) -> str:
@@ -96,6 +102,226 @@ def _strip_experiment_eval_status(text: str) -> str:
 
     new_body = "".join(result)
     return text[: sec.start(2)] + new_body + text[sec.end(2) :]
+
+
+def _as_comparison_rows(execution_alignment: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = execution_alignment.get("comparisons") if isinstance(execution_alignment, dict) else []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _fmt_metric_value(value: Any) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except Exception:
+        return str(value or "")
+
+
+def _md_escape(value: Any) -> str:
+    return str(value or "").replace("|", "&#124;").strip()
+
+
+def _build_execution_reproduction_block(
+    *,
+    exec_json: dict[str, Any],
+    execution_alignment: dict[str, Any],
+) -> str:
+    status = str(exec_json.get("status") or "").strip()
+    if status == "skipped":
+        return ""
+
+    rows = _as_comparison_rows(execution_alignment)
+    summary = exec_json.get("summary") if isinstance(exec_json.get("summary"), dict) else {}
+    run_result = summary.get("run_result") if isinstance(summary.get("run_result"), dict) else {}
+    if not rows and not summary and not execution_alignment:
+        return ""
+
+    failed = [row for row in rows if not bool(row.get("passed"))]
+    passed = [row for row in rows if bool(row.get("passed"))]
+    lines: list[str] = [
+        _EXECUTION_BLOCK_START,
+        "### Execution Reproduction Check",
+        "",
+    ]
+    if rows:
+        if failed:
+            lines.append(
+                f"- Deterministic execution comparison found `{len(failed)}` metric(s) outside tolerance "
+                f"out of `{len(rows)}` aligned paper-vs-run metric(s)."
+            )
+        else:
+            lines.append(
+                f"- Deterministic execution comparison found all `{len(rows)}` aligned paper-vs-run metric(s) within tolerance."
+            )
+        if passed:
+            lines.append(f"- Metrics within tolerance: `{len(passed)}`.")
+        lines.append(
+            "- These rows are generated from execution artifacts after the experiment run; they should override pre-execution narrative claims when they conflict."
+        )
+        lines.append("")
+        lines.append("| Dataset | Metric | Paper | Reproduced | Delta | Tolerance | Result |")
+        lines.append("|---|---|---:|---:|---:|---:|---|")
+        for row in rows[:40]:
+            result = "PASS" if row.get("passed") else "FAIL"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_escape(row.get("dataset") or "n/a"),
+                        _md_escape(row.get("metric")),
+                        _fmt_metric_value(row.get("paper_value")),
+                        _fmt_metric_value(row.get("observed_value")),
+                        _fmt_metric_value(row.get("delta")),
+                        _fmt_metric_value(row.get("tolerance")),
+                        result,
+                    ]
+                )
+                + " |"
+            )
+    else:
+        run_success = run_result.get("success")
+        lines.append(
+            "- Execution completed but no aligned paper-vs-run metric comparison rows were produced."
+            if run_success
+            else "- Execution did not produce aligned paper-vs-run metric comparison rows."
+        )
+        lines.append(
+            "- Treat quantitative reproduction claims as inconclusive unless manual artifact inspection supplies the missing comparison."
+        )
+
+    unmatched = execution_alignment.get("unmatched_run_metrics") if isinstance(execution_alignment, dict) else []
+    if isinstance(unmatched, list) and unmatched:
+        lines.append("")
+        lines.append(
+            "- Unmatched run metric artifacts: "
+            + ", ".join(f"`{_md_escape(item)}`" for item in unmatched[:8])
+        )
+    lines.extend(["", _EXECUTION_BLOCK_END])
+    return "\n".join(lines).strip()
+
+
+def _execution_weakness_bullets(
+    *,
+    exec_json: dict[str, Any],
+    execution_alignment: dict[str, Any],
+) -> list[str]:
+    status = str(exec_json.get("status") or "").strip()
+    if status == "skipped":
+        return []
+    rows = _as_comparison_rows(execution_alignment)
+    failed = [row for row in rows if not bool(row.get("passed"))]
+    if failed:
+        def _delta_abs(row: dict[str, Any]) -> float:
+            try:
+                return abs(float(row.get("delta") or 0.0))
+            except Exception:
+                return 0.0
+
+        largest = max(failed, key=_delta_abs)
+        return [
+            "Execution reproduction found "
+            f"{len(failed)} of {len(rows)} aligned metric(s) outside tolerance; "
+            f"largest observed gap: {_md_escape(largest.get('dataset') or 'n/a')} "
+            f"{_md_escape(largest.get('metric'))} paper={_fmt_metric_value(largest.get('paper_value'))}, "
+            f"reproduced={_fmt_metric_value(largest.get('observed_value'))}, "
+            f"delta={_fmt_metric_value(largest.get('delta'))}."
+        ]
+
+    summary = exec_json.get("summary") if isinstance(exec_json.get("summary"), dict) else {}
+    run_result = summary.get("run_result") if isinstance(summary.get("run_result"), dict) else {}
+    if run_result.get("success") and not rows:
+        return [
+            "Execution completed but produced no aligned paper-vs-run metric comparison rows; "
+            "quantitative reproduction claims remain inconclusive."
+        ]
+    return []
+
+
+def _inject_execution_weaknesses(
+    markdown: str,
+    *,
+    exec_json: dict[str, Any],
+    execution_alignment: dict[str, Any],
+) -> str:
+    bullets = _execution_weakness_bullets(
+        exec_json=exec_json,
+        execution_alignment=execution_alignment,
+    )
+    bullets = [bullet for bullet in bullets if bullet and bullet not in markdown]
+    if not bullets:
+        return markdown
+
+    text = str(markdown or "")
+    sec = re.search(
+        r"(?ims)(^##\s+(?:\*\*)?4\.\s+Summary(?:\*\*)?\s*$\n)(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
+    if not sec:
+        return text
+    body = sec.group("body")
+    additions = "\n".join(f"- [execution] {bullet}" for bullet in bullets)
+    label_match = re.search(r"(?i)\*{0,2}Weaknesses\*{0,2}\s*:?", body)
+    if label_match is None:
+        new_body = body.rstrip() + "\n\n**Weaknesses:**\n" + additions + "\n\n"
+        return text[: sec.start("body")] + new_body + text[sec.end("body") :]
+
+    tail = body[label_match.end() :]
+    insertion_offset = label_match.end()
+    cursor = 0
+    saw_bullet = False
+    for raw_line in tail.split("\n"):
+        line_len = len(raw_line) + 1
+        stripped = raw_line.strip()
+        is_bullet = stripped.startswith("- ") or stripped.startswith("* ")
+        is_label = re.match(
+            r"(?i)^\*{0,2}(?:Strengths|Weaknesses)\*{0,2}\s*:",
+            stripped,
+        )
+        if is_bullet:
+            saw_bullet = True
+            cursor += line_len
+            insertion_offset = label_match.end() + cursor
+            continue
+        if saw_bullet and stripped == "":
+            cursor += line_len
+            continue
+        if saw_bullet or is_label:
+            break
+        cursor += line_len
+
+    insertion = ("\n" if not body[:insertion_offset].endswith("\n") else "") + additions
+    new_body = body[:insertion_offset].rstrip() + "\n" + insertion + body[insertion_offset:]
+    return text[: sec.start("body")] + new_body + text[sec.end("body") :]
+
+
+def _upsert_execution_reproduction_block(
+    markdown: str,
+    *,
+    exec_json: dict[str, Any],
+    execution_alignment: dict[str, Any],
+) -> str:
+    text = str(markdown or "")
+    block = _build_execution_reproduction_block(
+        exec_json=exec_json,
+        execution_alignment=execution_alignment,
+    )
+
+    marker_pattern = re.compile(
+        rf"(?ims)\n*{re.escape(_EXECUTION_BLOCK_START)}.*?{re.escape(_EXECUTION_BLOCK_END)}\n*"
+    )
+    text = marker_pattern.sub("\n\n", text)
+    if not block:
+        return re.sub(r"\n{3,}", "\n\n", text).strip() + ("\n" if text.strip() else "")
+
+    sec = re.search(
+        r"(?ims)(^##\s+(?:\*\*)?5\.\s+Experiment(?:\*\*)?\s*$\n)(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
+    if not sec:
+        return text.rstrip() + "\n\n" + block + "\n"
+
+    body = sec.group("body").rstrip()
+    new_body = body + "\n\n" + block + "\n\n"
+    return text[: sec.start("body")] + new_body + text[sec.end("body") :]
 
 
 def _sort_claims_by_importance(markdown: str) -> str:
@@ -361,6 +587,21 @@ def run_report_stage(
             current_md,
             summary=exec_json.get("summary") or {},
             alignment=exec_alignment if isinstance(exec_alignment, dict) else {},
+        )
+        augmented_md = augment_experiment_with_eval_status(
+            augmented_md,
+            summary=exec_json.get("summary") or {},
+            alignment=exec_alignment if isinstance(exec_alignment, dict) else {},
+        )
+        augmented_md = _upsert_execution_reproduction_block(
+            augmented_md,
+            exec_json=exec_json if isinstance(exec_json, dict) else {},
+            execution_alignment=exec_alignment if isinstance(exec_alignment, dict) else {},
+        )
+        augmented_md = _inject_execution_weaknesses(
+            augmented_md,
+            exec_json=exec_json if isinstance(exec_json, dict) else {},
+            execution_alignment=exec_alignment if isinstance(exec_alignment, dict) else {},
         )
         if augmented_md != current_md:
             review_md.write_text(augmented_md, encoding="utf-8")

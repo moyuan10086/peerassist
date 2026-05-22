@@ -21,8 +21,8 @@ from openai.types.shared import Reasoning
 
 from agent_runtime.agent_prompt import build_review_agent_system_prompt
 from agent_runtime.agent_tools import ReviewRuntimeContext, build_review_tools
-from common.config import get_settings
 from common import run_stats
+from common.config import get_settings
 from common.state import (
     ensure_artifact_paths,
     fail_job,
@@ -808,7 +808,10 @@ def _stabilize_experiment_section(markdown_text: str) -> str:
     text = str(markdown_text or "")
     if not text.strip():
         return text
-    sec = re.search(r"(?ims)^##\s+5\.\s+Experiment\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", text)
+    sec = re.search(
+        r"(?ims)^##\s+(?:\*\*)?5\.\s+Experiment(?:\*\*)?\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
     if not sec:
         return text
     body = sec.group("body")
@@ -838,7 +841,10 @@ def _ensure_experiment_contract(markdown_text: str) -> str:
     text = str(markdown_text or "")
     if not text.strip():
         return text
-    sec = re.search(r"(?ims)^##\s+5\.\s+Experiment\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", text)
+    sec = re.search(
+        r"(?ims)^##\s+(?:\*\*)?5\.\s+Experiment(?:\*\*)?\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
     if not sec:
         return text
 
@@ -965,7 +971,10 @@ def _hard_validate_experiment_tables(
     text = str(markdown_text or "")
     if not text.strip():
         return text
-    sec = re.search(r"(?ims)^##\s+5\.\s+Experiment\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", text)
+    sec = re.search(
+        r"(?ims)^##\s+(?:\*\*)?5\.\s+Experiment(?:\*\*)?\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
     if not sec:
         return text
     body = sec.group("body")
@@ -1052,44 +1061,297 @@ def _global_eval_status(summary: dict[str, Any], alignment: dict[str, Any]) -> t
 
 def _metric_higher_is_better(metric: str) -> bool:
     key = _norm_metric_key(metric)
-    if key in {"mr", "error", "loss", "wer", "cer", "perplexity"}:
-        return False
-    return True
+    return key not in {
+        "mr",
+        "error",
+        "error_rate",
+        "loss",
+        "wer",
+        "cer",
+        "perplexity",
+        "mae",
+        "rmse",
+        "mse",
+        "fid",
+        "latency",
+        "time",
+    }
 
 
 def _norm_metric_key(metric: str) -> str:
     s = str(metric or "").strip().lower()
+    compact = re.sub(r"[\s_\-]+", "", s)
     if "mrr" in s:
         return "mrr"
     if s in {"mr", "mean rank"} or "mean rank" in s:
         return "mr"
-    if "hits@10" in s or "h@10" in s:
+    if "hits@10" in s or "h@10" in s or compact in {"hits10", "hit10", "h10"}:
         return "hits@10"
-    if "hits@3" in s or "h@3" in s:
+    if "hits@3" in s or "h@3" in s or compact in {"hits3", "hit3", "h3"}:
         return "hits@3"
-    if "hits@1" in s or "h@1" in s:
+    if "hits@1" in s or "h@1" in s or compact in {"hits1", "hit1", "h1"}:
         return "hits@1"
     if "acc" in s:
         return "accuracy"
+    if compact in {"f1", "f1score"}:
+        return "f1"
+    if "precision" in s:
+        return "precision"
+    if "recall" in s:
+        return "recall"
+    if compact in {"auc", "auroc"}:
+        return "auc"
+    if compact in {"map", "meanaverageprecision"}:
+        return "map"
+    if "ndcg" in s:
+        return "ndcg"
+    if "bleu" in s:
+        return "bleu"
+    if "rouge-l" in s or "rougel" in compact:
+        return "rouge-l"
+    if "rouge-1" in s or "rouge1" in compact:
+        return "rouge-1"
+    if "rouge-2" in s or "rouge2" in compact:
+        return "rouge-2"
     if "wer" in s:
         return "wer"
     if "cer" in s:
         return "cer"
     if "perplex" in s or "ppl" in s:
         return "perplexity"
+    if "mae" in s:
+        return "mae"
+    if "rmse" in s:
+        return "rmse"
+    if compact == "mse" or "mean square" in s:
+        return "mse"
+    if "fid" in s:
+        return "fid"
     if "loss" in s:
         return "loss"
     if "error" in s or "err" in s:
         return "error"
+    if "latency" in s:
+        return "latency"
+    if s in {"time", "runtime", "wall time"}:
+        return "time"
     return ""
 
 
-def _lookup_observed_metric(*, dataset: str, metric: str, alignment: dict[str, Any]) -> float | None:
+def _alignment_comparison_rows(alignment: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(alignment, dict):
+        return []
+
+    rows = alignment.get("comparisons")
+    if isinstance(rows, list):
+        return [r for r in rows if isinstance(r, dict)]
+
+    out: list[dict[str, Any]] = []
     matches = alignment.get("matches") if isinstance(alignment.get("matches"), list) else []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        nested = match.get("comparisons")
+        if isinstance(nested, list):
+            out.extend([r for r in nested if isinstance(r, dict)])
+            continue
+        expected = match.get("expected") if isinstance(match.get("expected"), dict) else {}
+        observed = match.get("observed") if isinstance(match.get("observed"), dict) else {}
+        delta = match.get("delta") if isinstance(match.get("delta"), dict) else {}
+        within = match.get("within_tolerance") if isinstance(match.get("within_tolerance"), dict) else {}
+        for metric, paper_value in expected.items():
+            key = str(metric or "")
+            if key not in observed:
+                continue
+            try:
+                paper_f = float(paper_value)
+                obs_f = float(observed.get(key))
+            except Exception:
+                continue
+            out.append(
+                {
+                    "paper_key": f"{match.get('dataset') or ''} {match.get('paper_row_label') or ''} {key}".strip(),
+                    "observed_key": f"{match.get('run_metrics_file') or ''} {key}".strip(),
+                    "metric": key,
+                    "dataset": str(match.get("dataset") or ""),
+                    "paper_value": paper_f,
+                    "observed_value": obs_f,
+                    "delta": delta.get(key, obs_f - paper_f),
+                    "passed": bool(within.get(key, match.get("passed"))),
+                    "within_tolerance": bool(within.get(key, match.get("passed"))),
+                    "run_metrics_file": str(match.get("run_metrics_file") or ""),
+                    "paper_table_id": str(match.get("paper_table_id") or ""),
+                    "paper_row_label": str(match.get("paper_row_label") or ""),
+                }
+            )
+    return out
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _normalized_metric_pair(metric: str, paper_value: float, observed_value: float) -> tuple[float, float]:
+    metric_key = _norm_metric_key(metric)
+    if metric_key == "mr":
+        return paper_value, observed_value
+    if paper_value > 1.0 and observed_value <= 1.0:
+        return paper_value / 100.0, observed_value
+    if observed_value > 1.0 and paper_value <= 1.0:
+        return paper_value, observed_value / 100.0
+    return paper_value, observed_value
+
+
+def _comparison_context_score(row: dict[str, Any], context: str) -> int:
+    norm_context = re.sub(r"[^a-z0-9]+", "", str(context or "").lower())
+    if not norm_context:
+        return 0
+    score = 0
+    for field in ("paper_row_label", "paper_key", "observed_key", "paper_scoring_function"):
+        raw = str(row.get(field) or "")
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", raw):
+            compact = re.sub(r"[^a-z0-9]+", "", token.lower())
+            if compact and compact in norm_context:
+                score += 1
+    return score
+
+
+def _lookup_alignment_metric_comparison(
+    *,
+    dataset: str,
+    metric: str,
+    alignment: dict[str, Any],
+    context: str = "",
+) -> tuple[dict[str, Any], float, float] | None:
     ds = str(dataset or "").strip().lower().replace(" ", "")
     k = _norm_metric_key(metric)
     if not k:
         return None
+    candidates: list[tuple[int, dict[str, Any], float, float]] = []
+    for row in _alignment_comparison_rows(alignment):
+        rds = str(row.get("dataset") or "").strip().lower().replace(" ", "")
+        if ds and rds and ds not in rds and rds not in ds:
+            continue
+        rk = _norm_metric_key(str(row.get("metric") or ""))
+        if rk != k:
+            continue
+        paper = _float_or_none(row.get("paper_value"))
+        observed = _float_or_none(row.get("observed_value"))
+        if paper is None or observed is None:
+            continue
+        paper_norm, observed_norm = _normalized_metric_pair(metric, paper, observed)
+        candidates.append((_comparison_context_score(row, context), row, paper_norm, observed_norm))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1], candidates[0][2], candidates[0][3]
+
+
+def _lookup_alignment_metric_pair(
+    *,
+    dataset: str,
+    metric: str,
+    alignment: dict[str, Any],
+    context: str = "",
+) -> tuple[float, float] | None:
+    comparison = _lookup_alignment_metric_comparison(
+        dataset=dataset,
+        metric=metric,
+        alignment=alignment,
+        context=context,
+    )
+    if comparison is None:
+        return None
+    _row, paper, observed = comparison
+    return paper, observed
+
+
+def _comparison_bool(row: dict[str, Any]) -> bool | None:
+    for key in ("passed", "within_tolerance"):
+        value = row.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "pass", "passed", "yes", "y", "1"}:
+                return True
+            if lowered in {"false", "fail", "failed", "no", "n", "0"}:
+                return False
+    return None
+
+
+def _performance_drop(metric: str, paper_value: float, observed_value: float) -> float:
+    if _metric_higher_is_better(metric):
+        return float(paper_value) - float(observed_value)
+    return float(observed_value) - float(paper_value)
+
+
+def _status_from_alignment_comparison(
+    row: dict[str, Any],
+    *,
+    metric: str,
+    partial_status: str,
+) -> tuple[str, str, float, float] | None:
+    paper_raw = _float_or_none(row.get("paper_value"))
+    observed_raw = _float_or_none(row.get("observed_value"))
+    if paper_raw is None or observed_raw is None:
+        return None
+
+    paper, observed = _normalized_metric_pair(metric, paper_raw, observed_raw)
+    tolerance = _float_or_none(row.get("tolerance"))
+    threshold = abs(float(tolerance)) if tolerance is not None else max(float(get_settings().eval_status_threshold), 0.0)
+    performance_drop = _performance_drop(metric, paper, observed)
+    delta = observed - paper
+    comparison_passed = _comparison_bool(row)
+
+    if performance_drop <= 0.0 or comparison_passed is True or performance_drop <= threshold:
+        status = "Supported"
+    elif performance_drop <= (2.0 * threshold):
+        status = partial_status
+    else:
+        status = "In conflict"
+
+    comparison_label = (
+        "alignment=PASS"
+        if comparison_passed is True
+        else "alignment=FAIL"
+        if comparison_passed is False
+        else "alignment=unknown"
+    )
+    note = (
+        f"Delta={abs(delta):.4f}, performance_drop={performance_drop:.4f}, "
+        f"tolerance={threshold:.4f}, {comparison_label}"
+    )
+    return status, note, paper, observed
+
+
+def _lookup_observed_metric(*, dataset: str, metric: str, alignment: dict[str, Any]) -> float | None:
+    pair = _lookup_alignment_metric_pair(dataset=dataset, metric=metric, alignment=alignment)
+    if pair is not None:
+        return pair[1]
+
+    ds = str(dataset or "").strip().lower().replace(" ", "")
+    k = _norm_metric_key(metric)
+    if not k:
+        return None
+    for row in _alignment_comparison_rows(alignment):
+        rds = str(row.get("dataset") or "").strip().lower().replace(" ", "")
+        if ds and rds and ds not in rds and rds not in ds:
+            continue
+        rk = _norm_metric_key(str(row.get("metric") or ""))
+        if rk != k:
+            continue
+        obs = row.get("observed_value")
+        if isinstance(obs, (int, float)):
+            return float(obs)
+        try:
+            return float(str(obs).strip())
+        except Exception:
+            return None
+    matches = alignment.get("matches") if isinstance(alignment.get("matches"), list) else []
     for m in matches:
         if not isinstance(m, dict):
             continue
@@ -1115,17 +1377,45 @@ def _row_eval_cell(
     paper_result: str,
     alignment: dict[str, Any],
     observed_override: float | None = None,
+    context: str = "",
 ) -> str:
     observed = observed_override
+    paper_from_alignment: float | None = None
+    comparison_row: dict[str, Any] | None = None
     if observed is None:
-        observed = _lookup_observed_metric(dataset=dataset, metric=metric, alignment=alignment)
+        comparison = _lookup_alignment_metric_comparison(
+            dataset=dataset,
+            metric=metric,
+            alignment=alignment,
+            context=context,
+        )
+        if comparison is not None:
+            comparison_row, paper_from_alignment, observed = comparison
+        else:
+            observed = _lookup_observed_metric(
+                dataset=dataset,
+                metric=metric,
+                alignment=alignment,
+            )
     if observed is None:
         return "Inconclusive"
-    paper_val = _metric_aware_value(paper_result, metric_hint=metric)
+    paper_val = paper_from_alignment
+    if paper_val is None:
+        paper_val = _metric_aware_value(paper_result, metric_hint=metric)
     if paper_val is None:
         return "Inconclusive"
 
     mk = _norm_metric_key(metric)
+    if comparison_row is not None:
+        comparison_status = _status_from_alignment_comparison(
+            comparison_row,
+            metric=metric,
+            partial_status="In conflict",
+        )
+        if comparison_status is not None:
+            status, _note, _paper, comparison_observed = comparison_status
+            return f"{status} ({_fmt_value(comparison_observed, metric_key=mk)})"
+
     # Normalize scale for percentage-style paper values.
     if mk != "mr":
         if paper_val > 1.0 and observed <= 1.0:
@@ -1218,9 +1508,13 @@ def _claim_dataset_metric_hint(
     dataset = ""
     metric = ""
     if isinstance(alignment, dict):
-        matches = alignment.get("matches") if isinstance(alignment.get("matches"), list) else []
         text_norm = re.sub(r"[^a-z0-9]+", "", s)
         candidates: list[str] = []
+        for item in _alignment_comparison_rows(alignment):
+            ds = str(item.get("dataset") or "").strip()
+            if ds and ds not in candidates:
+                candidates.append(ds)
+        matches = alignment.get("matches") if isinstance(alignment.get("matches"), list) else []
         for item in matches:
             if not isinstance(item, dict):
                 continue
@@ -1246,6 +1540,28 @@ def _claim_dataset_metric_hint(
         metric = "H@1"
     elif "acc" in s or "accuracy" in s:
         metric = "Accuracy"
+    elif re.search(r"\bf1\b|f1 score", s):
+        metric = "F1"
+    elif "precision" in s:
+        metric = "Precision"
+    elif "recall" in s:
+        metric = "Recall"
+    elif "auc" in s or "auroc" in s:
+        metric = "AUC"
+    elif "bleu" in s:
+        metric = "BLEU"
+    elif "rouge" in s:
+        metric = "ROUGE"
+    elif "loss" in s:
+        metric = "Loss"
+    elif "perplex" in s or "ppl" in s:
+        metric = "Perplexity"
+    elif "fid" in s:
+        metric = "FID"
+    elif "mae" in s:
+        metric = "MAE"
+    elif "rmse" in s:
+        metric = "RMSE"
     return dataset, metric
 
 
@@ -1293,22 +1609,44 @@ def _build_experimental_claim_assessment(
     """
     joined = f"{claim} {evidence} {location}"
     dataset, metric = _claim_dataset_metric_hint(joined, alignment=alignment)
-    observed = (
-        _lookup_observed_metric(dataset=dataset, metric=metric, alignment=alignment)
-        if (dataset and metric)
-        else None
-    )
-    paper_val = _metric_aware_value(evidence, metric_hint=metric) or _metric_aware_value(
-        claim, metric_hint=metric
-    )
+    paper_val: float | None = None
+    observed: float | None = None
+    comparison_row: dict[str, Any] | None = None
+    if dataset and metric:
+        comparison = _lookup_alignment_metric_comparison(
+            dataset=dataset,
+            metric=metric,
+            alignment=alignment,
+            context=joined,
+        )
+        if comparison is not None:
+            comparison_row, paper_val, observed = comparison
+        else:
+            observed = _lookup_observed_metric(dataset=dataset, metric=metric, alignment=alignment)
+    if paper_val is None:
+        paper_val = _metric_aware_value(evidence, metric_hint=metric)
+    if paper_val is None:
+        paper_val = _metric_aware_value(claim, metric_hint=metric)
 
     has_execution = bool(alignment)
     if has_execution and paper_val is not None and observed is not None:
-        exec_status, delta_note = _status_from_paper_observed(
-            paper_val=paper_val,
-            observed=observed,
-            metric=metric or "metric",
+        comparison_status = (
+            _status_from_alignment_comparison(
+                comparison_row,
+                metric=metric or "metric",
+                partial_status="Partially supported",
+            )
+            if comparison_row is not None
+            else None
         )
+        if comparison_status is not None:
+            exec_status, delta_note, paper_val, observed = comparison_status
+        else:
+            exec_status, delta_note = _status_from_paper_observed(
+                paper_val=paper_val,
+                observed=observed,
+                metric=metric or "metric",
+            )
         norm_metric = _norm_metric_key(metric)
         base = (
             f"Claim mapped to {dataset} / {metric}. "
@@ -1406,7 +1744,7 @@ def augment_claims_with_assessment_status(
                 cells[-2],
                 cells[-1],
             ]
-        return cells[: expected - 1] + [" | ".join(cells[expected - 1 :])]
+        return [*cells[: expected - 1], " | ".join(cells[expected - 1 :])]
 
     def _is_meaningful_assessment(value: str) -> bool:
         plain = _strip_inline_formatting(value).strip().lower()
@@ -1491,7 +1829,10 @@ def _augment_experiment_with_eval_status(
     alignment: dict[str, Any],
 ) -> str:
     text = str(markdown_text or "")
-    sec = re.search(r"(?ims)^##\s+5\.\s+Experiment\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", text)
+    sec = re.search(
+        r"(?ims)^##\s+(?:\*\*)?5\.\s+Experiment(?:\*\*)?\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
     if not sec:
         return text
     body = sec.group("body")
@@ -1510,6 +1851,12 @@ def _augment_experiment_with_eval_status(
         r"(?im)^(\|\s*Task\s*\|[^\n]*Difference\s*\(Δ\)\s*\|)\n(\|[-:\| ]+\|)\n(?P<rows>(?:\|[^\n]*\|\n?)*)",
         body,
     )
+    if not main_match:
+        main_match = re.search(
+            r"(?im)^(\|\s*(?:\*\*)?Task(?:\*\*)?\s*\|[^\n]*Difference\s*\([^)]*\)(?:\*\*)?\s*\|)\n"
+            r"(\|[-:\| ]+\|)\n(?P<rows>(?:\|[^\n]*\|\n?)*)",
+            body,
+        )
     if main_match:
         header = "| **Task** | **Dataset** | **Metric** | **Best Baseline** | **Paper Result** | **Difference (Δ)** | **Evaluation Status** |"
         sep = "|---|---|---|---|---|---|---|"
@@ -1530,6 +1877,7 @@ def _augment_experiment_with_eval_status(
                 metric=metric,
                 paper_result=paper_result,
                 alignment=alignment,
+                context=" ".join(cells[:6]),
             )
             new_rows.append("| " + " | ".join([*cells[:6], _status_with_symbol(cell)]) + " |")
         rebuilt = "\n".join([header, sep, *new_rows]) + "\n"
@@ -1551,6 +1899,12 @@ def _augment_experiment_with_eval_status(
         r"(?im)^(\|\s*Ablation Dimension\s*\|[^\n]*Difference\s*\(Δ\)\s*\|)\n(\|[-:\| ]+\|)\n(?P<rows>(?:\|[^\n]*\|\n?)*)",
         body,
     )
+    if not abl_match:
+        abl_match = re.search(
+            r"(?im)^(\|\s*(?:\*\*)?Ablation Dimension(?:\*\*)?\s*\|[^\n]*Difference\s*\([^)]*\)(?:\*\*)?\s*\|)\n"
+            r"(\|[-:\| ]+\|)\n(?P<rows>(?:\|[^\n]*\|\n?)*)",
+            body,
+        )
     if abl_match:
         header = "| **Ablation Dimension** | **Configuration** | **Full Model** | **Paper Result** | **Difference (Δ)** | **Evaluation Status** |"
         sep = "|---|---|---|---|---|---|"
@@ -1581,6 +1935,7 @@ def _augment_experiment_with_eval_status(
                 metric=metric_hint,
                 paper_result=paper_result,
                 alignment=alignment,
+                context=" ".join(cells),
             )
             new_rows.append("| " + " | ".join([*cells[:5], _status_with_symbol(cell)]) + " |")
         rebuilt = "\n".join([header, sep, *new_rows]) + "\n"
@@ -1590,11 +1945,29 @@ def _augment_experiment_with_eval_status(
     return text[: sec.start("body")] + new_body + text[sec.end("body") :]
 
 
+def augment_experiment_with_eval_status(
+    markdown_text: str,
+    *,
+    summary: dict[str, Any],
+    alignment: dict[str, Any],
+) -> str:
+    """Public wrapper used by the report stage after execution finishes."""
+
+    return _augment_experiment_with_eval_status(
+        markdown_text,
+        summary=summary,
+        alignment=alignment,
+    )
+
+
 def _compress_experiment_note(markdown_text: str) -> str:
     text = str(markdown_text or "")
     if not text.strip():
         return text
-    sec = re.search(r"(?ims)^##\s+5\.\s+Experiment\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", text)
+    sec = re.search(
+        r"(?ims)^##\s+(?:\*\*)?5\.\s+Experiment(?:\*\*)?\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
     if not sec:
         return text
     body = sec.group("body")
@@ -1835,7 +2208,6 @@ def _normalize_experiment_tables_in_block(block: str) -> tuple[str, list[str]]:
         diff_idx = next((idx for idx, h in enumerate(lower_headers) if "difference" in h), -1)
         metric_idx = next((idx for idx, h in enumerate(lower_headers) if h == "metric"), -1)
         best_baseline_idx = next((idx for idx, h in enumerate(lower_headers) if "best baseline" in h), -1)
-        full_model_idx = next((idx for idx, h in enumerate(lower_headers) if h == "full model"), -1)
         paper_result_idx = next((idx for idx, h in enumerate(lower_headers) if h == "paper result"), -1)
         status_idx = next((idx for idx, h in enumerate(lower_headers) if "status" in h), -1)
         table_metric_hint = _infer_metric_hint_from_table(headers=headers, rows=rows, block_text=block)
@@ -2279,9 +2651,7 @@ def _extract_paper_method_hint(markdown_text: str) -> str:
         if low in banned:
             return False
         # Ignore retrieval-id like R1/R2.
-        if re.fullmatch(r"R\d+", t, flags=re.IGNORECASE):
-            return False
-        return True
+        return not re.fullmatch(r"R\d+", t, flags=re.IGNORECASE)
 
     # Strong cue patterns from manuscript/report body.
     cue_patterns = (

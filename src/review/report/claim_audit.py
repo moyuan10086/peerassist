@@ -194,7 +194,7 @@ def _normalize_claim_table_cells(cells: list[str], headers: list[str]) -> list[s
             cells[-2],
             cells[-1],
         ]
-    return cells[: expected - 1] + [" | ".join(cells[expected - 1 :])]
+    return [*cells[: expected - 1], " | ".join(cells[expected - 1 :])]
 
 
 def _find_column_index(headers: list[str], *needles: str) -> int:
@@ -492,27 +492,142 @@ _TYPE_SPECIFIC_RULES = (
 )
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_metric_number(value: Any) -> str:
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return str(value or "")
+    return f"{parsed:.6g}"
+
+
+def _scale_metric_pair(metric: str, paper_value: float, observed_value: float) -> tuple[float, float]:
+    metric_key = str(metric or "").strip().lower()
+    if metric_key in {"mr", "mean rank"}:
+        return paper_value, observed_value
+    if paper_value > 1.0 and observed_value <= 1.0:
+        return paper_value / 100.0, observed_value
+    if observed_value > 1.0 and paper_value <= 1.0:
+        return paper_value, observed_value / 100.0
+    return paper_value, observed_value
+
+
+def _flatten_execution_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return flattened paper-vs-run metric comparison rows.
+
+    New execution runs emit ``alignment.comparisons`` directly. Older runs only
+    have ``alignment.matches`` with nested ``expected`` and ``observed`` metric
+    maps, so normalize both shapes before building the audit prompt.
+    """
+
+    comparisons: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        nested = row.get("comparisons")
+        if isinstance(nested, list):
+            comparisons.extend(item for item in nested if isinstance(item, dict))
+            continue
+
+        if "paper_value" in row and "observed_value" in row:
+            comparisons.append(row)
+            continue
+
+        expected = row.get("expected") if isinstance(row.get("expected"), dict) else {}
+        observed = row.get("observed") if isinstance(row.get("observed"), dict) else {}
+        delta_map = row.get("delta") if isinstance(row.get("delta"), dict) else {}
+        within_map = row.get("within_tolerance") if isinstance(row.get("within_tolerance"), dict) else {}
+        for metric, paper_value in expected.items():
+            if metric not in observed:
+                continue
+            paper_float = _float_or_none(paper_value)
+            observed_float = _float_or_none(observed.get(metric))
+            if paper_float is None or observed_float is None:
+                continue
+            metric_key = str(metric or "").strip()
+            paper_cmp, observed_cmp = _scale_metric_pair(metric_key, paper_float, observed_float)
+            delta = _float_or_none(delta_map.get(metric_key))
+            if delta is None:
+                delta = observed_cmp - paper_cmp
+            comparisons.append(
+                {
+                    "paper_key": " / ".join(
+                        part
+                        for part in [
+                            str(row.get("dataset") or "").strip(),
+                            str(row.get("paper_row_label") or row.get("score_func") or "").strip(),
+                            metric_key,
+                        ]
+                        if part
+                    ),
+                    "observed_key": " / ".join(
+                        part
+                        for part in [
+                            str(row.get("run_metrics_file") or "").strip(),
+                            metric_key,
+                        ]
+                        if part
+                    ),
+                    "metric": metric_key,
+                    "dataset": str(row.get("dataset") or "").strip(),
+                    "paper_value": paper_cmp,
+                    "observed_value": observed_cmp,
+                    "delta": delta,
+                    "within_tolerance": bool(within_map.get(metric_key, row.get("passed"))),
+                    "passed": bool(within_map.get(metric_key, row.get("passed"))),
+                    "run_metrics_file": str(row.get("run_metrics_file") or "").strip(),
+                    "paper_table_id": str(row.get("paper_table_id") or "").strip(),
+                }
+            )
+    return comparisons
+
+
 def _format_execution_matches_block(matches: list[dict[str, Any]]) -> str:
     """Format execution reproduction matches into a readable context block."""
-    if not matches:
+    comparisons = _flatten_execution_comparisons(matches)
+    if not comparisons:
         return ""
     lines = [
         "Execution reproduction results (treat as authoritative for empirical claims):"
     ]
-    for m in matches[:20]:
-        key = str(m.get("paper_key") or m.get("observed_key") or "").strip()
+    for m in comparisons[:40]:
         paper_val = m.get("paper_value")
         obs_val = m.get("observed_value")
-        if paper_val is None or obs_val is None:
+        paper_float = _float_or_none(paper_val)
+        obs_float = _float_or_none(obs_val)
+        if paper_float is None or obs_float is None:
             continue
-        try:
-            delta_pct = abs(float(paper_val) - float(obs_val)) / max(abs(float(paper_val)), 1e-9) * 100
-        except (TypeError, ValueError):
-            continue
+        delta = _float_or_none(m.get("delta"))
+        if delta is None:
+            delta = obs_float - paper_float
+        delta_pct = _float_or_none(m.get("delta_pct"))
+        if delta_pct is None:
+            delta_pct = abs(delta) / max(abs(paper_float), 1e-9) * 100
+        key = str(m.get("paper_key") or m.get("observed_key") or "").strip()
+        if not key:
+            key = " / ".join(
+                part
+                for part in [
+                    str(m.get("dataset") or "").strip(),
+                    str(m.get("metric") or "").strip(),
+                ]
+                if part
+            )
+        status = "PASS" if bool(m.get("passed", m.get("within_tolerance"))) else "FAIL"
         lines.append(
-            f"  {key}: paper={paper_val}, reproduced={obs_val}, Δ={delta_pct:.1f}%"
+            "  "
+            f"{key}: paper={_format_metric_number(paper_val)}, "
+            f"reproduced={_format_metric_number(obs_val)}, "
+            f"delta={_format_metric_number(delta)} ({delta_pct:.1f}%), "
+            f"status={status}"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _build_llm_prompt(
@@ -788,9 +903,13 @@ def audit_review_markdown(
 
     execution_matches: list[dict[str, Any]] = []
     if isinstance(execution_alignment, dict):
-        raw_matches = execution_alignment.get("matches")
-        if isinstance(raw_matches, list):
-            execution_matches = [m for m in raw_matches if isinstance(m, dict)]
+        raw_comparisons = execution_alignment.get("comparisons")
+        if isinstance(raw_comparisons, list):
+            execution_matches = [m for m in raw_comparisons if isinstance(m, dict)]
+        else:
+            raw_matches = execution_alignment.get("matches")
+            if isinstance(raw_matches, list):
+                execution_matches = [m for m in raw_matches if isinstance(m, dict)]
 
     prompt = _build_llm_prompt(
         claims=[
