@@ -340,6 +340,10 @@ If FactReview helped your work, please ⭐ the repo and cite:
 }
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=defense-seu/factreview&type=timeline&legend=top-left)](https://www.star-history.com/#defense-seu/factreview&type=timeline&legend=top-left)
+
 ## License
 
 AGPL-3.0-only.
