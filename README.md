@@ -328,15 +328,11 @@ Read the paper on <https://arxiv.org/abs/2604.04074> or from the local PDF at [`
 If FactReview helped your work, please ⭐ the repo and cite:
 
 ```bibtex
-@misc{xu2026factreview,
-  title = {FactReview: Evidence-Grounded Reviews with Literature Positioning and Execution-Based Claim Verification},
-  author = {Xu, Hang and Yue, Ling and Ouyang, Chaoqian and Liu, Yuchen and Zheng, Libin and Pan, Shaowu and Di, Shimin and Zhang, Min-Ling},
-  year = {2026},
-  eprint = {2604.04074},
-  archivePrefix = {arXiv},
-  primaryClass = {cs.AI},
-  doi = {10.48550/arXiv.2604.04074},
-  url = {https://arxiv.org/abs/2604.04074}
+@article{yue2026factreview,
+  title={FactReview: Evidence-Grounded Peer Review with Execution-Based Claim Verification},
+  author={Yue, Ling and Ouyang, Chaoqian and Xu, Hang and Huang, Ruijun and Liu, Yuchen and Zheng, Libin and Liu, Wei and Pan, Shaowu and Di, Shimin and Zhang, Min-Ling},
+  journal={arXiv preprint arXiv:2604.04074},
+  year={2026}
 }
 ```
 
