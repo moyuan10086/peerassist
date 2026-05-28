@@ -97,6 +97,18 @@ def _paper_search_not_started(state: Any) -> bool:
     return availability == "not_started" or not bool(payload.get("started", True))
 
 
+def _missing_required_read_paper_call(
+    usage: PaperSearchUsage,
+    *,
+    retrieval_not_started: bool,
+) -> bool:
+    if retrieval_not_started:
+        return False
+    if int(usage.effective_calls or 0) <= 0:
+        return False
+    return int(usage.read_paper_successful_calls or 0) <= 0
+
+
 def _build_annotation_gate_hint(
     *,
     total_calls: int,
@@ -1066,9 +1078,24 @@ def build_review_tools(runtime: ReviewRuntimeContext) -> list[Any]:
             return {"status": "error", "reason": "empty_items", "message": "items is required"}
 
         result = await rt.paper_adapter.read_papers(items=rows)
+        rt.paper_search_usage.read_paper_calls += 1
+        rt.paper_search_usage.read_paper_items += len(rows)
+        result_items = result.get("items") if isinstance(result, dict) else []
+        successful_items = 0
+        if isinstance(result_items, list):
+            successful_items = sum(
+                1 for item in result_items if isinstance(item, dict) and bool(item.get("success"))
+            )
+        rt.paper_search_usage.read_paper_successful_items += successful_items
+        if bool(result.get("success")) and (successful_items > 0 or not isinstance(result_items, list)):
+            rt.paper_search_usage.read_paper_successful_calls += 1
         rt.sync_state_usage(ctx.usage)
         append_event(
-            rt.job_id, "read_paper_called", item_count=len(rows), success=bool(result.get("success"))
+            rt.job_id,
+            "read_paper_called",
+            item_count=len(rows),
+            success=bool(result.get("success")),
+            successful_items=successful_items,
         )
         return result
 
@@ -1384,6 +1411,36 @@ def build_review_tools(runtime: ReviewRuntimeContext) -> list[Any]:
                             "Then re-call review_final_markdown_write after updating novelty and "
                             "contribution judgment."
                         ),
+                    ],
+                    current_section_id=current_section_id,
+                )
+            )
+
+        if _missing_required_read_paper_call(
+            usage,
+            retrieval_not_started=retrieval_not_started,
+        ):
+            return _return_final_write_failure(
+                _build_final_report_progress_payload(
+                    source=normalized_source,
+                    completed_section_ids=completed_section_ids,
+                    missing_section_ids=missing_section_ids,
+                    annotation_count=rt.annotation_count,
+                    paper_search_usage=usage.model_dump(),
+                    required_paper_search_calls=required_paper_calls,
+                    required_annotation_count=required_annotations,
+                    draft_version=draft_version,
+                    status="error",
+                    reason="read_paper_calls_not_met",
+                    message=(
+                        "At least one effective paper_search call returned usable papers, "
+                        "but no successful read_paper call was recorded before final submission."
+                    ),
+                    retry_required=True,
+                    next_steps=[
+                        "Call read_paper on 1-3 selected overlap-risk papers from the paper_search results.",
+                        "Use the deep-read evidence to update Technical Positioning and novelty/comparison claims.",
+                        "If no readable candidate is available, document that limitation and rerun with a compatible reader or arXiv-backed candidates.",
                     ],
                     current_section_id=current_section_id,
                 )

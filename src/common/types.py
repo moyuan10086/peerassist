@@ -42,6 +42,10 @@ class PaperSearchUsage(BaseModel):
     effective_calls: int = 0
     papers_found: int = 0
     distinct_queries: int = 0
+    read_paper_calls: int = 0
+    read_paper_successful_calls: int = 0
+    read_paper_items: int = 0
+    read_paper_successful_items: int = 0
 
 
 class UsageSnapshot(BaseModel):

@@ -166,7 +166,7 @@ The prompt refers to "the attached reference image" — when you paste it into G
 
 **Semantic Scholar related-work retrieval (on by default).** The positioning stage uses Semantic Scholar for objective related-work neighbors unless `SEMANTIC_SCHOLAR_ENABLED=false` is set. Set `SEMANTIC_SCHOLAR_API_KEY` to avoid rate limits during positioning retrieval. Free key at <https://www.semanticscholar.org/product/api>. Disable it for one run with `--disable-semantic-scholar`.
 
-**Agent `paper_search/read_paper` tools (optional, off by default).** Set `PAPER_SEARCH_ENABLED=true` to let the review agent run claim-driven literature searches. Available providers include `arxiv` (no key), `semantic_scholar`, `openalex`, and `remote`. The `semantic_scholar` provider reuses `SEMANTIC_SCHOLAR_API_KEY`, and `openalex` can use `OPENALEX_API_KEY` if set. `remote` keeps compatibility with advanced `/pasa/search` services. When `read_paper` is called without `PAPER_READ_BASE_URL`, FactReview uses a built-in arXiv PDF full-text fallback; set `PAPER_READ_BASE_URL` only if you run a stronger compatible reader service.
+**Agent `paper_search/read_paper` tools (on by default).** FactReview lets the review agent run claim-driven literature searches and requires a `read_paper` deep-read pass after effective search results before writing Technical Positioning. Set `PAPER_SEARCH_ENABLED=false` for manuscript/Semantic-Scholar-only runs. Available providers include `arxiv` (no key), `semantic_scholar`, `openalex`, and `remote`. The `semantic_scholar` provider reuses `SEMANTIC_SCHOLAR_API_KEY`, and `openalex` can use `OPENALEX_API_KEY` if set. `remote` keeps compatibility with advanced `/pasa/search` services. When `read_paper` is called without `PAPER_READ_BASE_URL`, FactReview uses a built-in arXiv PDF full-text fallback; set `PAPER_READ_BASE_URL` only if you run a stronger compatible reader service.
 
 For OpenAlex, local MinerU fallback, agent-tracing knobs, and other rarely-touched variables see [Advanced Configuration](#advanced-configuration).
 
@@ -297,7 +297,7 @@ Less common environment variables — set in `.env` or via the shell. `.env.exam
 | `OPENAI_CODEX_BASE_URL` | Point Codex at a different Codex-compatible endpoint (default: `https://chatgpt.com/backend-api/codex`). |
 | `SEMANTIC_SCHOLAR_ENABLED` | Enable or disable Semantic Scholar objective related-work retrieval. Defaults to `true`; set `false` to skip it persistently. |
 | `SEMANTIC_SCHOLAR_API_KEY` | Recommended. Free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api) for the positioning stage and `PAPER_SEARCH_PROVIDER=semantic_scholar`. Without it, unauthenticated requests may be rate-limited. |
-| `PAPER_SEARCH_ENABLED` | Enable the optional agent `paper_search` tool. Defaults to `false`; set `true` to start claim-driven retrieval. |
+| `PAPER_SEARCH_ENABLED` | Enable the agent `paper_search` tool. Defaults to `true`; set `false` to force manuscript/Semantic-Scholar-only runs. |
 | `PAPER_SEARCH_PROVIDER` | Retrieval backend for `paper_search`: `arxiv` (zero-key), `semantic_scholar`, `openalex`, or `remote`. |
 | `PAPER_SEARCH_BASE_URL` / `PAPER_SEARCH_ENDPOINT` | Only needed for `PAPER_SEARCH_PROVIDER=remote`; points to a compatible `/pasa/search` service. |
 | `PAPER_SEARCH_API_KEY` / `PAPER_SEARCH_HEALTH_ENDPOINT` | Optional bearer token and health endpoint for `remote` paper search. Default health endpoint: `/health`. |

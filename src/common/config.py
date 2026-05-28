@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     mineru_allow_local_fallback: bool = False
 
     # Optional external paper search/read service
-    paper_search_enabled: bool = False
+    paper_search_enabled: bool = True
     paper_search_provider: str = "arxiv"
     paper_search_base_url: str | None = None
     paper_search_api_key: str | None = None

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
+import anyio
 import httpx
 
 from preprocessing.parse.markdown_parser import parse_pdf_locally
@@ -63,6 +65,7 @@ class PaperSearchAdapter:
         self.search_cfg = search_cfg
         self.read_cfg = read_cfg
         self._search_state_cache: PaperSearchRuntimeState | None = None
+        self._last_arxiv_request_at = 0.0
 
     @property
     def search_configured(self) -> bool:
@@ -696,8 +699,9 @@ class PaperSearchAdapter:
         }
 
     async def _download_pdf(self, url: str) -> bytes:
+        await self._throttle_arxiv_request()
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=self._arxiv_headers())
         response.raise_for_status()
         content = response.content
         if not content.startswith(b"%PDF"):
@@ -796,8 +800,9 @@ class PaperSearchAdapter:
             f"search_query=all:{query}&start=0&max_results={max(1, min(16, max_results))}"
         )
 
+        await self._throttle_arxiv_request()
         async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=self._arxiv_headers())
         response.raise_for_status()
 
         return self._parse_arxiv_feed(response.text)
@@ -810,12 +815,25 @@ class PaperSearchAdapter:
         query = quote_plus(f"id:{clean}")
         url = f"https://export.arxiv.org/api/query?search_query={query}&start=0&max_results=1"
 
+        await self._throttle_arxiv_request()
         async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=self._arxiv_headers())
         response.raise_for_status()
 
         papers = self._parse_arxiv_feed(response.text)
         return papers[0] if papers else None
+
+    async def _throttle_arxiv_request(self) -> None:
+        now = time.monotonic()
+        wait_seconds = 3.2 - (now - self._last_arxiv_request_at)
+        if wait_seconds > 0:
+            await anyio.sleep(wait_seconds)
+        self._last_arxiv_request_at = time.monotonic()
+
+    def _arxiv_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": "FactReview/0.1 (https://github.com/DEFENSE-SEU/FactReview; arxiv paper search)",
+        }
 
     def _question_to_arxiv_query(self, question: str) -> str:
         text = re.sub(r"\s+", " ", str(question or "").strip().lower())
