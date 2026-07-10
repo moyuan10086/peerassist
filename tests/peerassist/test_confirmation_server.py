@@ -352,6 +352,16 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-pdf-human-gate-queue" in html
     assert "已打开人工确认闸门" in html
     assert "已定位到审稿队列清单" in html
+    assert "data-pdf-evidence-gate" in html
+    assert "updatePdfEvidenceGate" in html
+    assert "peerassistUpdatePdfEvidenceGate" in html
+    assert "focusFirstUnboundEvidenceConcern" in html
+    assert "peerassistFocusFirstUnboundEvidenceConcern" in html
+    assert "data-pdf-evidence-gate-chain" in html
+    assert "data-pdf-evidence-gate-pdf" in html
+    assert "data-pdf-evidence-gate-unbound" in html
+    assert "已定位到证据链矩阵" in html
+    assert "已筛选有 PDF 证据的关注点" in html
     assert "data-pdf-runtime-pulse" in html
     assert "data-pdf-runtime-state" in html
     assert "data-pdf-runtime-pending" in html
@@ -512,6 +522,13 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "主要待处理" in html
     assert "打开人工确认" in html
     assert "队列清单" in html
+    assert "data-pdf-evidence-gate" in html
+    assert "PDF 证据绑定闸门" in html
+    assert "证据绑定闸门" in html
+    assert "待人工核查" in html
+    assert "证据链矩阵" in html
+    assert "有 PDF 证据" in html
+    assert "待核查项" in html
     assert 'data-pdf-review-command="agent-review"' in html
     assert 'data-pdf-review-command="selection-review"' in html
     assert 'data-pdf-review-command="current-page"' in html

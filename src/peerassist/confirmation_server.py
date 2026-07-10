@@ -1290,6 +1290,83 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #8bd8c8;
       transition: width 180ms ease;
     }}
+    .pdf-evidence-gate {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #fbfdfc;
+    }}
+    .pdf-evidence-gate[data-evidence-gate-state="review"] {{
+      background: #fff8ea;
+    }}
+    .pdf-evidence-gate-head {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+    }}
+    .pdf-evidence-gate-title {{
+      color: #25322f;
+      font-size: 12px;
+      font-weight: 920;
+    }}
+    .pdf-evidence-gate-copy {{
+      color: #66736f;
+      font-size: 10px;
+      font-weight: 820;
+      text-align: right;
+    }}
+    .pdf-evidence-gate-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }}
+    .pdf-evidence-gate-chip {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 8px;
+    }}
+    .pdf-evidence-gate-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-evidence-gate-value {{
+      margin-top: 2px;
+      color: #25322f;
+      font-size: 13px;
+      font-weight: 920;
+      white-space: nowrap;
+    }}
+    .pdf-evidence-gate-actions {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      min-width: 0;
+    }}
+    .pdf-evidence-gate-meter {{
+      grid-column: 1 / -1;
+      height: 5px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #e4ece8;
+    }}
+    .pdf-evidence-gate-meter span {{
+      display: block;
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }}
     .pdf-activity-feed {{
       display: grid;
       gap: 6px;
@@ -2572,6 +2649,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-human-gate {{ grid-template-columns: 1fr; }}
       .pdf-human-gate-grid {{ grid-template-columns: 1fr 1fr; }}
       .pdf-human-gate-actions {{ justify-content: flex-start; }}
+      .pdf-evidence-gate {{ grid-template-columns: 1fr; }}
+      .pdf-evidence-gate-grid {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-evidence-gate-actions {{ justify-content: flex-start; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
@@ -3127,6 +3207,52 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       }});
     }}
     window.peerassistUpdatePdfHumanGate = updatePdfHumanGate;
+    function updatePdfEvidenceGate() {{
+      const gate = document.querySelector('[data-pdf-evidence-gate]');
+      if (!gate) return;
+      const queueItems = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      const total = queueItems.length;
+      const bound = queueItems.filter((item) => Number(item.dataset.pdfPage || 0) > 0).length;
+      const unbound = Math.max(0, total - bound);
+      const anchors = document.querySelectorAll('[data-evidence-anchor]').length;
+      const ratio = total > 0 ? Math.round(bound / total * 100) : 0;
+      const setValue = (key, value) => {{
+        const node = gate.querySelector(`[data-pdf-evidence-gate-value="${{CSS.escape(key)}}"]`);
+        if (node) node.textContent = value;
+      }};
+      setValue('total', `${{total}} 条`);
+      setValue('bound', `${{bound}} 条`);
+      setValue('unbound', `${{unbound}} 条`);
+      setValue('anchors', `${{anchors}} 个`);
+      const copy = gate.querySelector('[data-pdf-evidence-gate-copy]');
+      if (copy) {{
+        copy.textContent = unbound > 0
+          ? `${{unbound}} 条缺少 PDF 页码绑定，进入确定性结论前需人工核查`
+          : total > 0
+            ? `证据绑定率 ${{ratio}}% · 可从证据链矩阵复核来源`
+            : '等待证据台账同步';
+      }}
+      const meter = gate.querySelector('[data-pdf-evidence-gate-meter]');
+      if (meter) meter.style.width = `${{ratio}}%`;
+      gate.dataset.evidenceGateState = unbound > 0 ? 'review' : total > 0 ? 'ready' : 'empty';
+      gate.querySelectorAll('[data-pdf-evidence-gate-unbound]').forEach((button) => {{
+        button.disabled = unbound <= 0;
+      }});
+    }}
+    window.peerassistUpdatePdfEvidenceGate = updatePdfEvidenceGate;
+    function focusFirstUnboundEvidenceConcern() {{
+      const item = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]')).find((node) => {{
+        return Number(node.dataset.pdfPage || 0) <= 0;
+      }});
+      if (!item) {{
+        showToast('暂无缺少 PDF 证据绑定的关注点');
+        return;
+      }}
+      applyQueueFilter('all');
+      focusAnnotation(item.dataset.concernId || '', '', 'queue', '');
+      showToast('已定位到待人工核查的无页码绑定关注点');
+    }}
+    window.peerassistFocusFirstUnboundEvidenceConcern = focusFirstUnboundEvidenceConcern;
     function updatePdfRuntimePulse(state, source) {{
       const pulse = document.querySelector('[data-pdf-runtime-pulse]');
       if (!pulse) return;
@@ -3141,6 +3267,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       updatePdfAgentContext(state);
       updatePdfRecoveryCheckpoint(state);
       updatePdfHumanGate(state);
+      updatePdfEvidenceGate();
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3616,6 +3743,22 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         showToast('已定位到审稿队列清单');
       }});
     }});
+    document.querySelectorAll('[data-pdf-evidence-gate-chain]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-panel="evidence-chain-matrix"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已定位到证据链矩阵');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-evidence-gate-pdf]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-queue-filter="pdf"]')?.click();
+        document.querySelector('[data-panel="review-queue"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已筛选有 PDF 证据的关注点');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-evidence-gate-unbound]').forEach((button) => {{
+      button.addEventListener('click', () => focusFirstUnboundEvidenceConcern());
+    }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
@@ -3641,6 +3784,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     updatePdfAgentContext();
     updatePdfRecoveryCheckpoint();
     updatePdfHumanGate();
+    updatePdfEvidenceGate();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -5825,6 +5969,38 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
           <button class="inline-button primary" type="button" data-pdf-human-gate-open>打开人工确认</button>
           <button class="inline-button" type="button" data-pdf-human-gate-next>下一未处理</button>
           <button class="inline-button" type="button" data-pdf-human-gate-queue>队列清单</button>
+        </div>
+      </section>
+      <section class="pdf-evidence-gate" data-pdf-evidence-gate data-evidence-gate-state="empty" aria-label="PDF 证据绑定闸门">
+        <div>
+          <div class="pdf-evidence-gate-head">
+            <span class="pdf-evidence-gate-title">证据绑定闸门</span>
+            <span class="pdf-evidence-gate-copy" data-pdf-evidence-gate-copy>等待证据台账同步</span>
+          </div>
+          <div class="pdf-evidence-gate-grid">
+            <div class="pdf-evidence-gate-chip">
+              <div class="pdf-evidence-gate-label">总关注点</div>
+              <div class="pdf-evidence-gate-value" data-pdf-evidence-gate-value="total">--</div>
+            </div>
+            <div class="pdf-evidence-gate-chip">
+              <div class="pdf-evidence-gate-label">PDF 绑定</div>
+              <div class="pdf-evidence-gate-value" data-pdf-evidence-gate-value="bound">--</div>
+            </div>
+            <div class="pdf-evidence-gate-chip">
+              <div class="pdf-evidence-gate-label">待人工核查</div>
+              <div class="pdf-evidence-gate-value" data-pdf-evidence-gate-value="unbound">--</div>
+            </div>
+            <div class="pdf-evidence-gate-chip">
+              <div class="pdf-evidence-gate-label">证据锚点</div>
+              <div class="pdf-evidence-gate-value" data-pdf-evidence-gate-value="anchors">--</div>
+            </div>
+            <div class="pdf-evidence-gate-meter" aria-hidden="true"><span data-pdf-evidence-gate-meter></span></div>
+          </div>
+        </div>
+        <div class="pdf-evidence-gate-actions">
+          <button class="inline-button primary" type="button" data-pdf-evidence-gate-chain>证据链矩阵</button>
+          <button class="inline-button" type="button" data-pdf-evidence-gate-pdf>有 PDF 证据</button>
+          <button class="inline-button" type="button" data-pdf-evidence-gate-unbound>待核查项</button>
         </div>
       </section>
       <section class="pdf-activity-feed" data-pdf-activity-feed aria-label="PDF 审稿近期事件">
