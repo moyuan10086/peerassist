@@ -277,6 +277,14 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-has-concern" in html
     assert "pdf-page-badge" in html
     assert "本页 ${count} 条审稿关注" in html
+    assert "data-pdf-selection-tray" in html
+    assert "data-pdf-selection-quote" in html
+    assert "data-pdf-selection-copy" in html
+    assert "data-pdf-selection-use" in html
+    assert "peerassistSelectedEvidence" in html
+    assert "capturePdfTextSelection" in html
+    assert "PDF 第 ${selectedEvidence.page || '未知'} 页选区" in html
+    assert "已作为智能审稿关注文本" in html
     assert "PDF 页码导航" in html
     assert "已定位到论文高亮" in html
     assert "已定位到审稿队列" in html

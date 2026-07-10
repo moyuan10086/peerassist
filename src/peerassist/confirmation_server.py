@@ -639,6 +639,34 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #fff;
       color: var(--accent-strong);
     }}
+    .pdf-selection-tray {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: linear-gradient(90deg, #fff8ea, #f4fbf8);
+    }}
+    .pdf-selection-tray[hidden] {{ display: none; }}
+    .pdf-selection-meta {{
+      color: #7a4a0b;
+      font-size: 11px;
+      font-weight: 900;
+    }}
+    .pdf-selection-quote {{
+      margin-top: 3px;
+      color: #25322f;
+      font-size: 12px;
+      line-height: 1.35;
+      max-height: 44px;
+      overflow: hidden;
+    }}
+    .pdf-selection-actions {{
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }}
     .pdf-reader-stage {{
       position: relative;
       min-height: 780px;
@@ -1468,6 +1496,26 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       document.execCommand('copy');
       textarea.remove();
     }}
+    window.peerassistSelectedEvidence = {{text: '', page: null}};
+    function setPdfSelectionEvidence(payload) {{
+      const text = String(payload?.text || '').replace(/\\s+/g, ' ').trim();
+      const page = Number(payload?.page || 0);
+      const tray = document.querySelector('[data-pdf-selection-tray]');
+      const quote = document.querySelector('[data-pdf-selection-quote]');
+      const meta = document.querySelector('[data-pdf-selection-meta]');
+      window.peerassistSelectedEvidence = {{text, page: page > 0 ? page : null}};
+      if (!tray || !quote || !meta) return;
+      if (!text) {{
+        tray.hidden = true;
+        quote.textContent = '';
+        meta.textContent = '尚未选择 PDF 文字';
+        return;
+      }}
+      tray.hidden = false;
+      quote.textContent = text.length > 260 ? `${{text.slice(0, 260)}}...` : text;
+      meta.textContent = page > 0 ? `PDF 第 ${{page}} 页选区 · ${{text.length}} 字` : `PDF 选区 · ${{text.length}} 字`;
+    }}
+    window.peerassistSetPdfSelection = setPdfSelectionEvidence;
     function applyTraceFilter(status) {{
       const events = Array.from(document.querySelectorAll('.trace-list .trace-event'));
       let visibleCount = 0;
@@ -1560,6 +1608,32 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           .catch((error) => showToast(`复制失败：${{error.message}}`));
       }});
     }});
+    document.querySelectorAll('[data-pdf-selection-copy]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const selected = window.peerassistSelectedEvidence || {{}};
+        const prefix = selected.page ? `PDF 第 ${{selected.page}} 页选区\\n` : 'PDF 选区\\n';
+        copyText(`${{prefix}}${{selected.text || ''}}`)
+          .then(() => showToast('PDF 选区已复制'))
+          .catch((error) => showToast(`复制失败：${{error.message}}`));
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-selection-use]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const selected = window.peerassistSelectedEvidence || {{}};
+        if (!selected.text) {{
+          showToast('请先在 PDF 中选择文字');
+          return;
+        }}
+        document.querySelector('[data-panel="model-entry"]')?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        showToast('已作为智能审稿关注文本');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-selection-clear]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        setPdfSelectionEvidence({{text: '', page: null}});
+        showToast('已清空 PDF 选区');
+      }});
+    }});
     document.querySelectorAll('[data-trace-filter]').forEach((button) => {{
       button.addEventListener('click', () => applyTraceFilter(button.dataset.traceFilter || 'all'));
     }});
@@ -1582,7 +1656,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-agent-review-start]').forEach((button) => {{
       button.addEventListener('click', async () => {{
         const stream = document.querySelector('[data-agent-review-stream]');
-        const selectedText = String(window.getSelection()?.toString() || '').trim();
+        const selectedEvidence = window.peerassistSelectedEvidence || {{}};
+        const selectedText = String(
+          selectedEvidence.text
+            ? `[PDF 第 ${{selectedEvidence.page || '未知'}} 页选区]\\n${{selectedEvidence.text}}`
+            : window.getSelection()?.toString() || ''
+        ).trim();
         if (!stream) return;
         button.disabled = true;
         stream.textContent = '正在按方法论启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...';
@@ -1662,6 +1741,26 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         await renderPage();
         stage?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
       }};
+
+      function capturePdfTextSelection() {{
+        const selection = window.getSelection();
+        const text = String(selection?.toString() || '').replace(/\\s+/g, ' ').trim();
+        if (!text || !selection || selection.rangeCount === 0) return;
+        const anchorNode = selection.anchorNode;
+        const focusNode = selection.focusNode;
+        const isPdfSelection =
+          (anchorNode && textLayer?.contains(anchorNode)) ||
+          (focusNode && textLayer?.contains(focusNode));
+        if (!isPdfSelection) return;
+        window.peerassistSetPdfSelection?.({{text, page: pageNumber}});
+      }}
+
+      reader.addEventListener('mouseup', () => {{
+        window.setTimeout(capturePdfTextSelection, 0);
+      }});
+      reader.addEventListener('keyup', () => {{
+        window.setTimeout(capturePdfTextSelection, 0);
+      }});
 
       function collectPdfPageConcernCounts() {{
         const pageConcerns = new Map();
@@ -2767,6 +2866,17 @@ def _render_source_pdf_viewer() -> str:
       </div>
       <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">
         <span class="pdf-page-rail-label">PDF 页码导航</span>
+      </div>
+      <div class="pdf-selection-tray" data-pdf-selection-tray hidden>
+        <div>
+          <div class="pdf-selection-meta" data-pdf-selection-meta>尚未选择 PDF 文字</div>
+          <div class="pdf-selection-quote" data-pdf-selection-quote></div>
+        </div>
+        <div class="pdf-selection-actions">
+          <button class="inline-button" type="button" data-pdf-selection-copy>复制选区</button>
+          <button class="inline-button" type="button" data-pdf-selection-use>作为审稿关注</button>
+          <button class="inline-button" type="button" data-pdf-selection-clear>清空</button>
+        </div>
       </div>
       <div class="pdf-reader-stage" data-pdf-stage>
         <div class="pdf-loading" data-pdf-loading>正在渲染论文页面</div>
