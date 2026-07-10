@@ -52,6 +52,16 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     failed_event_count = _event_status_count(events, "failed")
     review_progress = _review_progress(pending_count=pending_count, actions_count=actions_count)
     runtime_health = _runtime_health_label(failed_event_count=failed_event_count)
+    stage_lifecycle = _review_stage_lifecycle(
+        queue_items=len(items) if isinstance(items, list) else 0,
+        evidence_preview_count=len(evidence_preview),
+        agent_runs=agent_runs,
+        events=events,
+        invocations=invocations,
+        pending_count=pending_count,
+        actions_count=actions_count,
+        failed_event_count=failed_event_count,
+    )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -138,7 +148,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .ops-strip {{
       width: min(1560px, calc(100% - 40px));
       margin: 10px auto 0;
-      display: none;
+      display: grid;
       grid-template-columns: 1.2fr repeat(4, minmax(120px, 1fr));
       gap: 10px;
       align-items: stretch;
@@ -146,7 +156,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .workflow-band {{
       width: min(1560px, calc(100% - 40px));
       margin: 12px auto 0;
-      display: none;
+      display: grid;
+      gap: 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: rgba(255, 255, 255, 0.9);
@@ -227,6 +238,66 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .workflow-title {{ font-weight: 820; font-size: 13px; }}
     .workflow-detail {{ color: var(--muted); font-size: 12px; margin-top: 2px; }}
+    .agent-stage-board {{
+      display: grid;
+      grid-template-columns: repeat(8, minmax(118px, 1fr));
+      gap: 8px;
+    }}
+    .agent-stage-card {{
+      position: relative;
+      min-height: 92px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+    }}
+    .agent-stage-card::before {{
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: #cbd8d4;
+    }}
+    .agent-stage-card[data-stage-status="completed"]::before {{ background: var(--accent); }}
+    .agent-stage-card[data-stage-status="active"]::before {{ background: var(--blue); }}
+    .agent-stage-card[data-stage-status="waiting"]::before {{ background: #b7bfc0; }}
+    .agent-stage-card[data-stage-status="blocked"]::before {{ background: var(--danger); }}
+    .agent-stage-top {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: space-between;
+    }}
+    .agent-stage-index {{
+      color: #7a8581;
+      font-size: 10px;
+      font-weight: 900;
+    }}
+    .agent-stage-status {{
+      border-radius: 999px;
+      padding: 2px 7px;
+      background: #eef3f2;
+      color: #4b5a56;
+      font-size: 10px;
+      font-weight: 850;
+      white-space: nowrap;
+    }}
+    .agent-stage-card[data-stage-status="completed"] .agent-stage-status {{ color: var(--accent-strong); background: #e8f5f2; }}
+    .agent-stage-card[data-stage-status="active"] .agent-stage-status {{ color: var(--blue); background: #edf4ff; }}
+    .agent-stage-card[data-stage-status="blocked"] .agent-stage-status {{ color: var(--danger); background: #fff0f0; }}
+    .agent-stage-title {{
+      margin-top: 8px;
+      color: #22302d;
+      font-size: 12px;
+      font-weight: 840;
+    }}
+    .agent-stage-copy {{
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }}
     .ops-card {{
       min-height: 76px;
       border: 1px solid var(--line);
@@ -1065,6 +1136,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .ops-strip {{ grid-template-columns: 1fr 1fr; }}
       .workflow-head {{ grid-template-columns: 1fr; }}
       .workflow-steps {{ grid-template-columns: 1fr; }}
+      .agent-stage-board {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
       .console-shell {{ grid-template-columns: 1fr; }}
       .paper-canvas {{ grid-template-columns: 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr 1fr; }}
@@ -1083,6 +1155,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
       .pdf-page-rail {{ padding: 8px; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
+      .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
       .agent-flow {{ grid-template-columns: 1fr 1fr; }}
       .item {{ grid-template-columns: 1fr; }}
@@ -1150,6 +1223,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <a class="workflow-step" href="#tool-trace"><span class="workflow-index">02</span><span><span class="workflow-title">调用追踪</span><span class="workflow-detail">核对 MCP、Skills 与内置能力生命周期</span></span></a>
       <a class="workflow-step" href="#human-confirmation"><span class="workflow-index">03</span><span><span class="workflow-title">人工闸门</span><span class="workflow-detail">确认、改写、降级、删除或暂挂</span></span></a>
     </nav>
+    {_render_agent_stage_board(stage_lifecycle)}
   </section>
   <main class="console-shell">
     <aside class="rail">
@@ -2819,6 +2893,122 @@ def _runtime_health_label(*, failed_event_count: int) -> str:
     return "调用链健康"
 
 
+def _review_stage_lifecycle(
+    *,
+    queue_items: int,
+    evidence_preview_count: int,
+    agent_runs: list[Any],
+    events: list[Any],
+    invocations: list[Any],
+    pending_count: int,
+    actions_count: int,
+    failed_event_count: int,
+) -> list[dict[str, str]]:
+    event_statuses = {
+        str(row.get("status") or "").replace(" ", "_").lower()
+        for row in events
+        if isinstance(row, dict)
+    }
+    has_trace_activity = any(status for status in event_statuses)
+    has_running_trace = bool(
+        event_statuses & {"queued", "started", "running", "progress", "approval_required"}
+    )
+    has_completed_trace = "completed" in event_statuses
+    has_agents = any(isinstance(row, dict) for row in agent_runs)
+    has_invocations = any(isinstance(row, dict) for row in invocations)
+    has_evidence = evidence_preview_count > 0 or queue_items > 0
+    has_queue = queue_items > 0
+
+    def trace_status() -> str:
+        if failed_event_count > 0:
+            return "blocked"
+        if has_completed_trace:
+            return "completed"
+        if has_running_trace:
+            return "active"
+        return "waiting"
+
+    human_status = "waiting"
+    if pending_count > 0:
+        human_status = "active"
+    elif actions_count > 0:
+        human_status = "completed"
+    elif has_queue:
+        human_status = "active"
+
+    report_status = "completed" if actions_count > 0 else "waiting"
+
+    return [
+        {
+            "index": "01",
+            "title": "排队",
+            "status": "completed" if has_queue or has_evidence else "active",
+            "copy": "恢复当前论文审稿任务与队列快照",
+        },
+        {
+            "index": "02",
+            "title": "解析论文",
+            "status": "completed" if has_evidence else "waiting",
+            "copy": f"已恢复 {evidence_preview_count} 个原文预览锚点",
+        },
+        {
+            "index": "03",
+            "title": "建立证据台账",
+            "status": "completed" if has_evidence else "waiting",
+            "copy": f"{queue_items} 条队列项已绑定证据",
+        },
+        {
+            "index": "04",
+            "title": "确定性核查",
+            "status": trace_status(),
+            "copy": "统计、图表、引用等规则检查进入 trace",
+        },
+        {
+            "index": "05",
+            "title": "多代理评审",
+            "status": "completed" if has_agents else ("active" if has_trace_activity else "waiting"),
+            "copy": f"{len(agent_runs)} 个代理结果可复盘",
+        },
+        {
+            "index": "06",
+            "title": "MCP / Skills 调用",
+            "status": "blocked" if failed_event_count > 0 else ("completed" if has_invocations or has_completed_trace else "waiting"),
+            "copy": f"{len(invocations)} 条能力调用记录",
+        },
+        {
+            "index": "07",
+            "title": "等待人工批准",
+            "status": human_status,
+            "copy": f"{pending_count} 条待确认，{actions_count} 条已记录动作",
+        },
+        {
+            "index": "08",
+            "title": "报告导出",
+            "status": report_status,
+            "copy": "确认后生成中英文 JSON / Markdown 报告",
+        },
+    ]
+
+
+def _render_agent_stage_board(stages: list[dict[str, str]]) -> str:
+    cards = []
+    for stage in stages:
+        status = str(stage.get("status") or "waiting").replace(" ", "_").lower()
+        cards.append(
+            f"""
+<div class="agent-stage-card" data-agent-stage="{html.escape(str(stage.get('index') or ''), quote=True)}" data-stage-status="{html.escape(status, quote=True)}">
+  <div class="agent-stage-top">
+    <span class="agent-stage-index">{html.escape(str(stage.get('index') or ''))}</span>
+    <span class="agent-stage-status">{html.escape(_localized_status(status))}</span>
+  </div>
+  <div class="agent-stage-title">{html.escape(str(stage.get('title') or ''))}</div>
+  <div class="agent-stage-copy">{html.escape(str(stage.get('copy') or ''))}</div>
+</div>
+"""
+        )
+    return f'<div class="agent-stage-board" data-agent-stage-board aria-label="PeerAssist 智能体审稿生命周期">{"".join(cards)}</div>'
+
+
 def _render_agent_timeline(agent_runs: list[Any]) -> str:
     rows = []
     for row in agent_runs:
@@ -2992,7 +3182,10 @@ def _localized_status(status: str) -> str:
         "pending": "待处理",
         "queued": "已排队",
         "started": "运行中",
+        "active": "进行中",
+        "waiting": "等待",
         "completed": "已完成",
+        "blocked": "需复核",
         "failed": "失败",
         "approval_required": "需审批",
         "unknown": "未知",

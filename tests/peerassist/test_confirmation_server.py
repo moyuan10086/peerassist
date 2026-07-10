@@ -203,6 +203,17 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "https://deepkey.top/v1" in html
     assert "下一步动作" in html
     assert "data-agent-workflow" in html
+    assert "data-agent-stage-board" in html
+    assert "PeerAssist 智能体审稿生命周期" in html
+    assert "解析论文" in html
+    assert "建立证据台账" in html
+    assert "确定性核查" in html
+    assert "多代理评审" in html
+    assert "MCP / Skills 调用" in html
+    assert "等待人工批准" in html
+    assert "报告导出" in html
+    assert 'data-stage-status="completed"' in html
+    assert 'data-stage-status="active"' in html
     assert "data-stream-log" in html
     assert "data-review-progress" in html
     assert "Evidence Preview" in html
