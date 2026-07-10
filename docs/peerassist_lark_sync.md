@@ -46,3 +46,18 @@ model keys, paper secrets, or reviewer-private material here.
 - Reviewer crossover analysis now emits paired_reviewer_records by sample_id and reviewer_id with baseline_core_recall, assisted_core_recall, delta, and regression flag.
 - Added recall_regression_warnings so the real reviewer experiment can catch reviewer/sample-level core recall drops instead of relying only on aggregate mean delta.
 - Verification: .venv/bin/python -m pytest -q -> 368 passed, 1 skipped, 3 deselected.
+
+## 2026-07-10 23:57 CST - Crossover CLI recall regression gate
+
+- GitHub branch: https://github.com/moyuan10086/peerassist/tree/peerassist-mvp
+- Commit: ab3e569 fix: fail crossover CLI on recall regression
+- The peerassist-eval crossover command now returns a non-zero exit code when recall_regression_warnings are present, and includes those warnings in the CLI summary.
+- This turns the "do not reduce core problem recall" crossover constraint into an executable gate instead of a report-only warning.
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+
+## 2026-07-11 00:05 CST - Chinese UI and Feishu log repair
+
+- The confirmation console UI was localized into Chinese: page title, panels, metrics, stream state, action buttons, status pills, common agent names, common deterministic concern copy, and empty states.
+- Evidence text remains in its source language to avoid mistranslating paper evidence.
+- The Feishu document had append-order drift because earlier updates anchored on heading blocks; revision 24 adds a complete Chinese repair section named "十、2026-07-10 中文增量日志修复版（完整）".
+- Future Feishu updates should fetch structure first and anchor to a real tail content block, not a heading-only block.

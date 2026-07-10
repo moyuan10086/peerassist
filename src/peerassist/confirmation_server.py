@@ -17,7 +17,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     items = state.get("queue", {}).get("items", [])
     rows = "\n".join(_render_item(item) for item in items if isinstance(item, dict))
     if not rows:
-        rows = '<section class="empty">No confirmation items are available.</section>'
+        rows = '<section class="empty">暂无需要人工确认的审稿关注点。</section>'
     state_json = html.escape(json.dumps(state, ensure_ascii=False), quote=False)
     runtime = state.get("runtime") if isinstance(state.get("runtime"), dict) else {}
     mode = str(runtime.get("mode") or "unknown")
@@ -32,11 +32,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         else []
     )
     return f"""<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PeerAssist Review Console</title>
+  <title>PeerAssist 论文审核辅助台</title>
   <style>
     :root {{
       color-scheme: light;
@@ -57,7 +57,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      font: 14px/1.5 "Aptos", "Segoe UI", ui-sans-serif, sans-serif;
+      font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", ui-sans-serif, sans-serif;
       color: var(--ink);
       background: var(--paper);
     }}
@@ -386,70 +386,70 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     <div class="brand">
       <div class="mark">PA</div>
       <div>
-        <h1>PeerAssist Review Console</h1>
-        <div class="subtitle">Evidence-grounded peer review queue for <code>{html.escape(paper_id)}</code></div>
+        <h1>PeerAssist 论文审核辅助台</h1>
+        <div class="subtitle">面向 <code>{html.escape(paper_id)}</code> 的证据审稿与人工确认队列</div>
       </div>
     </div>
     <div class="meta runtime-strip">
-      <span class="mode-badge">{html.escape(mode or "unknown")} mode</span>
-      <span class="stream-chip"><span class="stream-dot"></span><span id="stream-status">stream connecting</span></span>
-      <span id="runtime-status">{len(events)} trace events</span>
+      <span class="mode-badge">{_localized_mode(mode)}模式</span>
+      <span class="stream-chip"><span class="stream-dot"></span><span id="stream-status">正在连接事件流</span></span>
+      <span id="runtime-status">{len(events)} 条追踪事件</span>
     </div>
   </header>
   <main class="console-shell">
     <aside class="rail">
       <section class="panel" data-panel="run-summary">
         <div class="panel-header">
-          <p class="panel-title">Run Summary</p>
-          <div class="panel-subtitle">Recoverable state from PeerAssist artifacts</div>
+          <p class="panel-title">运行摘要</p>
+          <div class="panel-subtitle">从 PeerAssist 产物恢复的当前状态</div>
         </div>
         <div class="metric-grid">
-          <div class="metric"><div class="metric-value">{pending_count}</div><div class="metric-label">Pending items</div></div>
-          <div class="metric"><div class="metric-value">{actions_count}</div><div class="metric-label">Recorded actions</div></div>
-          <div class="metric"><div class="metric-value">{len(agent_runs)}</div><div class="metric-label">Agent runs</div></div>
-          <div class="metric"><div class="metric-value">{len(events)}</div><div class="metric-label">Trace events</div></div>
+          <div class="metric"><div class="metric-value">{pending_count}</div><div class="metric-label">待确认项</div></div>
+          <div class="metric"><div class="metric-value">{actions_count}</div><div class="metric-label">已记录动作</div></div>
+          <div class="metric"><div class="metric-value">{len(agent_runs)}</div><div class="metric-label">代理运行</div></div>
+          <div class="metric"><div class="metric-value">{len(events)}</div><div class="metric-label">追踪事件</div></div>
         </div>
         <div class="run-map" data-agent-runtime-strip>
-          <div class="run-map-row"><span>evidence</span><span class="run-map-bar" style="width: {min(100, max(18, len(events) * 8))}%"></span></div>
-          <div class="run-map-row"><span>agents</span><span class="run-map-bar" style="width: {min(100, max(18, len(agent_runs) * 18))}%"></span></div>
-          <div class="run-map-row"><span>human queue</span><span class="run-map-bar" style="width: {min(100, max(18, pending_count * 24))}%"></span></div>
+          <div class="run-map-row"><span>证据链</span><span class="run-map-bar" style="width: {min(100, max(18, len(events) * 8))}%"></span></div>
+          <div class="run-map-row"><span>代理层</span><span class="run-map-bar" style="width: {min(100, max(18, len(agent_runs) * 18))}%"></span></div>
+          <div class="run-map-row"><span>人工队列</span><span class="run-map-bar" style="width: {min(100, max(18, pending_count * 24))}%"></span></div>
         </div>
       </section>
       <section class="panel" data-panel="agent-runs">
         <div class="panel-header">
-          <p class="panel-title">Agent Timeline</p>
-          <div class="panel-subtitle">Drafts, warnings, and incomplete checks</div>
+          <p class="panel-title">代理时间线</p>
+          <div class="panel-subtitle">草稿、警告与未完成核查</div>
         </div>
         {_render_agent_timeline(agent_runs)}
       </section>
     </aside>
     <section class="panel queue" data-panel="review-queue">
       <div class="panel-header">
-        <p class="panel-title">Evidence Review Queue</p>
-        <div class="panel-subtitle">Confirm, rewrite, downgrade, delete, or keep pending each concern</div>
+        <p class="panel-title">证据审稿队列</p>
+        <div class="panel-subtitle">逐条确认、改写、降级、删除或暂挂关注点</div>
       </div>
       <div class="queue-body">{rows}</div>
     </section>
     <aside class="right-stack">
       <section class="panel" data-panel="tool-trace">
         <div class="panel-header">
-          <p class="panel-title">Tool Trace</p>
-          <div class="panel-subtitle">MCP, Skills, and builtin capability lifecycle</div>
+          <p class="panel-title">工具追踪</p>
+          <div class="panel-subtitle">MCP、Skills 与内置能力调用生命周期</div>
         </div>
         {_render_trace_events(events)}
       </section>
       <section class="panel" data-panel="human-confirmation">
         <div class="panel-header">
-          <p class="panel-title">Human Confirmation</p>
-          <div class="panel-subtitle">No confirmed concern is exported without evidence</div>
+          <p class="panel-title">人工确认</p>
+          <div class="panel-subtitle">没有证据的关注点不会进入确认报告</div>
         </div>
         <div class="confirmation-note">
-          Review edits are written to <code>human_confirmations.json</code>, then reports are regenerated in English and Chinese. Refreshing this page recovers queue, actions, paths, and trace state from disk.
+          审稿人的每次编辑都会写入 <code>human_confirmations.json</code>，随后重新生成中文与英文报告。刷新页面时会从磁盘恢复队列、动作、路径和工具追踪状态。
         </div>
         <div class="stream-console" data-panel="stream-console">
-          <div><span class="stream-key">event:</span> state</div>
-          <div><span class="stream-key">transport:</span> /api/events + /api/state fallback</div>
-          <div><span class="stream-key">contract:</span> evidence-bound human decision log</div>
+          <div><span class="stream-key">事件：</span> state</div>
+          <div><span class="stream-key">通道：</span> /api/events + /api/state 兜底</div>
+          <div><span class="stream-key">约束：</span> 证据绑定的人工决策日志</div>
         </div>
         {_render_invocations(invocations)}
       </section>
@@ -468,7 +468,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         timestamp: new Date().toISOString(),
         previous_text: item.dataset.previousText || '',
         new_text: text,
-        reason: action === 'rewrite' || action === 'downgrade' ? 'Edited in PeerAssist Review Console.' : ''
+        reason: action === 'rewrite' || action === 'downgrade' ? '在 PeerAssist 论文审核辅助台中编辑。' : ''
       }};
       const response = await fetch('/api/decision', {{
         method: 'POST',
@@ -488,11 +488,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const runtime = state.runtime || {{}};
       const status = document.getElementById('runtime-status');
       if (status) {{
-        status.textContent = `${{runtime.tool_event_count || 0}} trace events · ${{state.actions_count || 0}} actions`;
+        status.textContent = `${{runtime.tool_event_count || 0}} 条追踪事件 · ${{state.actions_count || 0}} 个动作`;
       }}
       const streamStatus = document.getElementById('stream-status');
       if (streamStatus) {{
-        streamStatus.textContent = source === 'stream' ? 'stream live' : 'poll fallback';
+        streamStatus.textContent = source === 'stream' ? '事件流已连接' : '轮询兜底中';
       }}
       const topbar = document.querySelector('.topbar');
       if (topbar) {{
@@ -645,10 +645,10 @@ def _render_item(item: dict[str, Any]) -> str:
         if isinstance(row, dict)
     )
     if not evidence_rows:
-        evidence_rows = '<div class="evidence-row"><span>No evidence attached.</span></div>'
+        evidence_rows = '<div class="evidence-row"><span>暂无绑定证据。</span></div>'
     actions = item.get("allowed_actions") if isinstance(item.get("allowed_actions"), list) else []
     buttons = "".join(
-        f'<button type="button" data-action="{html.escape(str(action))}">{html.escape(str(action).replace("_", " ").title())}</button>'
+        f'<button type="button" data-action="{html.escape(str(action))}">{html.escape(_localized_action(str(action)))}</button>'
         for action in actions
     )
     source_agents = item.get("source_agent_ids") if isinstance(item.get("source_agent_ids"), list) else []
@@ -661,16 +661,16 @@ def _render_item(item: dict[str, Any]) -> str:
 <section class="item" data-concern-id="{html.escape(str(item.get('id', '')), quote=True)}" data-previous-text="{previous_text}">
   <div>
     <div class="tags">
-      <span class="tag">{html.escape(str(item.get('status', '')))}</span>
-      <span class="tag level">{html.escape(str(item.get('level', '')))}</span>
-      <span class="tag">{html.escape(str(item.get('category', '')))}</span>
+      <span class="tag">{html.escape(_localized_status(str(item.get('status', ''))))}</span>
+      <span class="tag level">{html.escape(_localized_level(str(item.get('level', ''))))}</span>
+      <span class="tag">{html.escape(_localized_category(str(item.get('category', ''))))}</span>
       {source_agent_tags}
     </div>
-    <h2>{html.escape(str(item.get('title', 'Untitled concern')))}</h2>
-    <p class="copy-block"><span class="label">Impact</span><br>{html.escape(str(item.get('impact', '')))}</p>
-    <p class="copy-block"><span class="label">Benign explanation</span><br>{html.escape(str(item.get('benign_explanation', '')))}</p>
-    <div class="evidence"><span class="label">Evidence</span>{evidence_rows}</div>
-    <textarea aria-label="Suggested author action">{html.escape(str(item.get('author_action', '')))}</textarea>
+    <h2>{html.escape(_localized_copy(str(item.get('title', '未命名关注点'))))}</h2>
+    <p class="copy-block"><span class="label">影响</span><br>{html.escape(_localized_copy(str(item.get('impact', ''))))}</p>
+    <p class="copy-block"><span class="label">可能的良性解释</span><br>{html.escape(_localized_copy(str(item.get('benign_explanation', ''))))}</p>
+    <div class="evidence"><span class="label">证据</span>{evidence_rows}</div>
+    <textarea aria-label="建议作者处理方式">{html.escape(_localized_copy(str(item.get('author_action', ''))))}</textarea>
   </div>
   <div class="actions">{buttons}</div>
 </section>
@@ -684,8 +684,8 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
             continue
         status = str(row.get("status") or "unknown")
         detail = (
-            f"{int(row.get('draft_count') or 0)} drafts"
-            f" · {int(row.get('warning_count') or 0)} warnings"
+            f"{int(row.get('draft_count') or 0)} 条草稿"
+            f" · {int(row.get('warning_count') or 0)} 条警告"
         )
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         metadata_text = _compact_metadata(metadata)
@@ -702,7 +702,7 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
 """
         )
     if not rows:
-        rows.append('<div class="agent-detail">No agent results have been recorded yet.</div>')
+        rows.append('<div class="agent-detail">暂无代理运行结果。</div>')
     return f'<div class="agent-timeline">{"".join(rows)}</div>'
 
 
@@ -711,7 +711,7 @@ def _render_trace_events(events: list[Any]) -> str:
     for row in events[-8:]:
         if not isinstance(row, dict):
             continue
-        summary = str(row.get("output_summary") or row.get("input_summary") or "")
+        summary = _localized_copy(str(row.get("output_summary") or row.get("input_summary") or ""))
         duration = row.get("duration_ms")
         duration_text = f" · {int(duration)} ms" if isinstance(duration, int) else ""
         status = str(row.get("status") or "unknown")
@@ -722,13 +722,13 @@ def _render_trace_events(events: list[Any]) -> str:
     <div class="trace-tool">{html.escape(str(row.get('tool') or row.get('call_id') or 'tool'))}</div>
     {_status_pill(status)}
   </div>
-  <div class="trace-summary">{html.escape(str(row.get('agent_id') or 'peerassist'))}{html.escape(duration_text)}</div>
+  <div class="trace-summary">{html.escape(_display_name(str(row.get('agent_id') or 'peerassist')))}{html.escape(duration_text)}</div>
   <div class="trace-summary">{html.escape(summary)}</div>
 </div>
 """
         )
     if not rows:
-        rows.append('<div class="trace-summary">No tool trace events have been recorded yet.</div>')
+        rows.append('<div class="trace-summary">暂无工具追踪事件。</div>')
     return f'<div class="trace-list">{"".join(rows)}</div>'
 
 
@@ -746,13 +746,13 @@ def _render_invocations(invocations: list[Any]) -> str:
     <div class="trace-tool">{html.escape(str(row.get('capability_name') or row.get('call_id') or 'capability'))}</div>
     {_status_pill(status)}
   </div>
-  <div class="trace-summary">source={html.escape(str(row.get('source') or ''))} · attempts={html.escape(str(row.get('attempts') or 0))}</div>
-  <div class="trace-summary">artifacts: {html.escape(artifacts or 'none')}</div>
+  <div class="trace-summary">来源={html.escape(_localized_source(str(row.get('source') or '')))} · 尝试={html.escape(str(row.get('attempts') or 0))}</div>
+  <div class="trace-summary">产物：{html.escape(artifacts or '无')}</div>
 </div>
 """
         )
     if not rows:
-        rows.append('<div class="trace-summary">No capability invocations are available.</div>')
+        rows.append('<div class="trace-summary">暂无能力调用记录。</div>')
     return f'<div class="invocation-list">{"".join(rows)}</div>'
 
 
@@ -760,19 +760,29 @@ def _status_pill(status: str) -> str:
     normalized = status.replace(" ", "_").lower()
     return (
         f'<span class="status-pill status-{html.escape(normalized, quote=True)}">'
-        f"{html.escape(status or 'unknown')}"
+        f"{html.escape(_localized_status(status))}"
         "</span>"
     )
 
 
 def _display_name(value: str) -> str:
-    words = [word for word in value.replace("-", "_").split("_") if word]
-    return " ".join(word.capitalize() for word in words) if words else "Agent"
+    localized = {
+        "statistics_agent": "统计核查代理",
+        "figure_table_agent": "图表核查代理",
+        "defense_agent": "反证审查代理",
+        "integrator_agent": "综合整理代理",
+        "citation_agent": "引用核查代理",
+        "peerassist_stage": "PeerAssist 阶段",
+        "peerassist": "PeerAssist",
+    }.get(value)
+    if localized:
+        return localized
+    return f"代理：{value}" if value else "代理"
 
 
 def _compact_metadata(metadata: dict[str, Any]) -> str:
     if not metadata:
-        return "no metadata"
+        return "暂无元数据"
     parts: list[str] = []
     for key, value in metadata.items():
         if isinstance(value, list):
@@ -781,10 +791,106 @@ def _compact_metadata(metadata: dict[str, Any]) -> str:
                 shown += f", +{len(value) - 2}"
         else:
             shown = str(value)
-        parts.append(f"{key}={shown}")
+        parts.append(f"{_localized_metadata_key(str(key))}={shown}")
         if len(parts) >= 2:
             break
     return " · ".join(parts)
+
+
+def _localized_mode(mode: str) -> str:
+    return {
+        "fast": "快速",
+        "standard": "标准",
+        "deep": "深度",
+        "unknown": "未知",
+    }.get(str(mode or "").lower(), str(mode or "未知"))
+
+
+def _localized_action(action: str) -> str:
+    return {
+        "confirm": "确认",
+        "rewrite": "改写",
+        "downgrade": "降级",
+        "delete": "删除",
+        "mark_pending": "暂挂",
+    }.get(action, action.replace("_", " "))
+
+
+def _localized_status(status: str) -> str:
+    return {
+        "pending_human_confirmation": "待人工确认",
+        "confirmed": "已确认",
+        "rewritten": "已改写",
+        "downgraded": "已降级",
+        "deleted": "已删除",
+        "mark_pending": "暂挂",
+        "pending": "待处理",
+        "queued": "已排队",
+        "started": "运行中",
+        "completed": "已完成",
+        "failed": "失败",
+        "approval_required": "需审批",
+        "unknown": "未知",
+    }.get(str(status or "").lower(), str(status or "未知"))
+
+
+def _localized_level(level: str) -> str:
+    return {
+        "clarification_needed": "需要澄清",
+        "major": "主要问题",
+        "minor": "次要问题",
+        "critical": "严重问题",
+        "info": "信息提示",
+    }.get(str(level or "").lower(), str(level or "未分级"))
+
+
+def _localized_category(category: str) -> str:
+    return {
+        "statistics": "统计",
+        "figure_table": "图表",
+        "citation": "引用",
+        "methodology": "方法",
+        "reproducibility": "可复现",
+        "manual": "人工",
+    }.get(str(category or "").lower(), str(category or "未分类"))
+
+
+def _localized_source(source: str) -> str:
+    return {
+        "builtin": "内置",
+        "mcp": "MCP",
+        "skill": "技能",
+    }.get(str(source or "").lower(), str(source or "未知"))
+
+
+def _localized_metadata_key(key: str) -> str:
+    return {
+        "lead_count": "线索数",
+        "pressure_tests": "反证测试",
+        "integrated_from": "整合来源",
+    }.get(key, key)
+
+
+def _localized_copy(text: str) -> str:
+    replacements = {
+        "Reported percentage needs clarification": "报告百分比需要澄清",
+        "Significance stars need clarification": "显著性星号需要澄清",
+        "Figure Table Reference": "图表引用需要核查",
+        "This may affect whether the reported result supports the paper's claim.": "这可能影响论文结果是否支持其主张。",
+        "rounding; different denominator; filtered sample": "四舍五入；分母不同；样本经过筛选",
+        "table transcription issue; star legend differs for this table; p-value was rounded from a more precise value": "表格转录问题；该表使用不同星号图例；p 值由更精确数值四舍五入而来",
+        "parser missed a caption; supplementary material reference; label formatting changed": "解析器可能漏掉标题；引用的是补充材料；标签格式发生变化",
+        "Please clarify the calculation basis and provide enough detail for readers to reproduce it.": "请澄清计算依据，并提供足够细节以便读者复核。",
+        "run deterministic PeerAssist consistency checks": "运行 PeerAssist 确定性一致性核查",
+        "deterministic check leads": "确定性核查线索",
+        "run local PeerAssist agents in fast mode": "以快速模式运行本地 PeerAssist 代理",
+        "resolve FactReview parse artifacts": "解析 FactReview 产物",
+        "provider=mineru; warnings=0": "provider=mineru；警告=0",
+        "mode=fast": "模式=快速",
+        "6 evidence items": "6 条证据",
+        "agent_results.json": "agent_results.json",
+    }
+    return replacements.get(text, text)
 
 
 if __name__ == "__main__":  # pragma: no cover

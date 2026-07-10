@@ -155,7 +155,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
 
     html = render_confirmation_page(run_dir=run_dir, paper_id="demo")
 
-    assert "PeerAssist Review Console" in html
+    assert "PeerAssist 论文审核辅助台" in html
     assert "data-peerassist-agent-console" in html
     assert 'data-panel="review-queue"' in html
     assert 'data-panel="tool-trace"' in html
@@ -166,8 +166,11 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "agent-timeline" in html
     assert 'data-stream-state="connecting"' in html
     assert "new EventSource('/api/events')" in html
-    assert "Statistics Agent" in html
-    assert "Reported percentage needs clarification" in html
+    assert "统计核查代理" in html
+    assert "报告百分比需要澄清" in html
+    assert "确认" in html
+    assert "改写" in html
+    assert "证据审稿队列" in html
     assert "p.1 line 1" in html
     assert "data-action=\"confirm\"" in html
     assert "data-action=\"rewrite\"" in html
