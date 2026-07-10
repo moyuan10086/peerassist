@@ -168,6 +168,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "运行态指挥条" in html
     assert "会话导览" in html
     assert "证据焦点" in html
+    assert "产物工作区" in html
+    assert "下一步动作" in html
+    assert 'data-panel="artifact-workspace"' in html
+    assert 'data-panel="next-actions"' in html
+    assert "confirmation_review_queue.json" in html
+    assert "human_confirmations.json" in html
     assert "agent-timeline" in html
     assert 'data-stream-state="connecting"' in html
     assert "new EventSource('/api/events')" in html

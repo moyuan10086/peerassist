@@ -31,6 +31,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         if isinstance(state.get("capability_invocations"), list)
         else []
     )
+    paths = state.get("paths") if isinstance(state.get("paths"), dict) else {}
     evidence_count = _evidence_count(items)
     completed_event_count = _event_status_count(events, "completed")
     failed_event_count = _event_status_count(events, "failed")
@@ -401,6 +402,24 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .focus-title {{ font-weight: 780; font-size: 12px; }}
     .focus-meta {{ color: var(--muted); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }}
+    .artifact-list, .next-action-list {{
+      padding: 12px 14px 16px;
+      display: grid;
+      gap: 10px;
+    }}
+    .artifact-row, .next-action-row {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 10px;
+    }}
+    .artifact-name, .next-action-title {{ font-size: 12px; font-weight: 800; }}
+    .artifact-path, .next-action-copy {{
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }}
     .trace-event {{
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -545,6 +564,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           <a class="nav-step" href="#human-confirmation"><span class="step-index">3</span><span><span class="step-title">人工闸门</span><span class="step-copy">确认、改写、降级或删除</span></span></a>
         </nav>
       </section>
+      <section class="panel" data-panel="next-actions">
+        <div class="panel-header">
+          <p class="panel-title">下一步动作</p>
+          <div class="panel-subtitle">按当前运行态给出审稿人操作提示</div>
+        </div>
+        {_render_next_actions(pending_count=pending_count, failed_event_count=failed_event_count, actions_count=actions_count)}
+      </section>
       <section class="panel" data-panel="agent-runs">
         <div class="panel-header">
           <p class="panel-title">代理时间线</p>
@@ -567,6 +593,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           <div class="panel-subtitle">优先核对当前队列绑定的证据位置</div>
         </div>
         {_render_evidence_focus(items)}
+      </section>
+      <section class="panel" data-panel="artifact-workspace">
+        <div class="panel-header">
+          <p class="panel-title">产物工作区</p>
+          <div class="panel-subtitle">队列、人工确认、代理结果与 trace 文件</div>
+        </div>
+        {_render_artifact_workspace(paths)}
       </section>
       <section class="panel" data-panel="tool-trace" id="tool-trace">
         <div class="panel-header">
@@ -897,6 +930,61 @@ def _render_evidence_focus(items: list[Any]) -> str:
     if not rows:
         rows.append('<div class="trace-summary">暂无证据焦点。</div>')
     return f'<div class="evidence-focus">{"".join(rows)}</div>'
+
+
+def _render_artifact_workspace(paths: dict[str, Any]) -> str:
+    labels = {
+        "queue": "审稿队列",
+        "confirmations": "人工确认",
+        "agent_results": "代理结果",
+        "capability_invocations": "能力调用",
+        "tool_trace": "工具追踪",
+    }
+    rows: list[str] = []
+    for key, label in labels.items():
+        value = str(paths.get(key) or "").strip()
+        if not value:
+            continue
+        rows.append(
+            f"""
+<div class="artifact-row">
+  <div class="artifact-name">{html.escape(label)}</div>
+  <div class="artifact-path">{html.escape(value)}</div>
+</div>
+"""
+        )
+    if not rows:
+        rows.append('<div class="trace-summary">暂无可展示产物路径。</div>')
+    return f'<div class="artifact-list">{"".join(rows)}</div>'
+
+
+def _render_next_actions(
+    *, pending_count: int, failed_event_count: int, actions_count: int
+) -> str:
+    rows = [
+        (
+            "处理待确认项",
+            f"当前还有 {pending_count} 条关注点等待确认、改写、降级、删除或暂挂。",
+        ),
+        (
+            "复核工具异常",
+            f"当前记录到 {failed_event_count} 个失败工具事件；若非 0，先查看右侧工具追踪。",
+        ),
+        (
+            "导出确认报告",
+            f"已记录 {actions_count} 个动作；完成确认后刷新报告产物并检查中英文输出。",
+        ),
+    ]
+    rendered = "".join(
+        f"""
+<div class="next-action-row">
+  <div class="next-action-title">{html.escape(title)}</div>
+  <div class="next-action-copy">{html.escape(copy)}</div>
+</div>
+"""
+        for title, copy in rows
+    )
+    return f'<div class="next-action-list">{rendered}</div>'
 
 
 def _render_agent_timeline(agent_runs: list[Any]) -> str:

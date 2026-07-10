@@ -100,3 +100,12 @@ model keys, paper secrets, or reviewer-private material here.
 - Public URL verified: http://101.47.158.17:8766/api/events returns retry: 15000, event: state, event: heartbeat, and event: done.
 - Feishu document revision 42 adds section "十四、2026-07-11 PeerAssist SSE 数据流增强".
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+
+## 2026-07-11 01:31 CST - PeerAssist artifact workspace and next actions
+
+- The confirmation console now includes "产物工作区" and "下一步动作" panels.
+- Artifact workspace is derived from /api/state paths and shows review queue, human confirmations, agent results, capability invocations, and tool trace artifacts.
+- Next actions summarize pending confirmations, failed tool events, and recorded human actions for reviewer workflow guidance.
+- Public URL verified: http://101.47.158.17:8766/ returns the new panels and artifact paths.
+- Feishu document revision 43 adds section "十五、2026-07-11 PeerAssist 产物工作区与下一步动作".
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
