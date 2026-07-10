@@ -1441,6 +1441,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         <div class="queue-filterbar" data-queue-filterbar>
           <div class="queue-segmented" aria-label="审稿队列筛选">
             <button class="queue-filter-button" type="button" data-queue-filter="all" aria-pressed="true">全部</button>
+            <button class="queue-filter-button" type="button" data-queue-filter="current-page" aria-pressed="false">当前页</button>
             <button class="queue-filter-button" type="button" data-queue-filter="major" aria-pressed="false">主要问题</button>
             <button class="queue-filter-button" type="button" data-queue-filter="clarification" aria-pressed="false">需澄清</button>
             <button class="queue-filter-button" type="button" data-queue-filter="pdf" aria-pressed="false">有 PDF 证据</button>
@@ -1612,13 +1613,16 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const activeFilter = nextFilter || document.querySelector('[data-queue-filter][aria-pressed="true"]')?.dataset.queueFilter || 'all';
       const query = String(document.querySelector('[data-queue-search]')?.value || '').trim().toLowerCase();
       const items = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      const currentPdfPage = Number(window.peerassistCurrentPdfPage || 0);
       let visibleCount = 0;
       items.forEach((item) => {{
         const level = String(item.dataset.concernLevel || '').toLowerCase();
-        const hasPdfPage = Number(item.dataset.pdfPage || 0) > 0;
+        const itemPdfPage = Number(item.dataset.pdfPage || 0);
+        const hasPdfPage = itemPdfPage > 0;
         const searchable = String(item.dataset.concernSearch || item.textContent || '').toLowerCase();
         const matchesFilter =
           activeFilter === 'all' ||
+          (activeFilter === 'current-page' && currentPdfPage > 0 && itemPdfPage === currentPdfPage) ||
           (activeFilter === 'major' && level.includes('major')) ||
           (activeFilter === 'clarification' && level.includes('clarification')) ||
           (activeFilter === 'pdf' && hasPdfPage);
@@ -1631,10 +1635,14 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         button.setAttribute('aria-pressed', String(button.dataset.queueFilter === activeFilter));
       }});
       const count = document.querySelector('[data-queue-result-count]');
-      if (count) count.textContent = `${{visibleCount}} / ${{items.length}} 条关注点`;
+      if (count) {{
+        const pageSuffix = activeFilter === 'current-page' && currentPdfPage > 0 ? ` · PDF 第 ${{currentPdfPage}} 页` : '';
+        count.textContent = `${{visibleCount}} / ${{items.length}} 条关注点${{pageSuffix}}`;
+      }}
       const empty = document.querySelector('[data-queue-empty]');
       if (empty) empty.hidden = visibleCount > 0;
     }}
+    window.peerassistApplyQueueFilter = applyQueueFilter;
     function clearAnnotationActiveState() {{
       document.querySelectorAll('[data-active="true"]').forEach((node) => {{
         delete node.dataset.active;
@@ -1843,6 +1851,14 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         if (loading) loading.hidden = !visible;
       }}
 
+      function syncCurrentPdfPage() {{
+        window.peerassistCurrentPdfPage = pageNumber;
+        const activeQueueFilter = document.querySelector('[data-queue-filter][aria-pressed="true"]')?.dataset.queueFilter;
+        if (activeQueueFilter === 'current-page') {{
+          window.peerassistApplyQueueFilter?.('current-page');
+        }}
+      }}
+
       function updateButtons() {{
         reader.querySelectorAll('[data-pdf-action]').forEach((button) => {{
           const action = button.dataset.pdfAction;
@@ -1853,6 +1869,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         reader.querySelectorAll('[data-pdf-page-jump]').forEach((button) => {{
           button.setAttribute('aria-current', button.dataset.pdfPageJump === String(pageNumber) ? 'page' : 'false');
         }});
+        syncCurrentPdfPage();
       }}
 
       window.peerassistPdfGoToPage = async (page) => {{

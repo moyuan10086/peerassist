@@ -218,6 +218,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-review-progress" in html
     assert "data-queue-filterbar" in html
     assert 'data-queue-filter="all"' in html
+    assert 'data-queue-filter="current-page"' in html
     assert 'data-queue-filter="major"' in html
     assert 'data-queue-filter="clarification"' in html
     assert 'data-queue-filter="pdf"' in html
@@ -225,8 +226,11 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-queue-result-count" in html
     assert "data-queue-empty" in html
     assert "applyQueueFilter" in html
+    assert "peerassistApplyQueueFilter" in html
+    assert "peerassistCurrentPdfPage" in html
     assert "搜索队列" in html
     assert "全部" in html
+    assert "当前页" in html
     assert "主要问题" in html
     assert "需澄清" in html
     assert "有 PDF 证据" in html
@@ -288,6 +292,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "buildPdfPageRail" in html
     assert "collectPdfPageConcernCounts" in html
     assert "annotatePdfPageRail" in html
+    assert "syncCurrentPdfPage" in html
     assert "data-pdf-page-jump" in html
     assert "data-pdf-concern-count" in html
     assert "data-has-concern" in html
