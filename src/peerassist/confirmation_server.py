@@ -747,6 +747,58 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 900;
       overflow-wrap: anywhere;
     }}
+    .pdf-agent-phase-rail {{
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }}
+    .pdf-agent-phase-step {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 7px 8px;
+    }}
+    .pdf-agent-phase-step[data-phase-state="completed"] {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-agent-phase-step[data-phase-state="active"] {{
+      border-color: #0f766e;
+      background: #12302b;
+      color: #fff;
+    }}
+    .pdf-agent-phase-index {{
+      color: #0f766e;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-agent-phase-step[data-phase-state="active"] .pdf-agent-phase-index {{
+      color: #9df2de;
+    }}
+    .pdf-agent-phase-title {{
+      margin-top: 3px;
+      color: inherit;
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }}
+    .pdf-agent-phase-copy {{
+      margin-top: 2px;
+      color: #66736f;
+      font-size: 10px;
+      line-height: 1.28;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-agent-phase-step[data-phase-state="active"] .pdf-agent-phase-copy {{
+      color: #d8fff5;
+    }}
     .pdf-runtime-pulse {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1868,6 +1920,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
+      .pdf-agent-phase-rail {{ grid-template-columns: 1fr 1fr; }}
       .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
@@ -2222,7 +2275,28 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const labels = {{fast: '快速', standard: '标准', deep: '深度'}};
       return labels[mode] || labels.fast;
     }}
-    function setPdfAgentReviewMode(mode) {{
+    function setPdfAgentPhase(phase, detail, kind = '') {{
+      const phases = ['prepare', 'evidence', 'model', 'queue', 'human'];
+      const activePhase = phases.includes(phase) ? phase : 'prepare';
+      const activeIndex = phases.indexOf(activePhase);
+      document.querySelectorAll('[data-pdf-agent-phase-rail]').forEach((rail) => {{
+        rail.dataset.activePhase = activePhase;
+      }});
+      document.querySelectorAll('[data-pdf-agent-phase]').forEach((step) => {{
+        const index = phases.indexOf(step.dataset.pdfAgentPhase || '');
+        const state = index < activeIndex ? 'completed' : index === activeIndex ? 'active' : 'pending';
+        step.dataset.phaseState = state;
+        if (index === activeIndex && detail) {{
+          const copy = step.querySelector('[data-pdf-agent-phase-copy]');
+          if (copy) copy.textContent = detail;
+        }}
+      }});
+      if (kind && detail) {{
+        appendPdfActivityLine(kind, detail);
+      }}
+    }}
+    window.peerassistSetPdfAgentPhase = setPdfAgentPhase;
+    function setPdfAgentReviewMode(mode, quiet = false) {{
       const nextMode = ['fast', 'standard', 'deep'].includes(mode) ? mode : 'fast';
       window.peerassistReviewMode = nextMode;
       document.querySelectorAll('[data-pdf-agent-dock]').forEach((dock) => {{
@@ -2234,20 +2308,24 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       document.querySelectorAll('[data-pdf-agent-mode-label]').forEach((label) => {{
         label.textContent = reviewModeLabel(nextMode);
       }});
+      setPdfAgentPhase('prepare', `已选择${{reviewModeLabel(nextMode)}}模式`, quiet ? '' : 'mode');
     }}
     window.peerassistSetPdfAgentReviewMode = setPdfAgentReviewMode;
     function handlePdfReviewCommand(command) {{
       if (command === 'agent-review') {{
+        setPdfAgentPhase('evidence', '正在组装全篇审稿上下文', 'agent');
         document.querySelector('[data-agent-review-start]')?.click();
         document.querySelector('[data-panel="model-entry"]')?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
         showToast('已从 PDF 命令条启动全篇审稿');
         return;
       }}
       if (command === 'selection-review') {{
+        setPdfAgentPhase('prepare', '等待 PDF 选区进入审稿上下文', 'agent');
         document.querySelector('[data-pdf-selection-use]')?.click();
         return;
       }}
       if (command === 'current-page') {{
+        setPdfAgentPhase('human', '正在聚焦当前页人工确认队列', 'agent');
         document.querySelector('[data-pdf-page-filter-current]')?.click();
         return;
       }}
@@ -2460,7 +2538,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-queue-search]').forEach((input) => {{
       input.addEventListener('input', () => applyQueueFilter());
     }});
-    setPdfAgentReviewMode('fast');
+    setPdfAgentReviewMode('fast', true);
     wirePdfReviewCommands();
     document.querySelectorAll('[data-focus-review-toggle]').forEach((button) => {{
       button.addEventListener('click', () => {{
@@ -2531,7 +2609,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         stream.textContent = selectedEvidence.text
           ? `正在以${{reviewModeCopy}}模式基于${{pageCopy}}启动智能审稿：读取论文证据台账、确定性核查、本地代理结果，并优先核对当前选中文字...`
           : `正在以${{reviewModeCopy}}模式启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...`;
+        setPdfAgentPhase('evidence', selectedEvidence.text ? `读取${{pageCopy}}与证据台账` : '读取全篇证据台账与确认队列', 'agent');
         try {{
+          setPdfAgentPhase('model', `以${{reviewModeCopy}}模式调用审稿模型`, 'agent');
           const response = await fetch('/api/agent-review', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
@@ -2541,12 +2621,15 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           if (!response.ok) throw new Error(payload.error || '智能审稿失败');
           const structuredCount = Number(payload.structured_concern_count || 0);
           const queueItems = Number(payload.queue_items || 0);
+          setPdfAgentPhase('queue', `写回 ${{structuredCount}} 条结构化意见，队列 ${{queueItems}} 条`, 'agent');
           stream.textContent = `${{payload.suggestion}}\\n\\n已结构化入队：${{structuredCount}} 条 · 当前待确认：${{queueItems}} 条\\n草稿路径：${{payload.draft_path}}`;
           showToast(structuredCount > 0 ? `已写入 ${{structuredCount}} 条待确认意见` : '全篇智能审稿草稿已生成');
           if (structuredCount > 0) {{
+            setPdfAgentPhase('human', '等待审稿人逐条确认新增意见', 'agent');
             window.setTimeout(() => window.location.reload(), 1200);
           }}
         }} catch (error) {{
+          setPdfAgentPhase('prepare', `智能审稿未完成：${{error.message}}`, 'error');
           stream.textContent = `智能审稿未完成：${{error.message}}`;
           showToast('智能审稿未完成');
         }} finally {{
@@ -4164,6 +4247,33 @@ def _render_source_pdf_viewer() -> str:
               <div class="pdf-agent-status-label">输出</div>
               <div class="pdf-agent-status-value">中文草稿</div>
             </div>
+          </div>
+        </div>
+        <div class="pdf-agent-phase-rail" data-pdf-agent-phase-rail data-active-phase="prepare" aria-label="PDF 智能审稿任务阶段">
+          <div class="pdf-agent-phase-step" data-pdf-agent-phase="prepare" data-phase-state="active">
+            <div class="pdf-agent-phase-index">01</div>
+            <div class="pdf-agent-phase-title">准备上下文</div>
+            <div class="pdf-agent-phase-copy" data-pdf-agent-phase-copy>等待审稿指令</div>
+          </div>
+          <div class="pdf-agent-phase-step" data-pdf-agent-phase="evidence" data-phase-state="pending">
+            <div class="pdf-agent-phase-index">02</div>
+            <div class="pdf-agent-phase-title">读取证据</div>
+            <div class="pdf-agent-phase-copy" data-pdf-agent-phase-copy>证据台账与队列</div>
+          </div>
+          <div class="pdf-agent-phase-step" data-pdf-agent-phase="model" data-phase-state="pending">
+            <div class="pdf-agent-phase-index">03</div>
+            <div class="pdf-agent-phase-title">调用模型</div>
+            <div class="pdf-agent-phase-copy" data-pdf-agent-phase-copy>证据约束生成</div>
+          </div>
+          <div class="pdf-agent-phase-step" data-pdf-agent-phase="queue" data-phase-state="pending">
+            <div class="pdf-agent-phase-index">04</div>
+            <div class="pdf-agent-phase-title">写回队列</div>
+            <div class="pdf-agent-phase-copy" data-pdf-agent-phase-copy>结构化 concerns</div>
+          </div>
+          <div class="pdf-agent-phase-step" data-pdf-agent-phase="human" data-phase-state="pending">
+            <div class="pdf-agent-phase-index">05</div>
+            <div class="pdf-agent-phase-title">人工确认</div>
+            <div class="pdf-agent-phase-copy" data-pdf-agent-phase-copy>逐条处理</div>
           </div>
         </div>
       </section>

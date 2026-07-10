@@ -264,9 +264,14 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "fetch('/api/agent-review'" in html
     assert "review_mode: reviewMode" in html
     assert "peerassistSetPdfAgentReviewMode" in html
+    assert "peerassistSetPdfAgentPhase" in html
     assert "data-pdf-agent-dock" in html
     assert "data-pdf-agent-mode" in html
     assert "data-pdf-agent-action" in html
+    assert "data-pdf-agent-phase-rail" in html
+    assert "data-pdf-agent-phase" in html
+    assert "正在组装全篇审稿上下文" in html
+    assert "以${reviewModeCopy}模式调用审稿模型" in html
     assert "请先在 PDF 正文中选中一段文字" not in html
     assert 'data-panel="artifact-workspace"' in html
     assert 'data-panel="next-actions"' in html
@@ -392,6 +397,18 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-review-command-strip" in html
     assert "data-pdf-agent-dock" in html
     assert "PDF 智能体审稿操作坞" in html
+    assert "data-pdf-agent-phase-rail" in html
+    assert "PDF 智能审稿任务阶段" in html
+    assert 'data-pdf-agent-phase="prepare"' in html
+    assert 'data-pdf-agent-phase="evidence"' in html
+    assert 'data-pdf-agent-phase="model"' in html
+    assert 'data-pdf-agent-phase="queue"' in html
+    assert 'data-pdf-agent-phase="human"' in html
+    assert "准备上下文" in html
+    assert "读取证据" in html
+    assert "调用模型" in html
+    assert "写回队列" in html
+    assert "人工确认" in html
     assert "data-review-mode=\"fast\"" in html
     assert 'data-pdf-agent-mode="fast"' in html
     assert 'data-pdf-agent-mode="standard"' in html
