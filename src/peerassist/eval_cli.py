@@ -9,6 +9,7 @@ from typing import Any
 
 from common.pipeline_context import write_json_file
 from peerassist.eval_harness import evaluate_peerassist_records
+from peerassist.eval_record_builder import build_eval_record_from_artifacts
 
 
 def load_eval_records(path: Path) -> list[dict[str, Any]]:
@@ -33,15 +34,55 @@ def load_eval_records(path: Path) -> list[dict[str, Any]]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate PeerAssist-Eval-v1 aggregate metrics.")
-    parser.add_argument("--manifest", required=True, help="Path to PeerAssist-Eval-v1 manifest JSON.")
-    parser.add_argument("--records", required=True, help="Path to eval records JSON or JSONL.")
-    parser.add_argument("--out", required=True, help="Path to write eval report JSON.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    aggregate = subparsers.add_parser("aggregate", help="Aggregate eval records against target gates.")
+    aggregate.add_argument("--manifest", required=True, help="Path to PeerAssist-Eval-v1 manifest JSON.")
+    aggregate.add_argument("--records", required=True, help="Path to eval records JSON or JSONL.")
+    aggregate.add_argument("--out", required=True, help="Path to write eval report JSON.")
+
+    record = subparsers.add_parser("record", help="Build one eval record from PeerAssist artifacts.")
+    record.add_argument("--sample-id", required=True)
+    record.add_argument("--run-dir", required=True)
+    record.add_argument("--gold", required=True)
+    record.add_argument("--out", required=True)
+
+    parser.add_argument("--manifest", help=argparse.SUPPRESS)
+    parser.add_argument("--records", help=argparse.SUPPRESS)
+    parser.add_argument("--out", help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "record":
+        record = build_eval_record_from_artifacts(
+            sample_id=args.sample_id,
+            run_dir=Path(args.run_dir),
+            gold_path=Path(args.gold),
+        )
+        write_json_file(Path(args.out), record)
+        print(
+            json.dumps(
+                {
+                    "schema_version": "peerassist.eval_record_cli_result.v1",
+                    "record_path": str(Path(args.out)),
+                    "sample_id": record["sample_id"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if not args.command and args.manifest and args.records and args.out:
+        # Backward-compatible aggregate mode for the original CLI shape.
+        pass
+    elif args.command not in {None, "aggregate"}:
+        parser.error("unknown command")
+    elif not args.manifest or not args.records or not args.out:
+        parser.error("--manifest, --records, and --out are required for aggregate mode")
+
     manifest_path = Path(args.manifest)
     records_path = Path(args.records)
     out_path = Path(args.out)

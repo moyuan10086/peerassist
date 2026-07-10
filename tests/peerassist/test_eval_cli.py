@@ -6,6 +6,7 @@ from pathlib import Path
 
 from common.pipeline_context import write_json_file
 from peerassist.eval_cli import load_eval_records, main as eval_cli_main
+from tests.peerassist.test_eval_record_builder import _seed_stage
 
 
 def _manifest(path: Path) -> None:
@@ -120,6 +121,41 @@ def test_eval_cli_returns_one_when_targets_fail(tmp_path: Path) -> None:
     )
 
     assert exit_code == 1
+
+
+def test_eval_cli_record_command_writes_record_from_artifacts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _seed_stage(run_dir)
+    gold_path = tmp_path / "gold.json"
+    out_path = tmp_path / "record.json"
+    write_json_file(
+        gold_path,
+        {
+            "sample_id": "paper-001",
+            "gold_concerns": [{"id": "gold-1", "covered_by": ["concern_check_percentage_consistency_001"]}],
+            "deterministic_errors": [{"check_id": "check_percentage_consistency_001"}],
+            "evidence_checks": [{"concern_id": "concern_check_percentage_consistency_001", "faithful": True}],
+        },
+    )
+
+    exit_code = eval_cli_main(
+        [
+            "record",
+            "--sample-id",
+            "paper-001",
+            "--run-dir",
+            str(run_dir),
+            "--gold",
+            str(gold_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+
+    assert exit_code == 0
+    record = json.loads(out_path.read_text(encoding="utf-8"))
+    assert record["sample_id"] == "paper-001"
+    assert record["deterministic_tp"] == 1
 
 
 def test_peerassist_eval_console_script_is_registered() -> None:
