@@ -523,6 +523,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       padding: 0 4px;
     }}
     .pdf-page-button {{
+      position: relative;
       width: auto;
       flex: 0 0 auto;
       min-width: 32px;
@@ -533,10 +534,39 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 850;
       background: #fff;
     }}
+    .pdf-page-button[data-has-concern="true"] {{
+      border-color: #d39c3d;
+      background: #fff8ea;
+      color: #7a4a0b;
+      padding-right: 18px;
+    }}
     .pdf-page-button[aria-current="page"] {{
       color: #fff;
       border-color: var(--accent);
       background: var(--accent);
+    }}
+    .pdf-page-badge {{
+      position: absolute;
+      top: -5px;
+      right: -4px;
+      display: inline-flex;
+      min-width: 15px;
+      height: 15px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #fff;
+      border-radius: 999px;
+      background: #cf5d1f;
+      color: #fff;
+      font-size: 9px;
+      font-weight: 900;
+      line-height: 1;
+      box-shadow: 0 2px 6px rgba(29, 31, 29, 0.2);
+      pointer-events: none;
+    }}
+    .pdf-page-button[aria-current="page"] .pdf-page-badge {{
+      background: #fff;
+      color: var(--accent-strong);
     }}
     .pdf-reader-stage {{
       position: relative;
@@ -1489,6 +1519,45 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         stage?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
       }};
 
+      function collectPdfPageConcernCounts() {{
+        const pageConcerns = new Map();
+        document.querySelectorAll('.item[data-pdf-page], .paper-comment[data-pdf-page]').forEach((node) => {{
+          const page = Number(node.dataset.pdfPage || 0);
+          if (!Number.isFinite(page) || page <= 0) return;
+          const concernId =
+            node.dataset.paperConcern ||
+            node.dataset.concernId ||
+            node.dataset.marginComment ||
+            node.id ||
+            `page-${{page}}-${{pageConcerns.size}}`;
+          if (!pageConcerns.has(page)) pageConcerns.set(page, new Set());
+          pageConcerns.get(page).add(concernId);
+        }});
+        return new Map(Array.from(pageConcerns, ([page, concerns]) => [page, concerns.size]));
+      }}
+
+      function annotatePdfPageRail() {{
+        const counts = collectPdfPageConcernCounts();
+        reader.querySelectorAll('[data-pdf-page-jump]').forEach((button) => {{
+          const page = Number(button.dataset.pdfPageJump || 0);
+          const count = counts.get(page) || 0;
+          button.querySelector('.pdf-page-badge')?.remove();
+          button.setAttribute('data-pdf-concern-count', String(count));
+          button.setAttribute('data-has-concern', count > 0 ? 'true' : 'false');
+          button.setAttribute(
+            'aria-label',
+            count > 0 ? `跳转到第 ${{page}} 页，本页 ${{count}} 条审稿关注` : `跳转到第 ${{page}} 页`
+          );
+          if (count > 0) {{
+            const badge = document.createElement('span');
+            badge.className = 'pdf-page-badge';
+            badge.setAttribute('aria-hidden', 'true');
+            badge.textContent = String(count);
+            button.appendChild(badge);
+          }}
+        }});
+      }}
+
       function buildPdfPageRail(pageCount) {{
         if (!pageRail) return;
         pageRail.replaceChildren();
@@ -1501,7 +1570,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           button.type = 'button';
           button.className = 'pdf-page-button';
           button.dataset.pdfPageJump = String(page);
-          button.textContent = String(page);
+          const pageNumberLabel = document.createElement('span');
+          pageNumberLabel.className = 'pdf-page-number';
+          pageNumberLabel.textContent = String(page);
+          button.appendChild(pageNumberLabel);
           button.setAttribute('aria-label', `跳转到第 ${{page}} 页`);
           button.addEventListener('click', () => {{
             window.peerassistPdfGoToPage(page).catch((error) => {{
@@ -1510,6 +1582,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           }});
           pageRail.appendChild(button);
         }}
+        annotatePdfPageRail();
         updateButtons();
       }}
 

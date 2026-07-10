@@ -250,7 +250,13 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "已跳转到 PDF 第" in html
     assert "data-pdf-page-rail" in html
     assert "buildPdfPageRail" in html
+    assert "collectPdfPageConcernCounts" in html
+    assert "annotatePdfPageRail" in html
     assert "data-pdf-page-jump" in html
+    assert "data-pdf-concern-count" in html
+    assert "data-has-concern" in html
+    assert "pdf-page-badge" in html
+    assert "本页 ${count} 条审稿关注" in html
     assert "PDF 页码导航" in html
     assert "已定位到论文高亮" in html
     assert "已定位到审稿队列" in html
