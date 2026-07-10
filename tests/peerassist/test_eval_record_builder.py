@@ -188,3 +188,30 @@ def test_build_eval_record_evidence_audit_counts_unsupported_numeric_facts(tmp_p
 
     assert record["evidence_faithful"] == 0
     assert record["evidence_total"] == 1
+
+
+def test_build_eval_record_counts_bound_but_unsupported_facts_as_unevidenced(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_stage(run_dir)
+    write_json_file(
+        out_dir / "evidence_ledger.json",
+        {"items": [{"id": "P01-L001", "text": "The reported success rate was 40%."}]},
+    )
+    write_json_file(
+        out_dir / "peerassist_report.json",
+        {
+            "concerns": [
+                {
+                    "id": "concern_unsupported_numeric",
+                    "status": "confirmed",
+                    "evidence_ids": ["P01-L001"],
+                    "title": "Reported success rate 90% needs clarification",
+                }
+            ],
+        },
+    )
+
+    record = build_eval_record_from_artifacts(sample_id="paper-001", run_dir=run_dir)
+
+    assert record["unevidenced_new_facts"] == 1
+    assert record["new_facts_total"] == 1

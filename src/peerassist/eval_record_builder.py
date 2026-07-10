@@ -23,12 +23,11 @@ def build_eval_record_from_artifacts(
     checks = _rows(checks_payload.get("checks"))
     gold_concerns = _rows(gold.get("gold_concerns"))
     deterministic_errors = _rows(gold.get("deterministic_errors"))
-    evidence_checks = _rows(gold.get("evidence_checks"))
-    if not evidence_checks:
-        evidence_checks = audit_concern_evidence(
-            concerns=concerns,
-            ledger_items=_rows(ledger_payload.get("items")),
-        )
+    automatic_evidence_checks = audit_concern_evidence(
+        concerns=concerns,
+        ledger_items=_rows(ledger_payload.get("items")),
+    )
+    evidence_checks = _rows(gold.get("evidence_checks")) or automatic_evidence_checks
     crossover = gold.get("reviewer_crossover") if isinstance(gold.get("reviewer_crossover"), dict) else {}
 
     deterministic_leads = {
@@ -51,10 +50,16 @@ def build_eval_record_from_artifacts(
         for concern in concerns
         if str(concern.get("status") or "").strip().lower() != "pending_human_confirmation"
     ]
+    unfaithful_concern_ids = {
+        str(row.get("concern_id") or "")
+        for row in evidence_checks
+        if not bool(row.get("faithful"))
+    }
     unevidenced = [
         concern
         for concern in active_non_pending
         if not _nonempty_list(concern.get("evidence_ids"))
+        or str(concern.get("id") or "") in unfaithful_concern_ids
     ]
 
     record = {
