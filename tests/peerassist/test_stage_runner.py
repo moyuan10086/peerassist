@@ -43,6 +43,7 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
         "confirmation_review_queue",
         "human_confirmations",
         "tool_trace",
+        "peerassist_eval_runtime",
         "report_md",
         "report_en_md",
         "report_zh_md",
@@ -52,6 +53,12 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
         assert Path(result.outputs[key]).exists()
 
     report_payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
+    runtime_payload = json.loads(Path(result.outputs["peerassist_eval_runtime"]).read_text(encoding="utf-8"))
+    assert runtime_payload["schema_version"] == "peerassist.eval_runtime.v1"
+    assert runtime_payload["mode"] == "fast"
+    assert runtime_payload["parse_success"] is True
+    assert runtime_payload["latency_seconds"] >= 0
+    assert runtime_payload["status"] == "ok"
     assert Path(result.outputs["report_en_md"]).read_text(encoding="utf-8").startswith(
         "# PeerAssist Review Aid Report"
     )

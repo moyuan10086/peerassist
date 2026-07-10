@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from common.pipeline_context import (
@@ -65,6 +67,33 @@ def _evidence_lookup(ledger_items: list[dict[str, Any]]) -> dict[str, str]:
     return lookup
 
 
+def _write_eval_runtime(
+    path: Path,
+    *,
+    mode: str,
+    status: str,
+    started_at: str,
+    started_monotonic: float,
+    parse_success: bool,
+    error: str = "",
+) -> Path:
+    ended_at = datetime.now(UTC).isoformat()
+    write_json_file(
+        path,
+        {
+            "schema_version": "peerassist.eval_runtime.v1",
+            "mode": mode,
+            "status": status,
+            "parse_success": parse_success,
+            "latency_seconds": max(0.0, monotonic() - started_monotonic),
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "error": error,
+        },
+    )
+    return path
+
+
 def run_peerassist_stage(
     *,
     repo_root: Path,
@@ -73,6 +102,8 @@ def run_peerassist_stage(
     paper_pdf: Path,
     mode: str = "off",
 ) -> StageResult:
+    started_monotonic = monotonic()
+    started_at = datetime.now(UTC).isoformat()
     normalized_mode = str(mode or "off").strip().lower()
     if normalized_mode == "off":
         return StageResult(status="skipped")
@@ -82,6 +113,7 @@ def run_peerassist_stage(
     ensure_full_pipeline_context(run_dir=run_dir, allow_standalone=True, stage="peerassist")
     out_dir = peerassist_stage_dir(run_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    eval_runtime_path = out_dir / "peerassist_eval_runtime.json"
     trace = ToolTraceRecorder(out_dir / "tool_trace.jsonl")
 
     parse_payload = read_json_file(parse_stage_dir(run_dir) / "paper.json")
@@ -167,6 +199,15 @@ def run_peerassist_stage(
     )
     invocation_results.append(deterministic_invocation)
     if deterministic_invocation.status is not ToolTraceStatus.COMPLETED:
+        _write_eval_runtime(
+            eval_runtime_path,
+            mode=normalized_mode,
+            status="failed",
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            parse_success=bool(ledger.items),
+            error=deterministic_invocation.error_message,
+        )
         return StageResult(status="failed", error=deterministic_invocation.error_message)
     checks = [
         DeterministicCheck.model_validate(row)
@@ -208,6 +249,15 @@ def run_peerassist_stage(
     )
     invocation_results.append(agents_invocation)
     if agents_invocation.status is not ToolTraceStatus.COMPLETED:
+        _write_eval_runtime(
+            eval_runtime_path,
+            mode=normalized_mode,
+            status="failed",
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            parse_success=bool(ledger.items),
+            error=agents_invocation.error_message,
+        )
         return StageResult(status="failed", error=agents_invocation.error_message)
     agent_results = [
         AgentReviewResult.model_validate(row)
@@ -313,6 +363,15 @@ def run_peerassist_stage(
         )
         write_json_file(report_json_path, report_payload)
 
+    _write_eval_runtime(
+        eval_runtime_path,
+        mode=normalized_mode,
+        status="ok",
+        started_at=started_at,
+        started_monotonic=started_monotonic,
+        parse_success=bool(ledger.items),
+    )
+
     return StageResult(
         status="ok",
         outputs={
@@ -325,6 +384,7 @@ def run_peerassist_stage(
             "confirmation_review_queue": str(confirmation_review_queue_path),
             "human_confirmations": str(confirmations_path),
             "tool_trace": str(out_dir / "tool_trace.jsonl"),
+            "peerassist_eval_runtime": str(eval_runtime_path),
             "report_md": str(report_md_path),
             "report_en_md": str(report_en_md_path),
             "report_zh_md": str(report_zh_md_path),
