@@ -604,6 +604,48 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 850;
       padding: 0 4px;
     }}
+    .pdf-review-command-strip {{
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #132320;
+      color: #eef8f4;
+    }}
+    .pdf-command-label {{
+      color: #98d6c8;
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }}
+    .pdf-command-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+    }}
+    .pdf-command-button {{
+      width: auto;
+      min-height: 30px;
+      border-color: rgba(216, 255, 245, 0.24);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #eef8f4;
+      padding: 5px 10px;
+      font-size: 11px;
+      white-space: nowrap;
+    }}
+    .pdf-command-button.primary {{
+      border-color: #8bd8c8;
+      background: #0f766e;
+      color: #fff;
+    }}
+    .pdf-command-button:hover {{
+      border-color: #d8fff5;
+      background: rgba(255, 255, 255, 0.14);
+    }}
     .pdf-page-button {{
       position: relative;
       width: auto;
@@ -1436,6 +1478,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .source-pdf-shell {{ min-height: 520px; }}
       .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
       .pdf-page-rail {{ padding: 8px; }}
+      .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
+      .pdf-command-actions {{ justify-content: flex-start; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
@@ -1727,6 +1771,37 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       showToast(isEnabled ? '已进入专注审稿模式' : '已退出专注审稿模式');
     }}
     window.peerassistSetReviewFocusMode = setReviewFocusMode;
+    function handlePdfReviewCommand(command) {{
+      if (command === 'agent-review') {{
+        document.querySelector('[data-agent-review-start]')?.click();
+        document.querySelector('[data-panel="model-entry"]')?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        showToast('已从 PDF 命令条启动全篇审稿');
+        return;
+      }}
+      if (command === 'selection-review') {{
+        document.querySelector('[data-pdf-selection-use]')?.click();
+        return;
+      }}
+      if (command === 'current-page') {{
+        document.querySelector('[data-pdf-page-filter-current]')?.click();
+        return;
+      }}
+      if (command === 'next-concern') {{
+        document.querySelector('[data-pdf-page-next-concern]')?.click();
+        return;
+      }}
+      if (command === 'focus') {{
+        setReviewFocusMode(document.body.dataset.reviewFocus !== 'true');
+        return;
+      }}
+      showToast('未知 PDF 审稿命令');
+    }}
+    function wirePdfReviewCommands() {{
+      document.querySelectorAll('[data-pdf-review-command]').forEach((button) => {{
+        button.addEventListener('click', () => handlePdfReviewCommand(button.dataset.pdfReviewCommand || ''));
+      }});
+    }}
+    window.peerassistHandlePdfReviewCommand = handlePdfReviewCommand;
     function applyTraceFilter(status) {{
       const events = Array.from(document.querySelectorAll('.trace-list .trace-event'));
       let visibleCount = 0;
@@ -1897,6 +1972,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-queue-search]').forEach((input) => {{
       input.addEventListener('input', () => applyQueueFilter());
     }});
+    wirePdfReviewCommands();
     document.querySelectorAll('[data-focus-review-toggle]').forEach((button) => {{
       button.addEventListener('click', () => {{
         setReviewFocusMode(document.body.dataset.reviewFocus !== 'true');
@@ -3269,6 +3345,16 @@ def _render_source_pdf_viewer() -> str:
       </div>
       <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">
         <span class="pdf-page-rail-label">PDF 页码导航</span>
+      </div>
+      <div class="pdf-review-command-strip" data-pdf-review-command-strip aria-label="PDF 审稿命令条">
+        <div class="pdf-command-label">PDF 审稿命令条</div>
+        <div class="pdf-command-actions">
+          <button class="pdf-command-button primary" type="button" data-pdf-review-command="agent-review">全篇审稿</button>
+          <button class="pdf-command-button" type="button" data-pdf-review-command="selection-review">选区审稿</button>
+          <button class="pdf-command-button" type="button" data-pdf-review-command="current-page">本页队列</button>
+          <button class="pdf-command-button" type="button" data-pdf-review-command="next-concern">下一关注</button>
+          <button class="pdf-command-button" type="button" data-pdf-review-command="focus">专注模式</button>
+        </div>
       </div>
       <div class="pdf-page-context" data-pdf-page-context>
         <div>

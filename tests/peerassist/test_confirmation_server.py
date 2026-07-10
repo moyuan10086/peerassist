@@ -295,6 +295,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "syncCurrentPdfPage" in html
     assert "updatePdfPageContext" in html
     assert "peerassistPdfNextConcernPage" in html
+    assert "wirePdfReviewCommands" in html
+    assert "handlePdfReviewCommand" in html
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
     assert "syncPdfPageAnnotations" in html
@@ -344,6 +346,13 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-page-next-concern" in html
     assert "只看本页队列" in html
     assert "下一关注页" in html
+    assert "data-pdf-review-command-strip" in html
+    assert 'data-pdf-review-command="agent-review"' in html
+    assert 'data-pdf-review-command="selection-review"' in html
+    assert 'data-pdf-review-command="current-page"' in html
+    assert 'data-pdf-review-command="next-concern"' in html
+    assert 'data-pdf-review-command="focus"' in html
+    assert "PDF 审稿命令条" in html
     assert "data-pdf-page-annotations" in html
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
