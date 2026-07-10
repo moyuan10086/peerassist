@@ -265,9 +265,18 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "review_mode: reviewMode" in html
     assert "peerassistSetPdfAgentReviewMode" in html
     assert "peerassistSetPdfAgentPhase" in html
+    assert "peerassistRunAgentReview" in html
+    assert "peerassistCancelAgentReview" in html
+    assert "peerassistRetryAgentReview" in html
+    assert "AbortController" in html
+    assert "signal: controller.signal" in html
+    assert "智能审稿已取消" in html
     assert "data-pdf-agent-dock" in html
     assert "data-pdf-agent-mode" in html
     assert "data-pdf-agent-action" in html
+    assert "data-pdf-agent-run-controls" in html
+    assert "data-pdf-agent-cancel" in html
+    assert "data-pdf-agent-retry" in html
     assert "data-pdf-agent-phase-rail" in html
     assert "data-pdf-agent-phase" in html
     assert "正在组装全篇审稿上下文" in html
@@ -438,6 +447,13 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert 'data-pdf-agent-action="agent-review"' in html
     assert 'data-pdf-agent-action="selection-review"' in html
     assert 'data-pdf-agent-action="current-page"' in html
+    assert "data-pdf-agent-run-controls" in html
+    assert "data-pdf-agent-run-state" in html
+    assert "data-pdf-agent-cancel" in html
+    assert "data-pdf-agent-retry" in html
+    assert "任务空闲，可启动审稿" in html
+    assert "取消" in html
+    assert "重试" in html
     assert "智能体入口" in html
     assert "证据约束审稿" in html
     assert "必绑定" in html

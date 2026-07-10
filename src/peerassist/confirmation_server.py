@@ -806,6 +806,35 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #0f766e;
       color: #fff;
     }}
+    .pdf-agent-run-controls {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px;
+      align-items: center;
+      margin-top: 8px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 6px;
+    }}
+    .pdf-agent-run-state {{
+      min-width: 0;
+      color: #53635f;
+      font-size: 10px;
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .pdf-agent-run-controls[data-run-state="running"] {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-agent-run-controls[data-run-state="failed"],
+    .pdf-agent-run-controls[data-run-state="cancelled"] {{
+      border-color: #f0d2a6;
+      background: #fff8ea;
+    }}
     .pdf-agent-status-grid {{
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2758,6 +2787,123 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         appendStreamLine('state', `${{runtime.tool_event_count || 0}} 条追踪事件 · ${{state.pending_count || 0}} 条待确认`);
       }}
     }}
+    window.peerassistAgentReviewController = null;
+    window.peerassistLastAgentReviewPayload = null;
+    function setAgentReviewRunState(state, copy = '') {{
+      const nextState = state || 'idle';
+      const labels = {{
+        idle: '任务空闲，可启动审稿',
+        running: '智能审稿运行中，可取消当前请求',
+        completed: '上次智能审稿已完成，可重试',
+        failed: '上次智能审稿失败，可重试',
+        cancelled: '上次智能审稿已取消，可重试'
+      }};
+      document.querySelectorAll('[data-pdf-agent-run-controls]').forEach((node) => {{
+        node.dataset.runState = nextState;
+      }});
+      document.querySelectorAll('[data-pdf-agent-run-state]').forEach((node) => {{
+        node.textContent = copy || labels[nextState] || labels.idle;
+      }});
+      document.querySelectorAll('[data-pdf-agent-cancel]').forEach((button) => {{
+        button.disabled = nextState !== 'running';
+      }});
+      document.querySelectorAll('[data-pdf-agent-retry]').forEach((button) => {{
+        button.disabled = nextState === 'running' || !window.peerassistLastAgentReviewPayload;
+      }});
+    }}
+    window.peerassistSetAgentReviewRunState = setAgentReviewRunState;
+    function buildAgentReviewPayload() {{
+      const selectedEvidence = window.peerassistSelectedEvidence || {{}};
+      const selectedText = String(
+        selectedEvidence.text
+          ? `[PDF 第 ${{selectedEvidence.page || '未知'}} 页选区]\\n${{selectedEvidence.text}}`
+          : window.getSelection()?.toString() || ''
+      ).trim();
+      const reviewMode = window.peerassistReviewMode || 'fast';
+      return {{
+        selected_text: selectedText,
+        review_mode: reviewMode,
+        page_copy: selectedEvidence.page ? `PDF 第 ${{selectedEvidence.page}} 页选区` : 'PDF 选区',
+        has_selection: Boolean(selectedEvidence.text)
+      }};
+    }}
+    async function runAgentReview(button, payload = null) {{
+      const stream = document.querySelector('[data-agent-review-stream]');
+      const requestPayload = payload || buildAgentReviewPayload();
+      if (!stream) return;
+      if (window.peerassistAgentReviewController) {{
+        showToast('已有智能审稿任务运行中');
+        return;
+      }}
+      const controller = new AbortController();
+      window.peerassistAgentReviewController = controller;
+      window.peerassistLastAgentReviewPayload = requestPayload;
+      setAgentReviewRunState('running');
+      if (button) button.disabled = true;
+      const reviewModeCopy = reviewModeLabel(requestPayload.review_mode);
+      stream.textContent = requestPayload.has_selection
+        ? `正在以${{reviewModeCopy}}模式基于${{requestPayload.page_copy}}启动智能审稿：读取论文证据台账、确定性核查、本地代理结果，并优先核对当前选中文字...`
+        : `正在以${{reviewModeCopy}}模式启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...`;
+      setPdfAgentPhase('evidence', requestPayload.has_selection ? `读取${{requestPayload.page_copy}}与证据台账` : '读取全篇证据台账与确认队列', 'agent');
+      try {{
+        setPdfAgentPhase('model', `以${{reviewModeCopy}}模式调用审稿模型`, 'agent');
+        const response = await fetch('/api/agent-review', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{selected_text: requestPayload.selected_text, review_mode: requestPayload.review_mode}}),
+          signal: controller.signal
+        }});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || '智能审稿失败');
+        const structuredCount = Number(payload.structured_concern_count || 0);
+        const queueItems = Number(payload.queue_items || 0);
+        setPdfAgentPhase('queue', `写回 ${{structuredCount}} 条结构化意见，队列 ${{queueItems}} 条`, 'agent');
+        stream.textContent = `${{payload.suggestion}}\\n\\n已结构化入队：${{structuredCount}} 条 · 当前待确认：${{queueItems}} 条\\n草稿路径：${{payload.draft_path}}`;
+        setAgentReviewRunState('completed', `已完成：${{structuredCount}} 条结构化意见`);
+        showToast(structuredCount > 0 ? `已写入 ${{structuredCount}} 条待确认意见` : '全篇智能审稿草稿已生成');
+        if (structuredCount > 0) {{
+          setPdfAgentPhase('human', '等待审稿人逐条确认新增意见', 'agent');
+          window.setTimeout(() => window.location.reload(), 1200);
+        }}
+      }} catch (error) {{
+        if (error?.name === 'AbortError') {{
+          setPdfAgentPhase('prepare', '智能审稿已由审稿人取消', 'cancel');
+          stream.textContent = '智能审稿已取消。可调整选区、模式或点击重试继续。';
+          setAgentReviewRunState('cancelled');
+          showToast('已取消智能审稿请求');
+        }} else {{
+          setPdfAgentPhase('prepare', `智能审稿未完成：${{error.message}}`, 'error');
+          stream.textContent = `智能审稿未完成：${{error.message}}`;
+          setAgentReviewRunState('failed', `未完成：${{error.message}}`);
+          showToast('智能审稿未完成');
+        }}
+      }} finally {{
+        if (window.peerassistAgentReviewController === controller) {{
+          window.peerassistAgentReviewController = null;
+        }}
+        if (button) button.disabled = false;
+        setAgentReviewRunState(
+          document.querySelector('[data-pdf-agent-run-controls]')?.dataset.runState || 'idle'
+        );
+      }}
+    }}
+    window.peerassistRunAgentReview = runAgentReview;
+    function cancelAgentReview() {{
+      if (!window.peerassistAgentReviewController) {{
+        showToast('当前没有运行中的智能审稿任务');
+        return;
+      }}
+      window.peerassistAgentReviewController.abort();
+    }}
+    window.peerassistCancelAgentReview = cancelAgentReview;
+    function retryAgentReview() {{
+      if (!window.peerassistLastAgentReviewPayload) {{
+        showToast('暂无可重试的智能审稿请求');
+        return;
+      }}
+      runAgentReview(document.querySelector('[data-agent-review-start]'), window.peerassistLastAgentReviewPayload);
+    }}
+    window.peerassistRetryAgentReview = retryAgentReview;
     function connectEventStream() {{
       if (!window.EventSource) {{
         refreshRuntime().catch(() => {{}});
@@ -2878,6 +3024,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           .catch(() => showToast('PDF 跳页未完成'));
       }});
     }});
+    document.querySelectorAll('[data-pdf-agent-cancel]').forEach((button) => {{
+      button.addEventListener('click', () => cancelAgentReview());
+    }});
+    document.querySelectorAll('[data-pdf-agent-retry]').forEach((button) => {{
+      button.addEventListener('click', () => retryAgentReview());
+    }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
@@ -2896,49 +3048,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }});
     document.querySelectorAll('[data-agent-review-start]').forEach((button) => {{
       button.addEventListener('click', async () => {{
-        const stream = document.querySelector('[data-agent-review-stream]');
-        const selectedEvidence = window.peerassistSelectedEvidence || {{}};
-        const selectedText = String(
-          selectedEvidence.text
-            ? `[PDF 第 ${{selectedEvidence.page || '未知'}} 页选区]\\n${{selectedEvidence.text}}`
-            : window.getSelection()?.toString() || ''
-        ).trim();
-        if (!stream) return;
-        button.disabled = true;
-        const pageCopy = selectedEvidence.page ? `PDF 第 ${{selectedEvidence.page}} 页选区` : 'PDF 选区';
-        const reviewMode = window.peerassistReviewMode || 'fast';
-        const reviewModeCopy = reviewModeLabel(reviewMode);
-        stream.textContent = selectedEvidence.text
-          ? `正在以${{reviewModeCopy}}模式基于${{pageCopy}}启动智能审稿：读取论文证据台账、确定性核查、本地代理结果，并优先核对当前选中文字...`
-          : `正在以${{reviewModeCopy}}模式启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...`;
-        setPdfAgentPhase('evidence', selectedEvidence.text ? `读取${{pageCopy}}与证据台账` : '读取全篇证据台账与确认队列', 'agent');
-        try {{
-          setPdfAgentPhase('model', `以${{reviewModeCopy}}模式调用审稿模型`, 'agent');
-          const response = await fetch('/api/agent-review', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{selected_text: selectedText, review_mode: reviewMode}})
-          }});
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.error || '智能审稿失败');
-          const structuredCount = Number(payload.structured_concern_count || 0);
-          const queueItems = Number(payload.queue_items || 0);
-          setPdfAgentPhase('queue', `写回 ${{structuredCount}} 条结构化意见，队列 ${{queueItems}} 条`, 'agent');
-          stream.textContent = `${{payload.suggestion}}\\n\\n已结构化入队：${{structuredCount}} 条 · 当前待确认：${{queueItems}} 条\\n草稿路径：${{payload.draft_path}}`;
-          showToast(structuredCount > 0 ? `已写入 ${{structuredCount}} 条待确认意见` : '全篇智能审稿草稿已生成');
-          if (structuredCount > 0) {{
-            setPdfAgentPhase('human', '等待审稿人逐条确认新增意见', 'agent');
-            window.setTimeout(() => window.location.reload(), 1200);
-          }}
-        }} catch (error) {{
-          setPdfAgentPhase('prepare', `智能审稿未完成：${{error.message}}`, 'error');
-          stream.textContent = `智能审稿未完成：${{error.message}}`;
-          showToast('智能审稿未完成');
-        }} finally {{
-          button.disabled = false;
-        }}
+        runAgentReview(button);
       }});
     }});
+    setAgentReviewRunState('idle');
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -4774,6 +4887,11 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
             <button class="pdf-agent-action primary" type="button" data-pdf-agent-action="agent-review">全篇审稿</button>
             <button class="pdf-agent-action" type="button" data-pdf-agent-action="selection-review">选区审稿</button>
             <button class="pdf-agent-action" type="button" data-pdf-agent-action="current-page">本页队列</button>
+          </div>
+          <div class="pdf-agent-run-controls" data-pdf-agent-run-controls data-run-state="idle" aria-label="智能审稿任务控制">
+            <div class="pdf-agent-run-state" data-pdf-agent-run-state>任务空闲，可启动审稿</div>
+            <button class="inline-button" type="button" data-pdf-agent-cancel disabled>取消</button>
+            <button class="inline-button" type="button" data-pdf-agent-retry disabled>重试</button>
           </div>
           <div class="pdf-agent-status-grid" aria-label="智能体审稿约束">
             <div class="pdf-agent-status-chip">
