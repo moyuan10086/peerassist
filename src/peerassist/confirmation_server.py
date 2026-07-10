@@ -604,6 +604,100 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 850;
       padding: 0 4px;
     }}
+    .pdf-reading-map {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 8px;
+      padding: 9px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #f7faf9;
+    }}
+    .pdf-reading-panel {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }}
+    .pdf-reading-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 920;
+    }}
+    .pdf-reading-subtitle {{
+      color: #66736f;
+      font-size: 10px;
+      font-weight: 800;
+      text-align: right;
+    }}
+    .pdf-outline-list {{
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      margin-top: 7px;
+      padding-bottom: 2px;
+      scrollbar-width: thin;
+    }}
+    .pdf-outline-item {{
+      flex: 0 0 auto;
+      max-width: 220px;
+      min-height: 30px;
+      border: 1px solid #d7e4df;
+      border-radius: 999px;
+      background: #f8fbfa;
+      color: #25322f;
+      padding: 5px 9px;
+      font-size: 11px;
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }}
+    .pdf-outline-item[data-outline-depth="1"] {{ margin-left: 8px; }}
+    .pdf-outline-item[data-outline-depth="2"] {{ margin-left: 16px; }}
+    .pdf-outline-item:hover {{
+      border-color: #0f766e;
+      color: #0f766e;
+      background: #eef8f4;
+    }}
+    .pdf-outline-empty {{
+      margin-top: 7px;
+      color: #66736f;
+      font-size: 11px;
+      font-weight: 800;
+    }}
+    .pdf-review-route {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 7px;
+    }}
+    .pdf-route-chip {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 7px;
+    }}
+    .pdf-route-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-route-value {{
+      margin-top: 2px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 900;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
     .pdf-search-strip {{
       display: grid;
       grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1fr) auto;
@@ -2224,6 +2318,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .paper-comments {{ grid-template-columns: 1fr 1fr; }}
       .source-pdf-shell {{ min-height: 620px; }}
       .pdf-reader-stage {{ min-height: 580px; height: 70vh; }}
+      .pdf-reading-map {{ grid-template-columns: 1fr; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-card:first-child {{ grid-column: 1 / -1; }}
       .pdf-agent-context-list {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
@@ -2239,6 +2334,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .source-pdf-shell {{ min-height: 520px; }}
       .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
       .pdf-page-rail {{ padding: 8px; }}
+      .pdf-reading-map {{ grid-template-columns: 1fr; }}
+      .pdf-review-route {{ grid-template-columns: 1fr; }}
       .pdf-search-strip {{ grid-template-columns: 1fr; }}
       .pdf-search-actions {{ justify-content: flex-start; }}
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
@@ -3215,6 +3312,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const loading = reader.querySelector('[data-pdf-loading]');
       const fallback = reader.querySelector('[data-pdf-fallback]');
       const pageRail = reader.querySelector('[data-pdf-page-rail]');
+      const outlineList = reader.querySelector('[data-pdf-outline-list]');
+      const outlineEmpty = reader.querySelector('[data-pdf-outline-empty]');
+      const outlineStatus = reader.querySelector('[data-pdf-outline-status]');
+      const routeCurrent = reader.querySelector('[data-pdf-route-current]');
+      const routePending = reader.querySelector('[data-pdf-route-pending]');
+      const routeConcern = reader.querySelector('[data-pdf-route-concern]');
       const pageContextTitle = reader.querySelector('[data-pdf-page-context-title]');
       const pageContextCopy = reader.querySelector('[data-pdf-page-context-copy]');
       const annotationList = reader.querySelector('[data-pdf-annotation-list]');
@@ -3253,6 +3356,76 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
 
       function setLoading(visible) {{
         if (loading) loading.hidden = !visible;
+      }}
+
+      function setOutlineStatus(copy) {{
+        if (outlineStatus) outlineStatus.textContent = copy;
+      }}
+
+      async function resolvePdfOutlinePage(item) {{
+        if (!pdfDoc || !item?.dest) return null;
+        const destination = Array.isArray(item.dest)
+          ? item.dest
+          : await pdfDoc.getDestination(item.dest).catch(() => null);
+        const ref = Array.isArray(destination) ? destination[0] : null;
+        if (!ref) return null;
+        if (typeof ref === 'number') return Math.max(1, Math.min(pdfDoc.numPages, ref + 1));
+        const pageIndex = await pdfDoc.getPageIndex(ref).catch(() => -1);
+        return pageIndex >= 0 ? pageIndex + 1 : null;
+      }}
+
+      async function appendPdfOutlineItem(item, depth = 0) {{
+        if (!outlineList || !item) return 0;
+        let count = 0;
+        const title = String(item.title || '').trim();
+        if (title) {{
+          count += 1;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'pdf-outline-item';
+          button.dataset.outlineDepth = String(Math.min(2, Math.max(0, depth)));
+          button.textContent = title;
+          button.title = title;
+          button.disabled = true;
+          outlineList.appendChild(button);
+          resolvePdfOutlinePage(item).then((page) => {{
+            if (!page) {{
+              button.title = `${{title}} · 无法解析页码`;
+              return;
+            }}
+            button.disabled = false;
+            button.dataset.pdfOutlinePage = String(page);
+            button.title = `${{title}} · 第 ${{page}} 页`;
+            button.addEventListener('click', () => {{
+              window.peerassistPdfGoToPage(page)
+                .then(() => appendPdfActivityLine('outline', `从 PDF 目录跳转到第 ${{page}} 页：${{title}}`))
+                .catch(() => showToast('PDF 目录跳转未完成'));
+            }});
+          }});
+        }}
+        const children = Array.isArray(item.items) ? item.items : [];
+        for (const child of children.slice(0, 8)) {{
+          count += await appendPdfOutlineItem(child, depth + 1);
+        }}
+        return count;
+      }}
+
+      async function renderPdfOutline() {{
+        if (!outlineList || !outlineEmpty || !pdfDoc) return;
+        outlineList.replaceChildren();
+        outlineEmpty.hidden = true;
+        setOutlineStatus('正在读取内置目录');
+        const outline = await pdfDoc.getOutline().catch(() => null);
+        if (!Array.isArray(outline) || outline.length === 0) {{
+          outlineEmpty.hidden = false;
+          setOutlineStatus('无内置目录');
+          return;
+        }}
+        let count = 0;
+        for (const item of outline.slice(0, 12)) {{
+          count += await appendPdfOutlineItem(item, 0);
+        }}
+        setOutlineStatus(`${{count}} 个目录入口`);
       }}
 
       function normalizePdfSearch(value) {{
@@ -3447,6 +3620,21 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       function updatePdfPageContext() {{
         const count = concernCountForPage(pageNumber);
         const pendingCount = pendingCountForPage(pageNumber);
+        const nextPendingPage = nextPendingConcernPage();
+        const nextPage = nextPendingPage || nextConcernPage();
+        if (routeCurrent) {{
+          routeCurrent.textContent = pendingCount > 0
+            ? `第 ${{pageNumber}} 页 · ${{pendingCount}} 条未处理`
+            : count > 0
+              ? `第 ${{pageNumber}} 页 · ${{count}} 条关注`
+              : `第 ${{pageNumber}} 页 · 可继续阅读`;
+        }}
+        if (routePending) {{
+          routePending.textContent = nextPendingPage ? `第 ${{nextPendingPage}} 页` : '暂无未处理';
+        }}
+        if (routeConcern) {{
+          routeConcern.textContent = nextPage ? `第 ${{nextPage}} 页` : '暂无关注页';
+        }}
         if (pageContextTitle) {{
           pageContextTitle.textContent = pendingCount > 0
             ? `PDF 第 ${{pageNumber}} 页 · 本页 ${{pendingCount}} 条未处理`
@@ -3455,8 +3643,6 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
             : `PDF 第 ${{pageNumber}} 页 · 本页暂无审稿关注`;
         }}
         if (pageContextCopy) {{
-          const nextPendingPage = nextPendingConcernPage();
-          const nextPage = nextPendingPage || nextConcernPage();
           if (nextPendingPage === pageNumber && pendingCount > 0) {{
             pageContextCopy.textContent = '当前页仍有未处理批注，可逐条确认、暂挂、改写或核对。';
           }} else if (nextPendingPage) {{
@@ -3786,6 +3972,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         .then((document) => {{
           pdfDoc = document;
           buildPdfPageRail(document.numPages);
+          renderPdfOutline().catch(() => {{
+            if (outlineEmpty) outlineEmpty.hidden = false;
+            setOutlineStatus('目录读取失败');
+          }});
           updateButtons();
           renderPdfSearchResults();
           return renderPage();
@@ -4985,6 +5175,36 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
       <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">
         <span class="pdf-page-rail-label">PDF 页码导航</span>
       </div>
+      <section class="pdf-reading-map" data-pdf-reading-map aria-label="PDF 目录与审稿索引">
+        <div class="pdf-reading-panel">
+          <div class="pdf-reading-head">
+            <span>PDF 目录</span>
+            <span class="pdf-reading-subtitle" data-pdf-outline-status>正在读取内置目录</span>
+          </div>
+          <div class="pdf-outline-list" data-pdf-outline-list></div>
+          <div class="pdf-outline-empty" data-pdf-outline-empty hidden>此 PDF 未提供内置目录，可使用页码导航、原文检索和审稿索引继续定位。</div>
+        </div>
+        <div class="pdf-reading-panel">
+          <div class="pdf-reading-head">
+            <span>审稿索引</span>
+            <span class="pdf-reading-subtitle">围绕当前页推进</span>
+          </div>
+          <div class="pdf-review-route">
+            <div class="pdf-route-chip">
+              <div class="pdf-route-label">当前页</div>
+              <div class="pdf-route-value" data-pdf-route-current>等待 PDF</div>
+            </div>
+            <div class="pdf-route-chip">
+              <div class="pdf-route-label">下一未处理</div>
+              <div class="pdf-route-value" data-pdf-route-pending>等待队列</div>
+            </div>
+            <div class="pdf-route-chip">
+              <div class="pdf-route-label">下一关注</div>
+              <div class="pdf-route-value" data-pdf-route-concern>等待队列</div>
+            </div>
+          </div>
+        </div>
+      </section>
       <section class="pdf-search-strip" data-pdf-search-strip aria-label="PDF 原文检索">
         <label class="pdf-search-box">
           <span class="pdf-search-label">原文检索</span>
