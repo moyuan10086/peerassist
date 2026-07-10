@@ -216,6 +216,22 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert 'data-stage-status="active"' in html
     assert "data-stream-log" in html
     assert "data-review-progress" in html
+    assert "data-queue-filterbar" in html
+    assert 'data-queue-filter="all"' in html
+    assert 'data-queue-filter="major"' in html
+    assert 'data-queue-filter="clarification"' in html
+    assert 'data-queue-filter="pdf"' in html
+    assert "data-queue-search" in html
+    assert "data-queue-result-count" in html
+    assert "data-queue-empty" in html
+    assert "applyQueueFilter" in html
+    assert "搜索队列" in html
+    assert "全部" in html
+    assert "主要问题" in html
+    assert "需澄清" in html
+    assert "有 PDF 证据" in html
+    assert "data-concern-level" in html
+    assert "data-concern-search" in html
     assert "Evidence Preview" in html
     assert "证据账本" in html
     assert "data-trace-filter" in html

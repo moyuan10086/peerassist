@@ -850,6 +850,54 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-bottom: 1px solid var(--line);
       background: linear-gradient(90deg, #f6fbfa, #f8f8ff);
     }}
+    .queue-filterbar {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 260px) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfdfc;
+    }}
+    .queue-segmented {{
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }}
+    .queue-filter-button {{
+      width: auto;
+      min-height: 30px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      color: #40504b;
+      background: #fff;
+      font-size: 12px;
+      white-space: nowrap;
+    }}
+    .queue-filter-button[aria-pressed="true"] {{
+      border-color: var(--accent);
+      color: #fff;
+      background: var(--accent);
+      box-shadow: 0 8px 18px rgba(15, 118, 110, 0.14);
+    }}
+    .queue-search {{
+      min-height: 32px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 10px;
+      color: var(--ink);
+      background: #fffefb;
+      font: inherit;
+      font-size: 12px;
+    }}
+    .queue-result-count {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 820;
+      white-space: nowrap;
+    }}
     .queue-progress-line {{
       margin-top: 3px;
       color: var(--muted);
@@ -865,6 +913,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       padding: 16px 0;
       border-bottom: 1px solid var(--line);
     }}
+    .item[hidden] {{ display: none; }}
+    .queue-empty {{
+      margin: 10px 16px 18px;
+      border: 1px dashed #cbd6d2;
+      border-radius: 8px;
+      padding: 14px;
+      color: var(--muted);
+      background: #fbfdfc;
+      font-size: 12px;
+      text-align: center;
+    }}
+    .queue-empty[hidden] {{ display: none; }}
     .item:last-child {{ border-bottom: 0; }}
     .item h2 {{ margin: 0 0 10px; font-size: 18px; line-height: 1.25; letter-spacing: 0; }}
     .tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }}
@@ -1258,6 +1318,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .agent-flow {{ grid-template-columns: 1fr 1fr; }}
       .item {{ grid-template-columns: 1fr; }}
       .queue-toolbar {{ grid-template-columns: 1fr; }}
+      .queue-filterbar {{ grid-template-columns: 1fr; }}
+      .queue-result-count {{ white-space: normal; }}
       .right-stack {{ grid-template-columns: 1fr; }}
     }}
   </style>
@@ -1371,7 +1433,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           </div>
           <div class="compact-meter" aria-label="人工确认完成度"><span style="width: {review_progress}%"></span></div>
         </div>
+        <div class="queue-filterbar" data-queue-filterbar>
+          <div class="queue-segmented" aria-label="审稿队列筛选">
+            <button class="queue-filter-button" type="button" data-queue-filter="all" aria-pressed="true">全部</button>
+            <button class="queue-filter-button" type="button" data-queue-filter="major" aria-pressed="false">主要问题</button>
+            <button class="queue-filter-button" type="button" data-queue-filter="clarification" aria-pressed="false">需澄清</button>
+            <button class="queue-filter-button" type="button" data-queue-filter="pdf" aria-pressed="false">有 PDF 证据</button>
+          </div>
+          <input class="queue-search" type="search" data-queue-search placeholder="搜索队列" aria-label="搜索审稿队列">
+          <div class="queue-result-count" data-queue-result-count>{len(items)} 条关注点</div>
+        </div>
         <div class="queue-body">{rows}</div>
+        <div class="queue-empty" data-queue-empty hidden>当前筛选条件下暂无审稿关注点。</div>
       </section>
     </section>
     <aside class="right-stack">
@@ -1530,6 +1603,33 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const empty = document.querySelector('[data-trace-empty]');
       if (empty) empty.dataset.visible = String(visibleCount === 0);
     }}
+    function applyQueueFilter(nextFilter) {{
+      const activeFilter = nextFilter || document.querySelector('[data-queue-filter][aria-pressed="true"]')?.dataset.queueFilter || 'all';
+      const query = String(document.querySelector('[data-queue-search]')?.value || '').trim().toLowerCase();
+      const items = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      let visibleCount = 0;
+      items.forEach((item) => {{
+        const level = String(item.dataset.concernLevel || '').toLowerCase();
+        const hasPdfPage = Number(item.dataset.pdfPage || 0) > 0;
+        const searchable = String(item.dataset.concernSearch || item.textContent || '').toLowerCase();
+        const matchesFilter =
+          activeFilter === 'all' ||
+          (activeFilter === 'major' && level.includes('major')) ||
+          (activeFilter === 'clarification' && level.includes('clarification')) ||
+          (activeFilter === 'pdf' && hasPdfPage);
+        const matchesQuery = !query || searchable.includes(query);
+        const shown = matchesFilter && matchesQuery;
+        item.hidden = !shown;
+        if (shown) visibleCount += 1;
+      }});
+      document.querySelectorAll('[data-queue-filter]').forEach((button) => {{
+        button.setAttribute('aria-pressed', String(button.dataset.queueFilter === activeFilter));
+      }});
+      const count = document.querySelector('[data-queue-result-count]');
+      if (count) count.textContent = `${{visibleCount}} / ${{items.length}} 条关注点`;
+      const empty = document.querySelector('[data-queue-empty]');
+      if (empty) empty.hidden = visibleCount > 0;
+    }}
     function clearAnnotationActiveState() {{
       document.querySelectorAll('[data-active="true"]').forEach((node) => {{
         delete node.dataset.active;
@@ -1637,6 +1737,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-trace-filter]').forEach((button) => {{
       button.addEventListener('click', () => applyTraceFilter(button.dataset.traceFilter || 'all'));
     }});
+    document.querySelectorAll('[data-queue-filter]').forEach((button) => {{
+      button.addEventListener('click', () => applyQueueFilter(button.dataset.queueFilter || 'all'));
+    }});
+    document.querySelectorAll('[data-queue-search]').forEach((input) => {{
+      input.addEventListener('input', () => applyQueueFilter());
+    }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
@@ -1689,6 +1795,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       }});
     }});
     applyTraceFilter('all');
+    applyQueueFilter('all');
     connectEventStream();
     window.setInterval(() => refreshRuntime().catch(() => {{}}), 15000);
   </script>
@@ -2642,6 +2749,27 @@ def _render_item(item: dict[str, Any]) -> str:
     evidence_anchor = str(first_evidence.get("id") or concern_id)
     pdf_page = _evidence_pdf_page(first_evidence)
     pdf_page_attr = f' data-pdf-page="{pdf_page}"' if pdf_page is not None else ""
+    level = str(item.get("level") or "")
+    category = str(item.get("category") or "")
+    status = str(item.get("status") or "")
+    title = _localized_copy(str(item.get("title") or "未命名关注点"))
+    impact = _localized_copy(str(item.get("impact") or ""))
+    benign_explanation = _localized_copy(str(item.get("benign_explanation") or ""))
+    author_action = _localized_copy(str(item.get("author_action") or ""))
+    search_blob = " ".join(
+        [
+            concern_id,
+            level,
+            category,
+            status,
+            title,
+            impact,
+            benign_explanation,
+            author_action,
+            " ".join(str(row.get("id") or "") for row in evidence if isinstance(row, dict)),
+            " ".join(str(row.get("locator") or "") for row in evidence if isinstance(row, dict)),
+        ]
+    )
     evidence_rows = "".join(
         (
             f'<div class="evidence-row"{_evidence_pdf_page_attr(row)}>'
@@ -2671,19 +2799,19 @@ def _render_item(item: dict[str, Any]) -> str:
     )
     previous_text = html.escape(str(item.get("author_action") or ""), quote=True)
     return f"""
-<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-previous-text="{previous_text}"{pdf_page_attr}>
+<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-previous-text="{previous_text}" data-concern-level="{html.escape(level, quote=True)}" data-concern-category="{html.escape(category, quote=True)}" data-concern-status="{html.escape(status, quote=True)}" data-concern-title="{html.escape(title, quote=True)}" data-concern-search="{html.escape(search_blob, quote=True)}"{pdf_page_attr}>
   <div>
     <div class="tags">
-      <span class="tag">{html.escape(_localized_status(str(item.get('status', ''))))}</span>
-      <span class="tag level">{html.escape(_localized_level(str(item.get('level', ''))))}</span>
-      <span class="tag">{html.escape(_localized_category(str(item.get('category', ''))))}</span>
+      <span class="tag">{html.escape(_localized_status(status))}</span>
+      <span class="tag level">{html.escape(_localized_level(level))}</span>
+      <span class="tag">{html.escape(_localized_category(category))}</span>
       {source_agent_tags}
     </div>
-    <h2>{html.escape(_localized_copy(str(item.get('title', '未命名关注点'))))}</h2>
-    <p class="copy-block"><span class="label">影响</span><br>{html.escape(_localized_copy(str(item.get('impact', ''))))}</p>
-    <p class="copy-block"><span class="label">可能的良性解释</span><br>{html.escape(_localized_copy(str(item.get('benign_explanation', ''))))}</p>
+    <h2>{html.escape(title)}</h2>
+    <p class="copy-block"><span class="label">影响</span><br>{html.escape(impact)}</p>
+    <p class="copy-block"><span class="label">可能的良性解释</span><br>{html.escape(benign_explanation)}</p>
     <div class="evidence"><span class="label">证据</span>{evidence_rows}</div>
-    <textarea aria-label="建议作者处理方式">{html.escape(_localized_copy(str(item.get('author_action', ''))))}</textarea>
+    <textarea aria-label="建议作者处理方式">{html.escape(author_action)}</textarea>
   </div>
   <div class="actions">{buttons}</div>
 </section>
