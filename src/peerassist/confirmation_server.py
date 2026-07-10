@@ -12,8 +12,10 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from common.pipeline_context import peerassist_stage_dir
+from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
+from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
+from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
 
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
@@ -1611,8 +1613,16 @@ def _run_agent_review(
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ],
     )
+    response_payload = _extract_agent_review_payload(response)
+    report_markdown = str(response_payload.get("report_markdown") or response).strip()
     draft_path = peerassist_stage_dir(run_dir) / "agent_review_draft.md"
-    draft_path.write_text(response + "\n", encoding="utf-8")
+    draft_path.write_text(report_markdown + "\n", encoding="utf-8")
+    structured = _persist_agent_review_concerns(
+        run_dir=run_dir,
+        paper_id=paper_id,
+        model=config["model"],
+        response_text=response,
+    )
     return {
         "schema_version": "peerassist.agent_review_result.v1",
         "model": config["model"],
@@ -1620,8 +1630,155 @@ def _run_agent_review(
         "selected_text_chars": len(selected_text),
         "context": context["context_summary"],
         "draft_path": str(draft_path),
-        "suggestion": response,
+        **structured,
+        "suggestion": report_markdown,
     }
+
+
+def _persist_agent_review_concerns(
+    *, run_dir: Path, paper_id: str, model: str, response_text: str
+) -> dict[str, Any]:
+    out_dir = peerassist_stage_dir(run_dir)
+    payload = _extract_agent_review_payload(response_text)
+    concern_rows = payload.get("concerns") if isinstance(payload.get("concerns"), list) else []
+    generated = [
+        concern.model_dump(mode="json")
+        for concern in _concerns_from_agent_review_rows(
+            rows=concern_rows,
+            existing_count=_existing_llm_concern_count(out_dir / "peerassist_concerns.json"),
+            model=model,
+        )
+    ]
+    if not generated:
+        return {
+            "structured_concern_count": 0,
+            "queue_items": _queue_item_count(out_dir / "confirmation_review_queue.json"),
+            "concerns_path": str(out_dir / "peerassist_concerns.json"),
+            "queue_path": str(out_dir / "confirmation_review_queue.json"),
+        }
+
+    concerns_path = out_dir / "peerassist_concerns.json"
+    existing_payload = read_json_safely(concerns_path)
+    existing = existing_payload.get("concerns") if isinstance(existing_payload.get("concerns"), list) else []
+    all_concerns = [row for row in existing if isinstance(row, dict)] + generated
+    write_json_file(
+        concerns_path,
+        {
+            "schema_version": "peerassist.concerns.v1",
+            "mode": str(existing_payload.get("mode") or "fast"),
+            "paper_id": paper_id,
+            "concerns": all_concerns,
+        },
+    )
+
+    evidence_lookup = _evidence_lookup_from_ledger(out_dir / "evidence_ledger.json")
+    typed_concerns = [Concern.model_validate(row) for row in all_concerns]
+    bundle = build_confirmation_bundle(concerns=typed_concerns, evidence_lookup=evidence_lookup)
+    bundle_path = out_dir / "confirmation_bundle.json"
+    queue_path = out_dir / "confirmation_review_queue.json"
+    write_json_file(bundle_path, bundle)
+    queue = build_confirmation_review_queue(bundle)
+    write_json_file(queue_path, queue)
+    return {
+        "structured_concern_count": len(generated),
+        "queue_items": len(queue.get("items") if isinstance(queue.get("items"), list) else []),
+        "concerns_path": str(concerns_path),
+        "queue_path": str(queue_path),
+        "bundle_path": str(bundle_path),
+    }
+
+
+def _extract_agent_review_payload(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    candidates = [stripped]
+    if "```" in stripped:
+        parts = stripped.split("```")
+        candidates.extend(part.strip() for part in parts if "{" in part and "}" in part)
+    for candidate in candidates:
+        if candidate.startswith("json"):
+            candidate = candidate[4:].strip()
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start < 0 or end <= start:
+                continue
+            try:
+                payload = json.loads(candidate[start : end + 1])
+            except json.JSONDecodeError:
+                continue
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _concerns_from_agent_review_rows(
+    *, rows: list[Any], existing_count: int, model: str
+) -> list[Concern]:
+    concerns: list[Concern] = []
+    for offset, row in enumerate(rows, start=existing_count + 1):
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        evidence_ids = [str(item) for item in row.get("evidence_ids", []) if str(item).strip()]
+        impact = str(row.get("impact") or "").strip()
+        benign_explanation = str(row.get("benign_explanation") or "").strip()
+        author_action = str(row.get("author_action") or "").strip()
+        if not title or not evidence_ids or not impact or not author_action:
+            continue
+        concerns.append(
+            Concern(
+                id=str(row.get("id") or f"concern_llm_review_{offset:03d}"),
+                level=_safe_concern_level(str(row.get("level") or "")),
+                category=str(row.get("category") or "full_paper_review"),
+                title=title,
+                evidence_ids=evidence_ids,
+                impact=impact,
+                benign_explanation=benign_explanation
+                or "模型未给出充分善意解释，需审稿人复核。",
+                author_action=author_action,
+                status=ConcernStatus.PENDING_HUMAN_CONFIRMATION,
+                source_agent_ids=["llm_full_paper_review_agent"],
+                metadata={"model": model, "source": "agent_review"},
+            )
+        )
+    return concerns
+
+
+def _safe_concern_level(value: str) -> ConcernLevel:
+    try:
+        return ConcernLevel(value)
+    except ValueError:
+        return ConcernLevel.CLARIFICATION_NEEDED
+
+
+def _existing_llm_concern_count(path: Path) -> int:
+    payload = read_json_safely(path)
+    rows = payload.get("concerns") if isinstance(payload.get("concerns"), list) else []
+    return sum(
+        1
+        for row in rows
+        if isinstance(row, dict) and str(row.get("id") or "").startswith("concern_llm_review_")
+    )
+
+
+def _queue_item_count(path: Path) -> int:
+    payload = read_json_safely(path)
+    rows = payload.get("items") if isinstance(payload.get("items"), list) else []
+    return len(rows)
+
+
+def _evidence_lookup_from_ledger(path: Path) -> dict[str, str]:
+    payload = read_json_safely(path)
+    rows = payload.get("items") if isinstance(payload.get("items"), list) else []
+    lookup: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        evidence_id = str(row.get("id") or "").strip()
+        if evidence_id:
+            lookup[evidence_id] = str(row.get("locator") or evidence_id)
+    return lookup
 
 
 def _build_full_paper_review_context(
@@ -1670,10 +1827,27 @@ def _build_full_paper_review_context(
         "local_agent_results": _summarize_agent_results_for_review(agent_results),
         "existing_confirmation_queue": queue_items[:8],
         "reviewer_focus_text": selected_text[:2000],
+        "output_contract": {
+            "format": "strict_json_only",
+            "schema": {
+                "report_markdown": "中文审稿辅助报告 Markdown，包含论文概要、重点阅读路线、主要意见、次要意见、编辑关注、系统局限。",
+                "concerns": [
+                    {
+                        "level": "major_concern | minor_concern | clarification_needed | editor_note",
+                        "category": "structure | methodology | statistics | figure_table | citation | reproducibility | ethics | other",
+                        "title": "问题标题",
+                        "evidence_ids": ["必须来自 paper_outline_and_evidence 中的 id"],
+                        "impact": "为什么影响论文结论、清晰度或可复现性",
+                        "benign_explanation": "至少一种可能的善意解释",
+                        "author_action": "建议作者如何修改或补充",
+                    }
+                ],
+            },
+        },
         "task": (
-            "请基于整篇论文证据台账和已有确定性/本地代理结果，生成中文审稿辅助草稿。"
-            "输出结构必须包含：一、论文概要；二、重点阅读路线；三、主要意见；四、次要意见；"
-            "五、需要编辑关注的问题；六、系统局限。主要意见每条包含位置、证据、影响、可能的善意解释、建议作者如何修改。"
+            "请基于整篇论文证据台账和已有确定性/本地代理结果生成中文审稿辅助报告。"
+            "只返回一个 JSON 对象，不要返回 Markdown 代码围栏，不要添加 JSON 之外的解释。"
+            "concerns 中每条意见必须绑定 evidence_ids；证据不足的问题不要写入 concerns，可在 report_markdown 的系统局限中说明。"
         ),
     }
 
@@ -1780,7 +1954,7 @@ def _chat_completion(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=60) as response:
+        with urlopen(request, timeout=_model_request_timeout_seconds()) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")[:500]
@@ -1794,6 +1968,15 @@ def _chat_completion(
     if not content:
         raise RuntimeError("模型服务未返回可用审稿建议。")
     return str(content)
+
+
+def _model_request_timeout_seconds() -> float:
+    raw = os.getenv("PEERASSIST_OPENAI_TIMEOUT_SECONDS", "240").strip()
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return 240
+    return timeout if timeout > 0 else 240
 
 
 def _resolve_model_api_key() -> str:

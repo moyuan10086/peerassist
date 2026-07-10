@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import peerassist.confirmation_server as confirmation_server
 from common.pipeline_context import init_full_pipeline_context, peerassist_stage_dir, write_json_file
 from peerassist.confirmation_server import create_confirmation_server, render_confirmation_page
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
@@ -110,6 +111,27 @@ def _seed_peerassist_stage(run_dir: Path) -> Path:
                 }
             ],
         },
+    )
+    write_json_file(
+        out_dir / "evidence_ledger.json",
+        {
+            "schema_version": "peerassist.evidence_ledger.v1",
+            "paper_id": "demo",
+            "items": [
+                {
+                    "id": "P01-L001",
+                    "type": "text_span",
+                    "page": 1,
+                    "section": "Methods",
+                    "locator": "p.1 line 1",
+                    "text": "The paper evaluates one dataset without an ablation study.",
+                }
+            ],
+        },
+    )
+    write_json_file(
+        out_dir / "deterministic_checks.json",
+        {"schema_version": "peerassist.deterministic_checks.v1", "mode": "fast", "checks": []},
     )
     (out_dir / "tool_trace.jsonl").write_text(
         "\n".join(
@@ -342,6 +364,104 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_agent_review_writes_structured_concerns_to_confirmation_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_peerassist_stage(run_dir)
+    monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "test-key")
+
+    def fake_chat_completion(**_kwargs) -> str:
+        return json.dumps(
+            {
+                "report_markdown": "# 审稿辅助报告\n\n## 三、主要意见\n- Ablation evidence is missing.",
+                "concerns": [
+                    {
+                        "level": "major_concern",
+                        "category": "methodology",
+                        "title": "Ablation evidence is missing",
+                        "evidence_ids": ["P01-L001"],
+                        "impact": "The current evidence does not isolate the proposed component.",
+                        "benign_explanation": "The ablation may be available in supplementary material.",
+                        "author_action": "Please add an ablation study or explain where it is reported.",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(confirmation_server, "_chat_completion", fake_chat_completion)
+    server = create_confirmation_server(
+        run_dir=run_dir,
+        paper_id="demo",
+        host="127.0.0.1",
+        port=0,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    try:
+        request = urllib.request.Request(
+            f"{base_url}/api/agent-review",
+            data=json.dumps({"selected_text": ""}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        assert result["structured_concern_count"] == 1
+        assert result["suggestion"].startswith("# 审稿辅助报告")
+        assert result["queue_items"] == 2
+        concerns = json.loads((out_dir / "peerassist_concerns.json").read_text(encoding="utf-8"))
+        queue = json.loads((out_dir / "confirmation_review_queue.json").read_text(encoding="utf-8"))
+        generated = [row for row in concerns["concerns"] if row["id"].startswith("concern_llm_review_")]
+        assert generated[0]["title"] == "Ablation evidence is missing"
+        assert generated[0]["evidence_ids"] == ["P01-L001"]
+        assert generated[0]["status"] == "pending_human_confirmation"
+        assert any(item["id"] == generated[0]["id"] for item in queue["items"])
+        assert (out_dir / "agent_review_draft.md").read_text(encoding="utf-8").startswith(
+            "# 审稿辅助报告"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:
+    observed: dict[str, float] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"choices": [{"message": {"content": "审稿建议"}}]},
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+    def fake_urlopen(_request, *, timeout: float):
+        observed["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("PEERASSIST_OPENAI_TIMEOUT_SECONDS", "180")
+    monkeypatch.setattr(confirmation_server, "urlopen", fake_urlopen)
+
+    result = confirmation_server._chat_completion(
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        model="gpt-test",
+        messages=[{"role": "user", "content": "review"}],
+    )
+
+    assert result == "审稿建议"
+    assert observed["timeout"] == 180
 
 
 def test_peerassist_confirm_server_console_script_is_registered() -> None:
