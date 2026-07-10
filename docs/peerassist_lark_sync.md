@@ -68,3 +68,11 @@ model keys, paper secrets, or reviewer-private material here.
 - The peerassist-eval aggregate CLI summary now prints failed_target_names and failed_gate_names so PeerAssist-Eval-v1 failures identify both metric thresholds and frozen-set integrity gates.
 - Feishu document revision 29 adds section "十一、2026-07-11 Eval 硬门禁失败摘要" after the verified tail content block.
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+
+## 2026-07-11 00:22 CST - Feishu document integrity repair
+
+- User reported the Feishu document looked incomplete and possibly overwritten.
+- Investigation found no current full-document wipe, but did find structure drift: empty headings and several late-night logs grouped under an older heading/list because earlier syncs anchored on heading blocks.
+- Feishu document revision 33 adds section "十二、2026-07-11 文档完整性修复版（以此为准）" after verified tail content block doxcnQBmBBK452sH3G6usanTiXe.
+- Repair method: block_insert_after only; no overwrite, no delete, no history revert.
+- Future Feishu sync rule: fetch outline, anchor to a real tail content block, write with block_insert_after, then fetch outline/section to verify title and body.
