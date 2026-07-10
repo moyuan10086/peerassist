@@ -505,6 +505,39 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       text-align: center;
       white-space: nowrap;
     }}
+    .pdf-page-rail {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      overflow-x: auto;
+      padding: 8px 10px;
+      border-bottom: 1px solid #c7d0cc;
+      background: rgba(242, 247, 245, 0.96);
+      scrollbar-width: thin;
+    }}
+    .pdf-page-rail-label {{
+      flex: 0 0 auto;
+      color: #60706c;
+      font-size: 11px;
+      font-weight: 850;
+      padding: 0 4px;
+    }}
+    .pdf-page-button {{
+      width: auto;
+      flex: 0 0 auto;
+      min-width: 32px;
+      min-height: 28px;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 850;
+      background: #fff;
+    }}
+    .pdf-page-button[aria-current="page"] {{
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }}
     .pdf-reader-stage {{
       position: relative;
       min-height: 780px;
@@ -1018,6 +1051,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .paper-sheet {{ min-height: 420px; padding: 28px 28px 28px 38px; }}
       .source-pdf-shell {{ min-height: 520px; }}
       .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
+      .pdf-page-rail {{ padding: 8px; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
       .agent-flow {{ grid-template-columns: 1fr 1fr; }}
@@ -1418,6 +1452,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const status = reader.querySelector('[data-pdf-status]');
       const loading = reader.querySelector('[data-pdf-loading]');
       const fallback = reader.querySelector('[data-pdf-fallback]');
+      const pageRail = reader.querySelector('[data-pdf-page-rail]');
       const context = canvas.getContext('2d');
       let pdfDoc = null;
       let pageNumber = 1;
@@ -1441,6 +1476,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
             (action === 'prev' && pageNumber <= 1) ||
             (action === 'next' && pdfDoc && pageNumber >= pdfDoc.numPages);
         }});
+        reader.querySelectorAll('[data-pdf-page-jump]').forEach((button) => {{
+          button.setAttribute('aria-current', button.dataset.pdfPageJump === String(pageNumber) ? 'page' : 'false');
+        }});
       }}
 
       window.peerassistPdfGoToPage = async (page) => {{
@@ -1450,6 +1488,30 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         await renderPage();
         stage?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
       }};
+
+      function buildPdfPageRail(pageCount) {{
+        if (!pageRail) return;
+        pageRail.replaceChildren();
+        const label = document.createElement('span');
+        label.className = 'pdf-page-rail-label';
+        label.textContent = 'PDF 页码导航';
+        pageRail.appendChild(label);
+        for (let page = 1; page <= pageCount; page += 1) {{
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'pdf-page-button';
+          button.dataset.pdfPageJump = String(page);
+          button.textContent = String(page);
+          button.setAttribute('aria-label', `跳转到第 ${{page}} 页`);
+          button.addEventListener('click', () => {{
+            window.peerassistPdfGoToPage(page).catch((error) => {{
+              showToast(`PDF 跳页未完成：${{error.message || '未知错误'}}`);
+            }});
+          }});
+          pageRail.appendChild(button);
+        }}
+        updateButtons();
+      }}
 
       function stageWidth() {{
         return Math.max(360, (stage?.clientWidth || 780) - 36);
@@ -1511,6 +1573,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       pdfjsLib.getDocument('/paper.pdf').promise
         .then((document) => {{
           pdfDoc = document;
+          buildPdfPageRail(document.numPages);
           updateButtons();
           return renderPage();
         }})
@@ -2484,6 +2547,9 @@ def _render_source_pdf_viewer() -> str:
           <button class="pdf-icon-button" type="button" title="放大" aria-label="放大" data-pdf-action="zoom-in">＋</button>
           <button class="pdf-icon-button" type="button" title="适应宽度" aria-label="适应宽度" data-pdf-action="fit">⤢</button>
         </div>
+      </div>
+      <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">
+        <span class="pdf-page-rail-label">PDF 页码导航</span>
       </div>
       <div class="pdf-reader-stage" data-pdf-stage>
         <div class="pdf-loading" data-pdf-loading>正在渲染论文页面</div>
