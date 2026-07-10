@@ -1192,6 +1192,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       color: var(--accent-strong);
       border-color: #b8d8cf;
     }}
+    .inline-button.primary {{
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }}
     .trace-toolbar {{
       display: flex;
       flex-wrap: wrap;
@@ -1725,6 +1730,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           return;
         }}
         document.querySelector('[data-panel="model-entry"]')?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        const startButton = document.querySelector('[data-agent-review-start]');
+        if (startButton) {{
+          startButton.click();
+          showToast('正在基于 PDF 选区启动智能审稿');
+          return;
+        }}
         showToast('已作为智能审稿关注文本');
       }});
     }});
@@ -1770,7 +1781,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         ).trim();
         if (!stream) return;
         button.disabled = true;
-        stream.textContent = '正在按方法论启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...';
+        const pageCopy = selectedEvidence.page ? `PDF 第 ${{selectedEvidence.page}} 页选区` : 'PDF 选区';
+        stream.textContent = selectedEvidence.text
+          ? `正在基于${{pageCopy}}启动智能审稿：读取论文证据台账、确定性核查、本地代理结果，并优先核对当前选中文字...`
+          : '正在按方法论启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...';
         try {{
           const response = await fetch('/api/agent-review', {{
             method: 'POST',
@@ -3002,7 +3016,7 @@ def _render_source_pdf_viewer() -> str:
         </div>
         <div class="pdf-selection-actions">
           <button class="inline-button" type="button" data-pdf-selection-copy>复制选区</button>
-          <button class="inline-button" type="button" data-pdf-selection-use>作为审稿关注</button>
+          <button class="inline-button primary" type="button" data-pdf-selection-use data-pdf-selection-review>基于选区审稿</button>
           <button class="inline-button" type="button" data-pdf-selection-clear>清空</button>
         </div>
       </div>

@@ -300,7 +300,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistSelectedEvidence" in html
     assert "capturePdfTextSelection" in html
     assert "PDF 第 ${selectedEvidence.page || '未知'} 页选区" in html
-    assert "已作为智能审稿关注文本" in html
+    assert "正在基于 PDF 选区启动智能审稿" in html
+    assert "并优先核对当前选中文字" in html
     assert "PDF 页码导航" in html
     assert "已定位到论文高亮" in html
     assert "已定位到审稿队列" in html
@@ -309,6 +310,15 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "p.1 line 1" in html
     assert "data-action=\"confirm\"" in html
     assert "data-action=\"rewrite\"" in html
+
+
+def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
+    html = confirmation_server._render_source_pdf_viewer()
+
+    assert "data-pdf-selection-review" in html
+    assert "data-pdf-selection-use" in html
+    assert "基于选区审稿" in html
+    assert "inline-button primary" in html
 
 
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:
