@@ -140,3 +140,13 @@ model keys, paper secrets, or reviewer-private material here.
 - Browser verification: Playwright desktop 1440x1100 and mobile 390x900 checks found the paper viewer, highlight, margin comment, trace filter, and artifact copy controls with overflow=0.
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
 - Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.
+
+## 2026-07-11 03:02 CST - PeerAssist annotation-to-queue linking
+
+- Paper margin comments now include "定位队列" controls that activate and scroll to the linked human-confirmation queue item.
+- Review queue items now include "查看原文高亮" controls that activate and scroll back to the paper highlight.
+- The selected paper highlight, margin comment, and queue item share the same active state so reviewers can keep context while moving between PDF/Word-style reading and structured confirmation.
+- Public URL verified: http://101.47.158.17:8766/ returns "查看原文高亮", "定位队列", focusAnnotation, and data-paper-concern.
+- Browser verification: Playwright clicked both directions, observed "已定位到审稿队列" and "已定位到论文高亮", and reported overflow=0.
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+- Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.

@@ -487,6 +487,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: linear-gradient(180deg, rgba(255, 232, 117, 0.52), rgba(255, 232, 117, 0.24));
       box-shadow: inset 0 -2px rgba(15, 118, 110, 0.26);
     }}
+    .paper-highlight[data-active="true"] {{
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      background: linear-gradient(180deg, rgba(255, 220, 72, 0.78), rgba(255, 220, 72, 0.36));
+    }}
     .paper-comments {{
       display: grid;
       gap: 10px;
@@ -498,6 +503,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-radius: 8px;
       background: #f4fbf8;
       padding: 10px;
+    }}
+    .paper-comment[data-active="true"], .item[data-active="true"] {{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.13);
     }}
     .comment-anchor {{
       color: var(--accent-strong);
@@ -515,6 +524,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       color: var(--muted);
       font-size: 11px;
       overflow-wrap: anywhere;
+    }}
+    .comment-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
     }}
     .queue-toolbar {{
       display: grid;
@@ -1018,6 +1033,25 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const empty = document.querySelector('[data-trace-empty]');
       if (empty) empty.dataset.visible = String(visibleCount === 0);
     }}
+    function clearAnnotationActiveState() {{
+      document.querySelectorAll('[data-active="true"]').forEach((node) => {{
+        delete node.dataset.active;
+      }});
+    }}
+    function focusAnnotation(concernId, evidenceId, target) {{
+      clearAnnotationActiveState();
+      const item = concernId ? document.querySelector(`[data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
+      const highlight = evidenceId ? document.querySelector(`[data-evidence-anchor="${{CSS.escape(evidenceId)}}"]`) : null;
+      const comment = concernId ? document.querySelector(`[data-paper-concern="${{CSS.escape(concernId)}}"].paper-comment`) : null;
+      if (item) item.dataset.active = 'true';
+      if (highlight) highlight.dataset.active = 'true';
+      if (comment) comment.dataset.active = 'true';
+      const scrollTarget = target === 'queue' ? item : highlight || comment;
+      if (scrollTarget) {{
+        scrollTarget.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+      }}
+      showToast(target === 'queue' ? '已定位到审稿队列' : '已定位到论文高亮');
+    }}
     function updateRuntime(state, source) {{
       const runtime = state.runtime || {{}};
       const status = document.getElementById('runtime-status');
@@ -1072,6 +1106,22 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }});
     document.querySelectorAll('[data-trace-filter]').forEach((button) => {{
       button.addEventListener('click', () => applyTraceFilter(button.dataset.traceFilter || 'all'));
+    }});
+    document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue');
+      }});
+    }});
+    document.querySelectorAll('.paper-comment').forEach((comment) => {{
+      comment.addEventListener('click', (event) => {{
+        if (event.target.closest('button')) return;
+        focusAnnotation(comment.dataset.paperConcern || '', comment.dataset.marginComment || '', 'queue');
+      }});
+    }});
+    document.querySelectorAll('[data-paper-target]:not([data-jump-concern])').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        focusAnnotation(button.dataset.paperConcern || '', button.dataset.paperTarget || '', 'paper');
+      }});
     }});
     applyTraceFilter('all');
     connectEventStream();
@@ -1216,6 +1266,9 @@ def _sse_stream(payload: dict[str, Any]) -> bytes:
 
 def _render_item(item: dict[str, Any]) -> str:
     evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+    first_evidence = next((row for row in evidence if isinstance(row, dict)), {})
+    concern_id = str(item.get("id") or "")
+    evidence_anchor = str(first_evidence.get("id") or concern_id)
     evidence_rows = "".join(
         (
             '<div class="evidence-row">'
@@ -1233,6 +1286,11 @@ def _render_item(item: dict[str, Any]) -> str:
         f'<button type="button" data-action="{html.escape(str(action))}">{html.escape(_localized_action(str(action)))}</button>'
         for action in actions
     )
+    buttons = (
+        f'<button type="button" data-paper-target="{html.escape(evidence_anchor, quote=True)}" '
+        f'data-paper-concern="{html.escape(concern_id, quote=True)}">查看原文高亮</button>'
+        + buttons
+    )
     source_agents = item.get("source_agent_ids") if isinstance(item.get("source_agent_ids"), list) else []
     source_agent_tags = "".join(
         f'<span class="tag">{html.escape(_display_name(str(agent_id)))}</span>'
@@ -1240,7 +1298,7 @@ def _render_item(item: dict[str, Any]) -> str:
     )
     previous_text = html.escape(str(item.get("author_action") or ""), quote=True)
     return f"""
-<section class="item" data-concern-id="{html.escape(str(item.get('id', '')), quote=True)}" data-previous-text="{previous_text}">
+<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-previous-text="{previous_text}">
   <div>
     <div class="tags">
       <span class="tag">{html.escape(_localized_status(str(item.get('status', ''))))}</span>
@@ -1316,6 +1374,7 @@ def _render_evidence_focus(items: list[Any]) -> str:
 def _render_paper_review_surface(items: list[Any], *, paper_id: str) -> str:
     concerns = [item for item in items if isinstance(item, dict)]
     first_concern = concerns[0] if concerns else {}
+    first_concern_id = str(first_concern.get("id") or "")
     first_title = _localized_copy(str(first_concern.get("title") or "待核查关注点"))
     first_impact = _localized_copy(str(first_concern.get("impact") or "当前关注点需要审稿人结合证据确认。"))
     evidence = first_concern.get("evidence") if isinstance(first_concern.get("evidence"), list) else []
@@ -1342,7 +1401,7 @@ def _render_paper_review_surface(items: list[Any], *, paper_id: str) -> str:
       <div class="paper-section-title">Results</div>
       <p class="paper-line" data-line="1">
         We report the primary outcome and associated percentage summary for the evaluated cohort.
-        <span class="paper-highlight" data-evidence-anchor="{html.escape(evidence_id, quote=True)}">
+        <span class="paper-highlight" data-evidence-anchor="{html.escape(evidence_id, quote=True)}" data-paper-concern="{html.escape(first_concern_id, quote=True)}">
           {html.escape(first_title)}
         </span>
       </p>
@@ -1372,15 +1431,19 @@ def _render_margin_comments(items: list[dict[str, Any]]) -> str:
         evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
         first_evidence = evidence[0] if evidence and isinstance(evidence[0], dict) else {}
         evidence_id = str(first_evidence.get("id") or f"C{position:02d}")
+        concern_id = str(item.get("id") or "")
         locator = str(first_evidence.get("locator") or "未标注位置")
         title = _localized_copy(str(item.get("title") or "待核查关注点"))
         action = _localized_copy(str(item.get("author_action") or "请审稿人确认该关注点。"))
         rows.append(
             f"""
-<div class="paper-comment" data-margin-comment="{html.escape(evidence_id, quote=True)}">
+<div class="paper-comment" data-margin-comment="{html.escape(evidence_id, quote=True)}" data-paper-concern="{html.escape(concern_id, quote=True)}">
   <div class="comment-anchor">批注 {position} · {html.escape(evidence_id)} · {html.escape(locator)}</div>
   <div class="comment-title">{html.escape(title)}</div>
   <div class="comment-copy">{html.escape(action)}</div>
+  <div class="comment-actions">
+    <button class="inline-button" type="button" data-jump-concern="{html.escape(concern_id, quote=True)}" data-paper-target="{html.escape(evidence_id, quote=True)}">定位队列</button>
+  </div>
 </div>
 """
         )
