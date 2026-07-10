@@ -317,7 +317,14 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-pdf-annotation-empty" in html
     assert "syncPdfPageAnnotations" in html
     assert "data-pdf-annotation-card" in html
-    assert "核对本条" in html
+    assert "pdf-annotation-actions" in html
+    assert "dataset.action = 'confirm'" in html
+    assert "dataset.action = 'mark_pending'" in html
+    assert "dataset.pdfAnnotationEdit" in html
+    assert "openConcernEditor" in html
+    assert "pdfAnnotation.dataset.active = 'true'" in html
+    assert "已打开该条审稿意见编辑框" in html
+    assert "核对" in html
     assert "data-pdf-page-filter-current" in html
     assert "data-pdf-page-next-concern" in html
     assert "data-pdf-page-jump" in html

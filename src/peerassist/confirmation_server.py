@@ -849,8 +849,22 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 11px;
       overflow-wrap: anywhere;
     }}
-    .pdf-annotation-action {{
+    .pdf-annotation-actions {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 5px;
       margin-top: 8px;
+    }}
+    .pdf-annotation-action {{
+      min-height: 28px;
+      padding: 5px 7px;
+      font-size: 11px;
+      font-weight: 850;
+    }}
+    .pdf-annotation-action.primary {{
+      border-color: var(--accent);
+      color: #fff;
+      background: var(--accent);
     }}
     .pdf-annotation-empty {{
       border: 1px dashed #cfdbd7;
@@ -1869,7 +1883,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
   <script type="application/json" id="peerassist-state">{state_json}</script>
   <script>
     async function submitDecision(button) {{
-      const item = button.closest('[data-concern-id]');
+      const directConcernId = button.dataset.concernId || '';
+      const item = button.closest('.queue-body .item[data-concern-id]')
+        || (directConcernId ? document.querySelector(`.queue-body .item[data-concern-id="${{CSS.escape(directConcernId)}}"]`) : null);
+      if (!item) throw new Error('未找到对应审稿队列项');
       const text = item.querySelector('textarea').value;
       const action = button.dataset.action;
       const payload = {{
@@ -1888,6 +1905,24 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       }});
       if (!response.ok) throw new Error(await response.text());
       window.location.reload();
+    }}
+    function openConcernEditor(concernId, pdfPage) {{
+      focusAnnotation(concernId, '', 'queue', pdfPage || '');
+      function markPdfAnnotationActive() {{
+        const pdfAnnotation = concernId ? document.querySelector(`[data-pdf-annotation-card="${{CSS.escape(concernId)}}"]`) : null;
+        if (pdfAnnotation) pdfAnnotation.dataset.active = 'true';
+      }}
+      markPdfAnnotationActive();
+      window.setTimeout(markPdfAnnotationActive, 900);
+      window.setTimeout(() => {{
+        const item = concernId ? document.querySelector(`.queue-body .item[data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
+        const editor = item?.querySelector('textarea');
+        if (editor) {{
+          editor.focus();
+          editor.select();
+          showToast('已打开该条审稿意见编辑框');
+        }}
+      }}, 450);
     }}
     async function refreshRuntime() {{
       const response = await fetch('/api/state');
@@ -2154,8 +2189,15 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         refreshRuntime().catch(() => {{}});
       }};
     }}
-    document.querySelectorAll('button[data-action]').forEach((button) => {{
-      button.addEventListener('click', () => submitDecision(button).catch((error) => alert(error.message)));
+    document.addEventListener('click', (event) => {{
+      const actionButton = event.target.closest('button[data-action]');
+      if (!actionButton) return;
+      submitDecision(actionButton).catch((error) => alert(error.message));
+    }});
+    document.addEventListener('click', (event) => {{
+      const editButton = event.target.closest('[data-pdf-annotation-edit]');
+      if (!editButton) return;
+      openConcernEditor(editButton.dataset.concernId || '', editButton.dataset.pdfPage || '');
     }});
     document.querySelectorAll('[data-copy-path]').forEach((button) => {{
       button.addEventListener('click', () => {{
@@ -2401,14 +2443,36 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           const meta = document.createElement('div');
           meta.className = 'pdf-annotation-meta';
           meta.textContent = `${{level}} · ${{category}} · ${{status}}`;
-          const action = document.createElement('button');
-          action.className = 'inline-button pdf-annotation-action';
-          action.type = 'button';
-          action.textContent = '核对本条';
-          action.addEventListener('click', () => {{
+          const actions = document.createElement('div');
+          actions.className = 'pdf-annotation-actions';
+          const confirm = document.createElement('button');
+          confirm.className = 'inline-button pdf-annotation-action primary';
+          confirm.type = 'button';
+          confirm.dataset.action = 'confirm';
+          confirm.dataset.concernId = concernId;
+          confirm.textContent = '确认';
+          const pending = document.createElement('button');
+          pending.className = 'inline-button pdf-annotation-action';
+          pending.type = 'button';
+          pending.dataset.action = 'mark_pending';
+          pending.dataset.concernId = concernId;
+          pending.textContent = '暂挂';
+          const edit = document.createElement('button');
+          edit.className = 'inline-button pdf-annotation-action';
+          edit.type = 'button';
+          edit.dataset.pdfAnnotationEdit = 'true';
+          edit.dataset.concernId = concernId;
+          edit.dataset.pdfPage = String(pageNumber);
+          edit.textContent = '改写';
+          const locate = document.createElement('button');
+          locate.className = 'inline-button pdf-annotation-action';
+          locate.type = 'button';
+          locate.textContent = '核对';
+          locate.addEventListener('click', () => {{
             window.peerassistFocusAnnotation?.(concernId, '', 'queue', pageNumber);
           }});
-          card.append(titleEl, meta, action);
+          actions.append(confirm, pending, edit, locate);
+          card.append(titleEl, meta, actions);
           annotationList.appendChild(card);
         }});
       }}
