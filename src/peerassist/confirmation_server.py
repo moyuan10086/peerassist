@@ -881,6 +881,79 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 11px;
     }}
     .pdf-activity-empty[hidden] {{ display: none; }}
+    .pdf-tool-trace-strip {{
+      display: grid;
+      gap: 7px;
+      padding: 9px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #f7faf9;
+    }}
+    .pdf-tool-trace-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 900;
+    }}
+    .pdf-tool-trace-list {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }}
+    .pdf-tool-trace-card {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }}
+    .pdf-tool-trace-card[data-status="completed"] {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-tool-trace-card[data-status="failed"] {{
+      border-color: #f0b9b9;
+      background: #fff5f5;
+    }}
+    .pdf-tool-trace-top {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: space-between;
+      min-width: 0;
+    }}
+    .pdf-tool-trace-name {{
+      min-width: 0;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 900;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .pdf-tool-trace-status {{
+      flex: 0 0 auto;
+      border: 1px solid #cbdcd7;
+      border-radius: 999px;
+      padding: 2px 6px;
+      color: #0f766e;
+      background: #fff;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-tool-trace-copy {{
+      margin-top: 5px;
+      color: #66736f;
+      font-size: 10px;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-tool-trace-empty {{
+      color: var(--muted);
+      font-size: 11px;
+    }}
     .pdf-page-button {{
       position: relative;
       width: auto;
@@ -1921,6 +1994,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-command-actions {{ justify-content: flex-start; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
       .pdf-agent-phase-rail {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-tool-trace-list {{ grid-template-columns: 1fr; }}
       .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
@@ -2038,7 +2112,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       </section>
     </aside>
     <section class="paper-review-stage" data-panel="paper-review-stage">
-      {_render_paper_review_surface(items, paper_id=paper_id, evidence_preview=evidence_preview, has_source_pdf=source_pdf_path is not None)}
+      {_render_paper_review_surface(items, paper_id=paper_id, evidence_preview=evidence_preview, has_source_pdf=source_pdf_path is not None, events=events)}
       {_render_evidence_chain_matrix(items, events=events, invocations=invocations)}
       <section class="panel queue" data-panel="review-queue" id="review-queue">
         <div class="panel-header">
@@ -2258,6 +2332,53 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       showToast(isEnabled ? '已进入专注审稿模式' : '已退出专注审稿模式');
     }}
     window.peerassistSetReviewFocusMode = setReviewFocusMode;
+    function localizedTraceStatus(status) {{
+      const labels = {{
+        queued: '已排队',
+        started: '运行中',
+        completed: '已完成',
+        failed: '失败',
+        approval_required: '需审批',
+        cancelled: '已取消',
+        unknown: '未知'
+      }};
+      return labels[String(status || '').toLowerCase()] || String(status || '未知');
+    }}
+    function renderPdfToolTraceCard(event) {{
+      const status = String(event?.status || 'unknown').replace(/\\s+/g, '_').toLowerCase();
+      const tool = String(event?.tool || event?.call_id || 'tool');
+      const agent = String(event?.agent_id || 'peerassist');
+      const summary = String(event?.output_summary || event?.input_summary || event?.error_code || '等待输出摘要').slice(0, 120);
+      const article = document.createElement('article');
+      article.className = 'pdf-tool-trace-card';
+      article.dataset.pdfToolTraceCard = 'true';
+      article.dataset.status = status;
+      article.innerHTML = `
+        <div class="pdf-tool-trace-top">
+          <span class="pdf-tool-trace-name">${{escapeHtml(tool)}}</span>
+          <span class="pdf-tool-trace-status">${{escapeHtml(localizedTraceStatus(status))}}</span>
+        </div>
+        <div class="pdf-tool-trace-copy">${{escapeHtml(agent)}} · ${{escapeHtml(summary)}}</div>
+      `;
+      return article;
+    }}
+    function updatePdfToolTrace(state) {{
+      const list = document.querySelector('[data-pdf-tool-trace-list]');
+      if (!list) return;
+      const events = Array.isArray(state?.tool_trace?.events) ? state.tool_trace.events : [];
+      const latest = events.filter((event) => event && typeof event === 'object').slice(-3).reverse();
+      list.replaceChildren();
+      if (latest.length === 0) {{
+        const empty = document.createElement('div');
+        empty.className = 'pdf-tool-trace-empty';
+        empty.dataset.pdfToolTraceEmpty = 'true';
+        empty.textContent = '等待工具调用事件。';
+        list.appendChild(empty);
+        return;
+      }}
+      latest.forEach((event) => list.appendChild(renderPdfToolTraceCard(event)));
+    }}
+    window.peerassistUpdatePdfToolTrace = updatePdfToolTrace;
     function updatePdfRuntimePulse(state, source) {{
       const pulse = document.querySelector('[data-pdf-runtime-pulse]');
       if (!pulse) return;
@@ -2452,6 +2573,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         topbar.dataset.streamState = source === 'stream' ? 'live' : 'polling';
       }}
       updatePdfRuntimePulse(state, source);
+      updatePdfToolTrace(state);
       if (source === 'stream') {{
         appendStreamLine('state', `${{runtime.tool_event_count || 0}} 条追踪事件 · ${{state.pending_count || 0}} 条待确认`);
       }}
@@ -4128,7 +4250,7 @@ def _render_model_entry(model_config: dict[str, str]) -> str:
 
 
 def _render_paper_review_surface(
-    items: list[Any], *, paper_id: str, evidence_preview: list[Any], has_source_pdf: bool
+    items: list[Any], *, paper_id: str, evidence_preview: list[Any], has_source_pdf: bool, events: list[Any]
 ) -> str:
     concerns = [item for item in items if isinstance(item, dict)]
     first_concern = concerns[0] if concerns else {}
@@ -4151,7 +4273,7 @@ def _render_paper_review_surface(
         else '<span class="paper-chip">未发现源 PDF</span>'
     )
     source_document = (
-        _render_source_pdf_viewer()
+        _render_source_pdf_viewer(events)
         if has_source_pdf
         else _render_extracted_text_preview(
             paper_id=paper_id,
@@ -4182,8 +4304,8 @@ def _render_paper_review_surface(
 """
 
 
-def _render_source_pdf_viewer() -> str:
-    return """
+def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
+    return f"""
     <div class="source-pdf-shell" data-source-pdf-viewer data-pdf-reader>
       <div class="pdf-reader-bar" aria-label="PDF 阅读控制">
         <div class="pdf-control-group">
@@ -4277,6 +4399,7 @@ def _render_source_pdf_viewer() -> str:
           </div>
         </div>
       </section>
+      {_render_pdf_tool_trace_strip(events or [])}
       <div class="pdf-runtime-pulse" data-pdf-runtime-pulse data-stream-source="connecting" aria-label="PDF 审稿运行脉冲">
         <div class="pdf-runtime-chip">
           <div class="pdf-runtime-label">事件流</div>
@@ -4362,6 +4485,40 @@ def _render_source_pdf_viewer() -> str:
         </div>
       </div>
     </div>
+"""
+
+
+def _render_pdf_tool_trace_strip(events: list[Any]) -> str:
+    valid_events = [event for event in events if isinstance(event, dict)]
+    latest = list(reversed(valid_events))[:3]
+    if not latest:
+        cards = '<div class="pdf-tool-trace-empty" data-pdf-tool-trace-empty>等待工具调用事件。</div>'
+    else:
+        cards = "".join(_render_pdf_tool_trace_card(event) for event in latest)
+    return f"""
+      <section class="pdf-tool-trace-strip" data-pdf-tool-trace-strip aria-label="PDF 工具调用轨迹">
+        <div class="pdf-tool-trace-head">
+          <span>PDF 工具调用轨迹</span>
+          <a class="inline-button" href="#tool-trace">查看全部</a>
+        </div>
+        <div class="pdf-tool-trace-list" data-pdf-tool-trace-list>{cards}</div>
+      </section>
+"""
+
+
+def _render_pdf_tool_trace_card(event: dict[str, Any]) -> str:
+    status = str(event.get("status") or "unknown").replace(" ", "_").lower()
+    tool = str(event.get("tool") or event.get("call_id") or "tool")
+    summary = str(event.get("output_summary") or event.get("input_summary") or event.get("error_code") or "等待输出摘要")
+    agent = _display_name(str(event.get("agent_id") or "peerassist"))
+    return f"""
+          <article class="pdf-tool-trace-card" data-pdf-tool-trace-card data-status="{html.escape(status, quote=True)}">
+            <div class="pdf-tool-trace-top">
+              <span class="pdf-tool-trace-name">{html.escape(tool)}</span>
+              <span class="pdf-tool-trace-status">{html.escape(_localized_status(status))}</span>
+            </div>
+            <div class="pdf-tool-trace-copy">{html.escape(agent)} · {html.escape(summary[:120])}</div>
+          </article>
 """
 
 

@@ -318,6 +318,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "handlePdfReviewCommand" in html
     assert "updatePdfRuntimePulse" in html
     assert "syncPdfRuntimePagePulse" in html
+    assert "updatePdfToolTrace" in html
+    assert "renderPdfToolTraceCard" in html
     assert "appendPdfActivityLine" in html
     assert "data-pdf-runtime-pulse" in html
     assert "data-pdf-runtime-state" in html
@@ -419,6 +421,10 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "智能体入口" in html
     assert "证据约束审稿" in html
     assert "必绑定" in html
+    assert "data-pdf-tool-trace-strip" in html
+    assert "PDF 工具调用轨迹" in html
+    assert "data-pdf-tool-trace-list" in html
+    assert "等待工具调用事件" in html
     assert 'data-pdf-review-command="agent-review"' in html
     assert 'data-pdf-review-command="selection-review"' in html
     assert 'data-pdf-review-command="current-page"' in html
@@ -546,6 +552,9 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
     assert "pdf.worker.min.mjs" in html
     assert "new pdfjsLib.TextLayer" in html
     assert "pdfjsLib.getDocument('/paper.pdf')" in html
+    assert "PDF 工具调用轨迹" in html
+    assert "percentage_consistency_check" in html
+    assert "1 check completed" in html
     assert "打开 PDF" in html
     assert "原始 PDF" in html
     assert "paper.pdf" in html
