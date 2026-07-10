@@ -604,6 +604,90 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 850;
       padding: 0 4px;
     }}
+    .pdf-search-strip {{
+      display: grid;
+      grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #fbfdfc;
+    }}
+    .pdf-search-box {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background: #fff;
+      padding: 5px 7px;
+    }}
+    .pdf-search-label {{
+      flex: 0 0 auto;
+      color: #0f766e;
+      font-size: 10px;
+      font-weight: 920;
+      white-space: nowrap;
+    }}
+    .pdf-search-input {{
+      width: 100%;
+      min-width: 0;
+      border: 0;
+      outline: 0;
+      color: #25322f;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 760;
+    }}
+    .pdf-search-status {{
+      min-width: 0;
+      color: #53635f;
+      font-size: 11px;
+      font-weight: 820;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .pdf-search-actions {{
+      display: inline-flex;
+      gap: 5px;
+      align-items: center;
+    }}
+    .pdf-search-results {{
+      grid-column: 1 / -1;
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      min-height: 30px;
+      scrollbar-width: thin;
+    }}
+    .pdf-search-hit {{
+      flex: 0 0 auto;
+      max-width: 220px;
+      min-height: 28px;
+      border: 1px solid #d7e4df;
+      border-radius: 999px;
+      background: #fff;
+      color: #25322f;
+      padding: 5px 9px;
+      font-size: 11px;
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }}
+    .pdf-search-hit[data-active="true"] {{
+      border-color: #0f766e;
+      color: #fff;
+      background: #0f766e;
+    }}
+    .pdf-search-empty {{
+      align-self: center;
+      color: var(--muted);
+      font-size: 11px;
+    }}
     .pdf-review-command-strip {{
       display: grid;
       grid-template-columns: auto minmax(0, 1fr);
@@ -1256,6 +1340,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .pdf-text-layer span::selection {{
       background: rgba(37, 99, 235, 0.32);
+    }}
+    .pdf-text-layer span.pdf-text-match {{
+      border-radius: 2px;
+      background: rgba(245, 158, 11, 0.34);
+      box-shadow: 0 0 0 1px rgba(180, 83, 9, 0.18);
     }}
     .pdf-text-layer .markedContent {{
       position: absolute;
@@ -1990,6 +2079,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .source-pdf-shell {{ min-height: 520px; }}
       .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
       .pdf-page-rail {{ padding: 8px; }}
+      .pdf-search-strip {{ grid-template-columns: 1fr; }}
+      .pdf-search-actions {{ justify-content: flex-start; }}
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
@@ -2789,6 +2880,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const annotationMeter = reader.querySelector('[data-pdf-annotation-meter]');
       const annotationDensityToggle = reader.querySelector('[data-pdf-annotation-density-toggle]');
       const runtimePage = reader.querySelector('[data-pdf-runtime-page]');
+      const searchInput = reader.querySelector('[data-pdf-search-input]');
+      const searchStatus = reader.querySelector('[data-pdf-search-status]');
+      const searchResults = reader.querySelector('[data-pdf-search-results]');
+      const searchPrev = reader.querySelector('[data-pdf-search-prev]');
+      const searchNext = reader.querySelector('[data-pdf-search-next]');
+      const searchClear = reader.querySelector('[data-pdf-search-clear]');
       const context = canvas.getContext('2d');
       let pdfDoc = null;
       let pageNumber = 1;
@@ -2797,6 +2894,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       let textLayerTask = null;
       let fitWidth = true;
       let annotationDensity = 'comfortable';
+      let pdfSearchQuery = '';
+      let pdfSearchMatches = [];
+      let pdfSearchCursor = -1;
+      let pdfSearchTimer = null;
+      let pdfSearchRunId = 0;
+      const pdfTextCache = new Map();
 
       function setStatus(copy) {{
         if (status) status.textContent = copy;
@@ -2804,6 +2907,163 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
 
       function setLoading(visible) {{
         if (loading) loading.hidden = !visible;
+      }}
+
+      function normalizePdfSearch(value) {{
+        return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      }}
+
+      function countPdfSearchOccurrences(text, query) {{
+        const haystack = normalizePdfSearch(text);
+        const needle = normalizePdfSearch(query);
+        if (!needle) return 0;
+        let count = 0;
+        let index = haystack.indexOf(needle);
+        while (index !== -1) {{
+          count += 1;
+          index = haystack.indexOf(needle, index + Math.max(1, needle.length));
+        }}
+        return count;
+      }}
+
+      function pdfSearchSnippet(text, query) {{
+        const normalizedText = String(text || '').replace(/\\s+/g, ' ').trim();
+        const lowerText = normalizedText.toLowerCase();
+        const lowerQuery = normalizePdfSearch(query);
+        const index = lowerText.indexOf(lowerQuery);
+        if (index < 0) return normalizedText.slice(0, 72);
+        const start = Math.max(0, index - 28);
+        const end = Math.min(normalizedText.length, index + lowerQuery.length + 36);
+        return `${{start > 0 ? '...' : ''}}${{normalizedText.slice(start, end)}}${{end < normalizedText.length ? '...' : ''}}`;
+      }}
+
+      function setPdfSearchStatus(copy) {{
+        if (searchStatus) searchStatus.textContent = copy;
+      }}
+
+      function setPdfSearchNavigationEnabled(enabled) {{
+        if (searchPrev) searchPrev.disabled = !enabled;
+        if (searchNext) searchNext.disabled = !enabled;
+      }}
+
+      async function getPdfPageText(page) {{
+        const safePage = Math.max(1, Math.min(pdfDoc?.numPages || 1, Number(page) || 1));
+        if (pdfTextCache.has(safePage)) return pdfTextCache.get(safePage);
+        const pdfPage = await pdfDoc.getPage(safePage);
+        const textContent = await pdfPage.getTextContent();
+        const text = (textContent.items || []).map((item) => String(item.str || '')).join(' ');
+        pdfTextCache.set(safePage, text);
+        return text;
+      }}
+
+      function applyPdfSearchHighlights() {{
+        if (!textLayer) return;
+        const query = normalizePdfSearch(pdfSearchQuery);
+        textLayer.querySelectorAll('.pdf-text-match').forEach((node) => {{
+          node.classList.remove('pdf-text-match');
+          node.removeAttribute('data-pdf-search-match');
+        }});
+        if (!query) return;
+        textLayer.querySelectorAll('span').forEach((span) => {{
+          const text = normalizePdfSearch(span.textContent || '');
+          if (text.includes(query)) {{
+            span.classList.add('pdf-text-match');
+            span.dataset.pdfSearchMatch = 'true';
+          }}
+        }});
+      }}
+
+      function renderPdfSearchResults() {{
+        if (!searchResults) return;
+        searchResults.replaceChildren();
+        const total = pdfSearchMatches.reduce((sum, match) => sum + Number(match.count || 0), 0);
+        const activeMatch = pdfSearchMatches[pdfSearchCursor] || null;
+        setPdfSearchNavigationEnabled(pdfSearchMatches.length > 0);
+        if (!pdfSearchQuery) {{
+          const empty = document.createElement('span');
+          empty.className = 'pdf-search-empty';
+          empty.textContent = '等待检索关键词。';
+          searchResults.appendChild(empty);
+          setPdfSearchStatus('输入关键词后在整篇 PDF 中定位证据。');
+          return;
+        }}
+        if (pdfSearchMatches.length === 0) {{
+          const empty = document.createElement('span');
+          empty.className = 'pdf-search-empty';
+          empty.textContent = '未找到匹配页。';
+          searchResults.appendChild(empty);
+          setPdfSearchStatus(`未找到“${{pdfSearchQuery}}”的 PDF 命中。`);
+          return;
+        }}
+        setPdfSearchStatus(
+          activeMatch
+            ? `“${{pdfSearchQuery}}”共 ${{total}} 处 · 当前第 ${{activeMatch.page}} 页`
+            : `“${{pdfSearchQuery}}”共 ${{total}} 处，分布在 ${{pdfSearchMatches.length}} 页`
+        );
+        pdfSearchMatches.forEach((match, index) => {{
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'pdf-search-hit';
+          button.dataset.pdfSearchHit = String(index);
+          button.dataset.active = String(index === pdfSearchCursor);
+          button.textContent = `第 ${{match.page}} 页 · ${{match.count}} 处 · ${{match.snippet}}`;
+          button.title = match.snippet;
+          button.addEventListener('click', () => {{
+            goToPdfSearchMatch(index).catch((error) => {{
+              showToast(`PDF 检索跳转失败：${{error.message || '未知错误'}}`);
+            }});
+          }});
+          searchResults.appendChild(button);
+        }});
+      }}
+
+      async function goToPdfSearchMatch(index) {{
+        if (!pdfSearchMatches.length) return;
+        const nextIndex = (index + pdfSearchMatches.length) % pdfSearchMatches.length;
+        pdfSearchCursor = nextIndex;
+        const match = pdfSearchMatches[nextIndex];
+        renderPdfSearchResults();
+        await window.peerassistPdfGoToPage(match.page);
+        applyPdfSearchHighlights();
+        showToast(`已定位到“${{pdfSearchQuery}}”第 ${{match.page}} 页`);
+      }}
+
+      async function runPdfSearch(query) {{
+        const normalizedQuery = String(query || '').replace(/\\s+/g, ' ').trim();
+        pdfSearchQuery = normalizedQuery;
+        pdfSearchMatches = [];
+        pdfSearchCursor = -1;
+        renderPdfSearchResults();
+        applyPdfSearchHighlights();
+        if (!normalizedQuery || !pdfDoc) return;
+        const runId = ++pdfSearchRunId;
+        setPdfSearchStatus(`正在检索“${{normalizedQuery}}”...`);
+        for (let page = 1; page <= pdfDoc.numPages; page += 1) {{
+          if (runId !== pdfSearchRunId) return;
+          const text = await getPdfPageText(page);
+          const count = countPdfSearchOccurrences(text, normalizedQuery);
+          if (count > 0) {{
+            pdfSearchMatches.push({{page, count, snippet: pdfSearchSnippet(text, normalizedQuery)}});
+          }}
+          setPdfSearchStatus(`正在检索“${{normalizedQuery}}” · 第 ${{page}} / ${{pdfDoc.numPages}} 页`);
+        }}
+        if (runId !== pdfSearchRunId) return;
+        pdfSearchCursor = pdfSearchMatches.findIndex((match) => match.page >= pageNumber);
+        if (pdfSearchCursor < 0 && pdfSearchMatches.length > 0) pdfSearchCursor = 0;
+        renderPdfSearchResults();
+        applyPdfSearchHighlights();
+        if (pdfSearchMatches.length > 0) {{
+          appendPdfActivityLine('search', `PDF 原文检索“${{normalizedQuery}}”：${{pdfSearchMatches.length}} 页命中`);
+        }}
+      }}
+
+      function schedulePdfSearch(query) {{
+        window.clearTimeout(pdfSearchTimer);
+        pdfSearchTimer = window.setTimeout(() => {{
+          runPdfSearch(query).catch((error) => {{
+            setPdfSearchStatus(`检索失败：${{error.message || '未知错误'}}`);
+          }});
+        }}, 320);
       }}
 
       function syncCurrentPdfPage() {{
@@ -3147,6 +3407,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
               viewport
             }});
             await textLayerTask.render();
+            applyPdfSearchHighlights();
           }}
         }} catch (error) {{
           if (error?.name !== 'RenderingCancelledException') throw error;
@@ -3169,6 +3430,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           pdfDoc = document;
           buildPdfPageRail(document.numPages);
           updateButtons();
+          renderPdfSearchResults();
           return renderPage();
         }})
         .catch((error) => {{
@@ -3199,6 +3461,49 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           }});
         }});
       }});
+
+      if (searchInput) {{
+        searchInput.addEventListener('input', () => {{
+          schedulePdfSearch(searchInput.value);
+        }});
+        searchInput.addEventListener('keydown', (event) => {{
+          if (event.key === 'Enter') {{
+            event.preventDefault();
+            if (normalizePdfSearch(searchInput.value) === normalizePdfSearch(pdfSearchQuery) && pdfSearchMatches.length > 0) {{
+              goToPdfSearchMatch(pdfSearchCursor + 1).catch(() => {{}});
+            }} else {{
+              runPdfSearch(searchInput.value).catch((error) => {{
+                setPdfSearchStatus(`检索失败：${{error.message || '未知错误'}}`);
+              }});
+            }}
+          }}
+        }});
+      }}
+
+      if (searchPrev) {{
+        searchPrev.addEventListener('click', () => {{
+          goToPdfSearchMatch(pdfSearchCursor - 1).catch(() => {{}});
+        }});
+      }}
+
+      if (searchNext) {{
+        searchNext.addEventListener('click', () => {{
+          goToPdfSearchMatch(pdfSearchCursor + 1).catch(() => {{}});
+        }});
+      }}
+
+      if (searchClear) {{
+        searchClear.addEventListener('click', () => {{
+          if (searchInput) searchInput.value = '';
+          pdfSearchRunId += 1;
+          pdfSearchQuery = '';
+          pdfSearchMatches = [];
+          pdfSearchCursor = -1;
+          renderPdfSearchResults();
+          applyPdfSearchHighlights();
+          showToast('已清空 PDF 原文检索');
+        }});
+      }}
 
       let resizeTimer = null;
       window.addEventListener('resize', () => {{
@@ -4323,6 +4628,21 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
       <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">
         <span class="pdf-page-rail-label">PDF 页码导航</span>
       </div>
+      <section class="pdf-search-strip" data-pdf-search-strip aria-label="PDF 原文检索">
+        <label class="pdf-search-box">
+          <span class="pdf-search-label">原文检索</span>
+          <input class="pdf-search-input" type="search" data-pdf-search-input placeholder="搜索术语、指标、图表编号" aria-label="搜索 PDF 原文">
+        </label>
+        <div class="pdf-search-status" data-pdf-search-status>输入关键词后在整篇 PDF 中定位证据。</div>
+        <div class="pdf-search-actions">
+          <button class="inline-button" type="button" data-pdf-search-prev disabled>上一处</button>
+          <button class="inline-button primary" type="button" data-pdf-search-next disabled>下一处</button>
+          <button class="inline-button" type="button" data-pdf-search-clear>清空</button>
+        </div>
+        <div class="pdf-search-results" data-pdf-search-results>
+          <span class="pdf-search-empty">等待检索关键词。</span>
+        </div>
+      </section>
       <div class="pdf-review-command-strip" data-pdf-review-command-strip aria-label="PDF 审稿命令条">
         <div class="pdf-command-label">PDF 审稿命令条</div>
         <div class="pdf-command-actions">

@@ -308,6 +308,11 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "已跳转到 PDF 第" in html
     assert "data-pdf-page-rail" in html
     assert "buildPdfPageRail" in html
+    assert "runPdfSearch" in html
+    assert "goToPdfSearchMatch" in html
+    assert "applyPdfSearchHighlights" in html
+    assert "pdf-text-match" in html
+    assert "getPdfPageText" in html
     assert "collectPdfPageConcernCounts" in html
     assert "annotatePdfPageRail" in html
     assert "syncCurrentPdfPage" in html
@@ -396,6 +401,17 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "只看本页队列" in html
     assert "下一未处理" in html
     assert "下一关注页" in html
+    assert "data-pdf-search-strip" in html
+    assert "data-pdf-search-input" in html
+    assert "data-pdf-search-status" in html
+    assert "data-pdf-search-results" in html
+    assert "data-pdf-search-prev" in html
+    assert "data-pdf-search-next" in html
+    assert "data-pdf-search-clear" in html
+    assert "原文检索" in html
+    assert "搜索术语、指标、图表编号" in html
+    assert "上一处" in html
+    assert "下一处" in html
     assert "data-pdf-review-command-strip" in html
     assert "data-pdf-agent-dock" in html
     assert "PDF 智能体审稿操作坞" in html
@@ -552,6 +568,9 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
     assert "pdf.worker.min.mjs" in html
     assert "new pdfjsLib.TextLayer" in html
     assert "pdfjsLib.getDocument('/paper.pdf')" in html
+    assert "PDF 原文检索" in html
+    assert "runPdfSearch" in html
+    assert "pdfSearchMatches" in html
     assert "PDF 工具调用轨迹" in html
     assert "percentage_consistency_check" in html
     assert "1 check completed" in html
