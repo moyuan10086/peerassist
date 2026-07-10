@@ -269,6 +269,9 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistCancelAgentReview" in html
     assert "peerassistRetryAgentReview" in html
     assert "peerassistUpdatePdfAgentContext" in html
+    assert "peerassistUpdatePdfRecoveryCheckpoint" in html
+    assert "updatePdfRecoveryCheckpoint(state)" in html
+    assert "applyTraceFilter('failed')" in html
     assert "AbortController" in html
     assert "signal: controller.signal" in html
     assert "智能审稿已取消" in html
@@ -475,6 +478,18 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "PDF 工具调用轨迹" in html
     assert "data-pdf-tool-trace-list" in html
     assert "等待工具调用事件" in html
+    assert "data-pdf-recovery-strip" in html
+    assert "data-pdf-recovery-value" in html
+    assert "data-pdf-recovery-trace" in html
+    assert "data-pdf-recovery-failed" in html
+    assert "data-pdf-recovery-artifacts" in html
+    assert "PDF 智能审稿检查点与恢复" in html
+    assert "检查点" in html
+    assert "最近调用" in html
+    assert "失败事件" in html
+    assert "最近产物" in html
+    assert "查看追踪" in html
+    assert "产物区" in html
     assert 'data-pdf-review-command="agent-review"' in html
     assert 'data-pdf-review-command="selection-review"' in html
     assert 'data-pdf-review-command="current-page"' in html

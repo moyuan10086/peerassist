@@ -1237,6 +1237,55 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       color: var(--muted);
       font-size: 11px;
     }}
+    .pdf-recovery-strip {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(120px, 0.55fr)) auto;
+      gap: 8px;
+      align-items: stretch;
+      padding: 9px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #fbfdfc;
+    }}
+    .pdf-recovery-cell {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 8px;
+    }}
+    .pdf-recovery-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 920;
+    }}
+    .pdf-recovery-value {{
+      margin-top: 2px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 900;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .pdf-recovery-strip[data-recovery-state="failed"] .pdf-recovery-cell:first-child {{
+      border-color: #e6b4b4;
+      background: #fff0f0;
+    }}
+    .pdf-recovery-strip[data-recovery-state="active"] .pdf-recovery-cell:first-child {{
+      border-color: #e4c783;
+      background: #fff8e6;
+    }}
+    .pdf-recovery-strip[data-recovery-state="completed"] .pdf-recovery-cell:first-child {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-recovery-actions {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: flex-end;
+      min-width: 0;
+    }}
     .pdf-page-button {{
       position: relative;
       width: auto;
@@ -2344,6 +2393,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-agent-phase-rail {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-context-list {{ grid-template-columns: 1fr 1fr; }}
       .pdf-tool-trace-list {{ grid-template-columns: 1fr; }}
+      .pdf-recovery-strip {{ grid-template-columns: 1fr; }}
+      .pdf-recovery-actions {{ justify-content: flex-start; flex-wrap: wrap; }}
       .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
@@ -2765,6 +2816,44 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       latest.forEach((event) => list.appendChild(renderPdfToolTraceCard(event)));
     }}
     window.peerassistUpdatePdfToolTrace = updatePdfToolTrace;
+    function compactRecoveryValue(value, fallback = '未记录') {{
+      const copy = String(value || '').trim();
+      return copy ? (copy.length > 48 ? `${{copy.slice(0, 48)}}...` : copy) : fallback;
+    }}
+    function recoveryStateFromStatus(status) {{
+      const normalized = String(status || '').replace(/\\s+/g, '_').toLowerCase();
+      if (normalized === 'failed') return 'failed';
+      if (['queued', 'started', 'running', 'progress', 'approval_required'].includes(normalized)) return 'active';
+      if (normalized === 'completed') return 'completed';
+      if (normalized === 'cancelled') return 'cancelled';
+      return 'idle';
+    }}
+    function updatePdfRecoveryCheckpoint(state = null) {{
+      const strip = document.querySelector('[data-pdf-recovery-strip]');
+      if (!strip) return;
+      const events = Array.isArray(state?.tool_trace?.events)
+        ? state.tool_trace.events.filter((event) => event && typeof event === 'object')
+        : [];
+      const latest = events[events.length - 1] || null;
+      const failedCount = events.filter((event) => {{
+        return String(event?.status || '').replace(/\\s+/g, '_').toLowerCase() === 'failed';
+      }}).length;
+      const artifacts = events.flatMap((event) => Array.isArray(event?.artifact_ids) ? event.artifact_ids : []);
+      const status = latest?.status || (events.length > 0 ? 'completed' : 'idle');
+      strip.dataset.recoveryState = recoveryStateFromStatus(status);
+      const setValue = (key, value) => {{
+        const node = strip.querySelector(`[data-pdf-recovery-value="${{CSS.escape(key)}}"]`);
+        if (node) node.textContent = value;
+      }};
+      setValue('status', latest ? `${{localizedTraceStatus(status)}} · ${{compactRecoveryValue(latest.tool || latest.call_id || 'tool')}}` : '等待首个检查点');
+      setValue('call', latest ? compactRecoveryValue(latest.call_id || latest.task_id || latest.agent_id) : '尚无调用');
+      setValue('failed', `${{failedCount}} 个失败事件`);
+      setValue('artifact', compactRecoveryValue(artifacts[artifacts.length - 1], '暂无产物'));
+      strip.querySelectorAll('[data-pdf-recovery-failed]').forEach((button) => {{
+        button.disabled = failedCount === 0;
+      }});
+    }}
+    window.peerassistUpdatePdfRecoveryCheckpoint = updatePdfRecoveryCheckpoint;
     function setPdfAgentContextItem(key, value, status, state) {{
       const row = document.querySelector(`[data-pdf-agent-context-item="${{CSS.escape(key)}}"]`);
       const valueEl = document.querySelector(`[data-pdf-agent-context-value="${{CSS.escape(key)}}"]`);
@@ -2839,6 +2928,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (pendingEl) pendingEl.textContent = `${{state.pending_count || 0}} 条`;
       if (eventsEl) eventsEl.textContent = `${{runtime.tool_event_count || 0}} 条`;
       updatePdfAgentContext(state);
+      updatePdfRecoveryCheckpoint(state);
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3270,6 +3360,25 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-pdf-agent-retry]').forEach((button) => {{
       button.addEventListener('click', () => retryAgentReview());
     }});
+    document.querySelectorAll('[data-pdf-recovery-trace]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-panel="tool-trace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已定位到工具追踪');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-recovery-failed]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        applyTraceFilter('failed');
+        document.querySelector('[data-panel="tool-trace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已筛选失败工具事件');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-recovery-artifacts]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-panel="artifact-workspace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已定位到产物工作区');
+      }});
+    }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
@@ -3293,6 +3402,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }});
     setAgentReviewRunState('idle');
     updatePdfAgentContext();
+    updatePdfRecoveryCheckpoint();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -5340,6 +5450,29 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
         </div>
       </section>
       {_render_pdf_tool_trace_strip(events or [])}
+      <section class="pdf-recovery-strip" data-pdf-recovery-strip data-recovery-state="idle" aria-label="PDF 智能审稿检查点与恢复">
+        <div class="pdf-recovery-cell">
+          <div class="pdf-recovery-label">检查点</div>
+          <div class="pdf-recovery-value" data-pdf-recovery-value="status">等待首个检查点</div>
+        </div>
+        <div class="pdf-recovery-cell">
+          <div class="pdf-recovery-label">最近调用</div>
+          <div class="pdf-recovery-value" data-pdf-recovery-value="call">尚无调用</div>
+        </div>
+        <div class="pdf-recovery-cell">
+          <div class="pdf-recovery-label">失败事件</div>
+          <div class="pdf-recovery-value" data-pdf-recovery-value="failed">0 个失败事件</div>
+        </div>
+        <div class="pdf-recovery-cell">
+          <div class="pdf-recovery-label">最近产物</div>
+          <div class="pdf-recovery-value" data-pdf-recovery-value="artifact">暂无产物</div>
+        </div>
+        <div class="pdf-recovery-actions">
+          <button class="inline-button" type="button" data-pdf-recovery-trace>查看追踪</button>
+          <button class="inline-button" type="button" data-pdf-recovery-failed disabled>失败事件</button>
+          <button class="inline-button" type="button" data-pdf-recovery-artifacts>产物区</button>
+        </div>
+      </section>
       <div class="pdf-runtime-pulse" data-pdf-runtime-pulse data-stream-source="connecting" aria-label="PDF 审稿运行脉冲">
         <div class="pdf-runtime-chip">
           <div class="pdf-runtime-label">事件流</div>
