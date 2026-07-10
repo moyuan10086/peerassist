@@ -344,6 +344,14 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "updatePdfToolTrace" in html
     assert "renderPdfToolTraceCard" in html
     assert "appendPdfActivityLine" in html
+    assert "data-pdf-human-gate" in html
+    assert "updatePdfHumanGate" in html
+    assert "peerassistUpdatePdfHumanGate" in html
+    assert "data-pdf-human-gate-open" in html
+    assert "data-pdf-human-gate-next" in html
+    assert "data-pdf-human-gate-queue" in html
+    assert "已打开人工确认闸门" in html
+    assert "已定位到审稿队列清单" in html
     assert "data-pdf-runtime-pulse" in html
     assert "data-pdf-runtime-state" in html
     assert "data-pdf-runtime-pending" in html
@@ -498,6 +506,12 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "最近产物" in html
     assert "查看追踪" in html
     assert "产物区" in html
+    assert "data-pdf-human-gate" in html
+    assert "PDF 人工确认闸门" in html
+    assert "人工确认闸门" in html
+    assert "主要待处理" in html
+    assert "打开人工确认" in html
+    assert "队列清单" in html
     assert 'data-pdf-review-command="agent-review"' in html
     assert 'data-pdf-review-command="selection-review"' in html
     assert 'data-pdf-review-command="current-page"' in html

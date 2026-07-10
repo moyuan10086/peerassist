@@ -1205,6 +1205,91 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-color: #e4c783;
       background: #fff8e6;
     }}
+    .pdf-human-gate {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #12302b;
+      color: #eef8f4;
+    }}
+    .pdf-human-gate-head {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+    }}
+    .pdf-human-gate-title {{
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 920;
+    }}
+    .pdf-human-gate-copy {{
+      color: #bcefe2;
+      font-size: 10px;
+      font-weight: 820;
+      text-align: right;
+    }}
+    .pdf-human-gate-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }}
+    .pdf-human-gate-chip {{
+      min-width: 0;
+      border: 1px solid rgba(216, 255, 245, 0.18);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 7px 8px;
+    }}
+    .pdf-human-gate-label {{
+      color: #bcefe2;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-human-gate-value {{
+      margin-top: 2px;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 920;
+      white-space: nowrap;
+    }}
+    .pdf-human-gate-actions {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      min-width: 0;
+    }}
+    .pdf-human-gate-actions .inline-button {{
+      border-color: rgba(216, 255, 245, 0.26);
+      background: rgba(255, 255, 255, 0.1);
+      color: #eef8f4;
+    }}
+    .pdf-human-gate-actions .inline-button.primary {{
+      border-color: #8bd8c8;
+      background: #0f766e;
+      color: #fff;
+    }}
+    .pdf-human-gate-meter {{
+      grid-column: 1 / -1;
+      height: 5px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.14);
+    }}
+    .pdf-human-gate-meter span {{
+      display: block;
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: #8bd8c8;
+      transition: width 180ms ease;
+    }}
     .pdf-activity-feed {{
       display: grid;
       gap: 6px;
@@ -2484,6 +2569,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-recovery-strip {{ grid-template-columns: 1fr; }}
       .pdf-recovery-actions {{ justify-content: flex-start; flex-wrap: wrap; }}
       .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-human-gate {{ grid-template-columns: 1fr; }}
+      .pdf-human-gate-grid {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-human-gate-actions {{ justify-content: flex-start; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
@@ -3004,6 +3092,41 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       );
     }}
     window.peerassistUpdatePdfAgentContext = updatePdfAgentContext;
+    function updatePdfHumanGate(state = null) {{
+      const gate = document.querySelector('[data-pdf-human-gate]');
+      if (!gate) return;
+      const queueItems = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      const total = queueItems.length;
+      const resolved = queueItems.filter((item) => isHumanResolvedQueueStatus(item.dataset.concernStatus)).length;
+      const pendingFromDom = Math.max(0, total - resolved);
+      const pending = Number(state?.pending_count ?? pendingFromDom);
+      const majorPending = queueItems.filter((item) => {{
+        return !isHumanResolvedQueueStatus(item.dataset.concernStatus)
+          && String(item.dataset.concernLevel || '').toLowerCase().includes('major');
+      }}).length;
+      const completion = total > 0 ? Math.round(resolved / total * 100) : 0;
+      const setValue = (key, value) => {{
+        const node = gate.querySelector(`[data-pdf-human-gate-value="${{CSS.escape(key)}}"]`);
+        if (node) node.textContent = value;
+      }};
+      setValue('pending', `${{pending}} 条`);
+      setValue('resolved', `${{resolved}} 条`);
+      setValue('major', `${{majorPending}} 条`);
+      setValue('total', `${{total}} 条`);
+      const copy = gate.querySelector('[data-pdf-human-gate-copy]');
+      if (copy) {{
+        copy.textContent = total > 0
+          ? `人工确认进度 ${{completion}}% · 每条意见需确认、改写、降级、删除或暂挂`
+          : '等待队列同步';
+      }}
+      const meter = gate.querySelector('[data-pdf-human-gate-meter]');
+      if (meter) meter.style.width = `${{completion}}%`;
+      gate.dataset.humanGateState = pending > 0 ? 'active' : total > 0 ? 'completed' : 'empty';
+      gate.querySelectorAll('[data-pdf-human-gate-next]').forEach((button) => {{
+        button.disabled = pending <= 0;
+      }});
+    }}
+    window.peerassistUpdatePdfHumanGate = updatePdfHumanGate;
     function updatePdfRuntimePulse(state, source) {{
       const pulse = document.querySelector('[data-pdf-runtime-pulse]');
       if (!pulse) return;
@@ -3017,6 +3140,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (eventsEl) eventsEl.textContent = `${{runtime.tool_event_count || 0}} 条`;
       updatePdfAgentContext(state);
       updatePdfRecoveryCheckpoint(state);
+      updatePdfHumanGate(state);
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3467,6 +3591,31 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         showToast('已定位到产物工作区');
       }});
     }});
+    document.querySelectorAll('[data-pdf-human-gate-open]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-panel="human-confirmation"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已打开人工确认闸门');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-human-gate-next]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const nextPage = window.peerassistPdfNextPendingConcernPage?.();
+        if (!nextPage) {{
+          showToast('暂无未处理审稿意见');
+          return;
+        }}
+        window.peerassistPdfGoToPage?.(nextPage)
+          .then(() => showToast(`已跳转到第 ${{nextPage}} 页待确认意见`))
+          .catch(() => showToast('PDF 跳页未完成'));
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-human-gate-queue]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-queue-filter="all"]')?.click();
+        document.querySelector('[data-panel="review-queue"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已定位到审稿队列清单');
+      }});
+    }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
@@ -3491,6 +3640,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     setAgentReviewRunState('idle');
     updatePdfAgentContext();
     updatePdfRecoveryCheckpoint();
+    updatePdfHumanGate();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -5645,6 +5795,38 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
           <div class="pdf-runtime-value" data-pdf-runtime-page>等待 PDF</div>
         </div>
       </div>
+      <section class="pdf-human-gate" data-pdf-human-gate aria-label="PDF 人工确认闸门">
+        <div>
+          <div class="pdf-human-gate-head">
+            <span class="pdf-human-gate-title">人工确认闸门</span>
+            <span class="pdf-human-gate-copy" data-pdf-human-gate-copy>等待队列同步</span>
+          </div>
+          <div class="pdf-human-gate-grid">
+            <div class="pdf-human-gate-chip">
+              <div class="pdf-human-gate-label">待确认</div>
+              <div class="pdf-human-gate-value" data-pdf-human-gate-value="pending">--</div>
+            </div>
+            <div class="pdf-human-gate-chip">
+              <div class="pdf-human-gate-label">已处理</div>
+              <div class="pdf-human-gate-value" data-pdf-human-gate-value="resolved">--</div>
+            </div>
+            <div class="pdf-human-gate-chip">
+              <div class="pdf-human-gate-label">主要待处理</div>
+              <div class="pdf-human-gate-value" data-pdf-human-gate-value="major">--</div>
+            </div>
+            <div class="pdf-human-gate-chip">
+              <div class="pdf-human-gate-label">总队列</div>
+              <div class="pdf-human-gate-value" data-pdf-human-gate-value="total">--</div>
+            </div>
+            <div class="pdf-human-gate-meter" aria-hidden="true"><span data-pdf-human-gate-meter></span></div>
+          </div>
+        </div>
+        <div class="pdf-human-gate-actions">
+          <button class="inline-button primary" type="button" data-pdf-human-gate-open>打开人工确认</button>
+          <button class="inline-button" type="button" data-pdf-human-gate-next>下一未处理</button>
+          <button class="inline-button" type="button" data-pdf-human-gate-queue>队列清单</button>
+        </div>
+      </section>
       <section class="pdf-activity-feed" data-pdf-activity-feed aria-label="PDF 审稿近期事件">
         <div class="pdf-activity-head">
           <span>PDF 审稿近期事件</span>
