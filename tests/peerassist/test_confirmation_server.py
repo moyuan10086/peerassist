@@ -268,6 +268,9 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistRunAgentReview" in html
     assert "peerassistCancelAgentReview" in html
     assert "peerassistRetryAgentReview" in html
+    assert "peerassistUpdatePdfMissionControl" in html
+    assert "updatePdfMissionControl(state)" in html
+    assert "data-pdf-mission-control" in html
     assert "peerassistUpdatePdfAgentContext" in html
     assert "peerassistUpdatePdfRecoveryCheckpoint" in html
     assert "updatePdfRecoveryCheckpoint(state)" in html
@@ -456,6 +459,24 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "上一处" in html
     assert "下一处" in html
     assert "data-pdf-review-command-strip" in html
+    assert "data-pdf-mission-control" in html
+    assert "PDF 审稿任务驾驶舱" in html
+    assert "智能体任务驾驶舱" in html
+    assert "data-pdf-mission-title" in html
+    assert "data-pdf-mission-copy" in html
+    assert 'data-pdf-mission-value="mode"' in html
+    assert 'data-pdf-mission-value="phase"' in html
+    assert 'data-pdf-mission-value="pending"' in html
+    assert 'data-pdf-mission-value="binding"' in html
+    assert 'data-pdf-mission-value="events"' in html
+    assert 'data-pdf-mission-value="selection"' in html
+    assert "data-pdf-mission-primary" in html
+    assert "data-pdf-mission-next" in html
+    assert "data-pdf-mission-recovery" in html
+    assert "data-pdf-mission-evidence" in html
+    assert "从 PDF 原文开始审稿" in html
+    assert "继续审稿" in html
+    assert "证据矩阵" in html
     assert "data-pdf-agent-dock" in html
     assert "PDF 智能体审稿操作坞" in html
     assert "data-pdf-agent-phase-rail" in html

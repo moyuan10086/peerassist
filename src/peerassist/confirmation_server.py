@@ -921,6 +921,92 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-bottom: 1px solid #c7d0cc;
       background: #edf5f2;
     }}
+    .pdf-mission-control {{
+      display: grid;
+      grid-template-columns: minmax(280px, 1.25fr) minmax(360px, 1fr) auto;
+      gap: 10px;
+      align-items: stretch;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background:
+        linear-gradient(135deg, rgba(18, 48, 43, 0.96), rgba(24, 39, 35, 0.94)),
+        #12302b;
+      color: #eef8f4;
+    }}
+    .pdf-mission-control[data-mission-state="blocked"] {{
+      background:
+        linear-gradient(135deg, rgba(86, 52, 20, 0.96), rgba(45, 38, 25, 0.94)),
+        #3d2f18;
+    }}
+    .pdf-mission-head {{
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }}
+    .pdf-mission-kicker {{
+      color: #8bd8c8;
+      font-size: 10px;
+      font-weight: 920;
+    }}
+    .pdf-mission-title {{
+      color: #fff;
+      font-size: 15px;
+      font-weight: 920;
+      line-height: 1.18;
+    }}
+    .pdf-mission-copy {{
+      color: #cde5df;
+      font-size: 11px;
+      font-weight: 760;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-mission-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      min-width: 0;
+    }}
+    .pdf-mission-cell {{
+      min-width: 0;
+      border: 1px solid rgba(216, 255, 245, 0.16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 7px 8px;
+    }}
+    .pdf-mission-label {{
+      color: #a9d8d0;
+      font-size: 9px;
+      font-weight: 920;
+    }}
+    .pdf-mission-value {{
+      margin-top: 2px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 920;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .pdf-mission-actions {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(84px, 1fr));
+      gap: 6px;
+      align-content: center;
+      min-width: 190px;
+    }}
+    .pdf-mission-actions .inline-button {{
+      justify-content: center;
+      border-color: rgba(216, 255, 245, 0.26);
+      background: rgba(255, 255, 255, 0.1);
+      color: #eef8f4;
+    }}
+    .pdf-mission-actions .inline-button.primary {{
+      border-color: #8bd8c8;
+      background: #0f766e;
+      color: #fff;
+    }}
     .pdf-agent-card {{
       min-width: 0;
       border: 1px solid #cbdcd7;
@@ -2618,6 +2704,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .source-pdf-shell {{ min-height: 620px; }}
       .pdf-reader-stage {{ min-height: 580px; height: 70vh; }}
       .pdf-reading-map {{ grid-template-columns: 1fr; }}
+      .pdf-mission-control {{ grid-template-columns: 1fr; }}
+      .pdf-mission-actions {{ grid-template-columns: repeat(4, minmax(0, 1fr)); min-width: 0; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-card:first-child {{ grid-column: 1 / -1; }}
       .pdf-agent-context-list {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
@@ -2639,6 +2727,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-search-actions {{ justify-content: flex-start; }}
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
+      .pdf-mission-grid {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-mission-actions {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
       .pdf-agent-phase-rail {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-context-list {{ grid-template-columns: 1fr 1fr; }}
@@ -2977,6 +3067,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           popover.removeAttribute('style');
         }}
         updatePdfAgentContext();
+        updatePdfMissionControl();
         return;
       }}
       const clippedTrayText = text.length > 260 ? `${{text.slice(0, 260)}}...` : text;
@@ -3010,6 +3101,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }}
       }}
       updatePdfAgentContext();
+      updatePdfMissionControl();
     }}
     window.peerassistSetPdfSelection = setPdfSelectionEvidence;
     function setReviewFocusMode(enabled) {{
@@ -3253,6 +3345,63 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       showToast('已定位到待人工核查的无页码绑定关注点');
     }}
     window.peerassistFocusFirstUnboundEvidenceConcern = focusFirstUnboundEvidenceConcern;
+    function updatePdfMissionControl(state = null) {{
+      const mission = document.querySelector('[data-pdf-mission-control]');
+      if (!mission) return;
+      const queueItems = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      const total = queueItems.length;
+      const resolved = queueItems.filter((item) => isHumanResolvedQueueStatus(item.dataset.concernStatus)).length;
+      const pendingFromDom = Math.max(0, total - resolved);
+      const pending = Number(state?.pending_count ?? pendingFromDom);
+      const bound = queueItems.filter((item) => Number(item.dataset.pdfPage || 0) > 0).length;
+      const binding = total > 0 ? Math.round(bound / total * 100) : 0;
+      const runtime = state?.runtime || {{}};
+      const traceEvents = Array.isArray(state?.tool_trace?.events) ? state.tool_trace.events : [];
+      const toolEventCount = Number(runtime.tool_event_count ?? traceEvents.length);
+      const failedEvents = traceEvents.filter((event) => {{
+        return String(event?.status || '').replace(/\\s+/g, '_').toLowerCase() === 'failed';
+      }}).length;
+      const selected = window.peerassistSelectedEvidence || {{}};
+      const selectedText = String(selected.text || '');
+      const activePhase = document.querySelector('[data-pdf-agent-phase][data-phase-state="active"]');
+      const phaseTitle = activePhase?.querySelector('.pdf-agent-phase-title')?.textContent?.trim() || '准备上下文';
+      const mode = reviewModeLabel(window.peerassistReviewMode || 'fast');
+      const setValue = (key, value) => {{
+        const node = mission.querySelector(`[data-pdf-mission-value="${{CSS.escape(key)}}"]`);
+        if (node) node.textContent = value;
+      }};
+      setValue('mode', mode);
+      setValue('phase', phaseTitle);
+      setValue('pending', `${{pending}} / ${{total}} 条`);
+      setValue('binding', total > 0 ? `${{binding}}%` : '等待队列');
+      setValue('events', `${{toolEventCount}} 条`);
+      setValue('selection', selectedText ? `${{selectedText.length}} 字` : '未选择');
+      const title = mission.querySelector('[data-pdf-mission-title]');
+      const copy = mission.querySelector('[data-pdf-mission-copy]');
+      const primary = mission.querySelector('[data-pdf-mission-primary]');
+      if (failedEvents > 0) {{
+        mission.dataset.missionState = 'blocked';
+        if (title) title.textContent = `${{failedEvents}} 个工具事件需要恢复`;
+        if (copy) copy.textContent = '先打开恢复点或工具追踪，确认失败调用不会被模型补全为确定性结论。';
+        if (primary) primary.textContent = '查看恢复点';
+      }} else if (pending > 0) {{
+        mission.dataset.missionState = 'review';
+        if (title) title.textContent = `${{pending}} 条意见等待人工确认`;
+        if (copy) copy.textContent = '建议从下一未处理项继续，逐条确认、改写、降级、删除或暂挂，避免未确认内容进入最终报告。';
+        if (primary) primary.textContent = '下一未处理';
+      }} else if (total > 0) {{
+        mission.dataset.missionState = 'ready';
+        if (title) title.textContent = '队列已处理，可复核证据链';
+        if (copy) copy.textContent = '当前关注点已完成处理；可进入证据矩阵复核来源，或再次启动全篇智能审稿补充遗漏线索。';
+        if (primary) primary.textContent = '全篇审稿';
+      }} else {{
+        mission.dataset.missionState = 'ready';
+        if (title) title.textContent = '从 PDF 原文开始审稿';
+        if (copy) copy.textContent = '先浏览原文并选择审稿模式；系统会把证据、确定性核查、工具调用和人工确认串成同一条任务流。';
+        if (primary) primary.textContent = '继续审稿';
+      }}
+    }}
+    window.peerassistUpdatePdfMissionControl = updatePdfMissionControl;
     function updatePdfRuntimePulse(state, source) {{
       const pulse = document.querySelector('[data-pdf-runtime-pulse]');
       if (!pulse) return;
@@ -3268,6 +3417,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       updatePdfRecoveryCheckpoint(state);
       updatePdfHumanGate(state);
       updatePdfEvidenceGate();
+      updatePdfMissionControl(state);
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3293,6 +3443,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (kind && detail) {{
         appendPdfActivityLine(kind, detail);
       }}
+      updatePdfMissionControl();
     }}
     window.peerassistSetPdfAgentPhase = setPdfAgentPhase;
     function setPdfAgentReviewMode(mode, quiet = false) {{
@@ -3308,6 +3459,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         label.textContent = reviewModeLabel(nextMode);
       }});
       setPdfAgentPhase('prepare', `已选择${{reviewModeLabel(nextMode)}}模式`, quiet ? '' : 'mode');
+      updatePdfMissionControl();
     }}
     window.peerassistSetPdfAgentReviewMode = setPdfAgentReviewMode;
     function handlePdfReviewCommand(command) {{
@@ -3479,6 +3631,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       document.querySelectorAll('[data-pdf-agent-retry]').forEach((button) => {{
         button.disabled = nextState === 'running' || !window.peerassistLastAgentReviewPayload;
       }});
+      updatePdfMissionControl();
     }}
     window.peerassistSetAgentReviewRunState = setAgentReviewRunState;
     function buildAgentReviewPayload() {{
@@ -3699,6 +3852,29 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-pdf-agent-retry]').forEach((button) => {{
       button.addEventListener('click', () => retryAgentReview());
     }});
+    document.querySelectorAll('[data-pdf-mission-primary]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const missionState = document.querySelector('[data-pdf-mission-control]')?.dataset.missionState || 'ready';
+        if (missionState === 'blocked') {{
+          document.querySelector('[data-pdf-recovery-trace]')?.click();
+          return;
+        }}
+        if (missionState === 'review') {{
+          document.querySelector('[data-pdf-page-next-pending]')?.click();
+          return;
+        }}
+        handlePdfReviewCommand('agent-review');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-mission-next]').forEach((button) => {{
+      button.addEventListener('click', () => document.querySelector('[data-pdf-page-next-pending]')?.click());
+    }});
+    document.querySelectorAll('[data-pdf-mission-recovery]').forEach((button) => {{
+      button.addEventListener('click', () => document.querySelector('[data-pdf-recovery-trace]')?.click());
+    }});
+    document.querySelectorAll('[data-pdf-mission-evidence]').forEach((button) => {{
+      button.addEventListener('click', () => document.querySelector('[data-pdf-evidence-gate-chain]')?.click());
+    }});
     document.querySelectorAll('[data-pdf-recovery-trace]').forEach((button) => {{
       button.addEventListener('click', () => {{
         document.querySelector('[data-panel="tool-trace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
@@ -3785,6 +3961,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     updatePdfRecoveryCheckpoint();
     updatePdfHumanGate();
     updatePdfEvidenceGate();
+    updatePdfMissionControl();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -5789,6 +5966,45 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
           <button class="pdf-command-button" type="button" data-pdf-review-command="focus">专注模式</button>
         </div>
       </div>
+      <section class="pdf-mission-control" data-pdf-mission-control data-mission-state="ready" aria-label="PDF 审稿任务驾驶舱">
+        <div class="pdf-mission-head">
+          <div class="pdf-mission-kicker">智能体任务驾驶舱</div>
+          <div class="pdf-mission-title" data-pdf-mission-title>从 PDF 原文开始审稿</div>
+          <div class="pdf-mission-copy" data-pdf-mission-copy>先浏览原文并选择审稿模式；系统会把证据、确定性核查、工具调用和人工确认串成同一条任务流。</div>
+        </div>
+        <div class="pdf-mission-grid">
+          <div class="pdf-mission-cell">
+            <div class="pdf-mission-label">模式</div>
+            <div class="pdf-mission-value" data-pdf-mission-value="mode">快速</div>
+          </div>
+          <div class="pdf-mission-cell">
+            <div class="pdf-mission-label">阶段</div>
+            <div class="pdf-mission-value" data-pdf-mission-value="phase">准备上下文</div>
+          </div>
+          <div class="pdf-mission-cell">
+            <div class="pdf-mission-label">待确认</div>
+            <div class="pdf-mission-value" data-pdf-mission-value="pending">--</div>
+          </div>
+          <div class="pdf-mission-cell">
+            <div class="pdf-mission-label">证据绑定</div>
+            <div class="pdf-mission-value" data-pdf-mission-value="binding">--</div>
+          </div>
+          <div class="pdf-mission-cell">
+            <div class="pdf-mission-label">工具事件</div>
+            <div class="pdf-mission-value" data-pdf-mission-value="events">--</div>
+          </div>
+          <div class="pdf-mission-cell">
+            <div class="pdf-mission-label">选区</div>
+            <div class="pdf-mission-value" data-pdf-mission-value="selection">未选择</div>
+          </div>
+        </div>
+        <div class="pdf-mission-actions">
+          <button class="inline-button primary" type="button" data-pdf-mission-primary>继续审稿</button>
+          <button class="inline-button" type="button" data-pdf-mission-next>下一未处理</button>
+          <button class="inline-button" type="button" data-pdf-mission-recovery>恢复点</button>
+          <button class="inline-button" type="button" data-pdf-mission-evidence>证据矩阵</button>
+        </div>
+      </section>
       <section class="pdf-agent-dock" data-pdf-agent-dock data-review-mode="fast" aria-label="PDF 智能体审稿操作坞">
         <div class="pdf-agent-card">
           <div class="pdf-agent-kicker">智能体入口</div>
