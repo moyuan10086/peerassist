@@ -674,6 +674,70 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       gap: 6px;
       align-items: center;
     }}
+    .pdf-page-annotations {{
+      display: grid;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #f7faf9;
+    }}
+    .pdf-annotation-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      color: #25322f;
+      font-size: 12px;
+      font-weight: 880;
+    }}
+    .pdf-annotation-count {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 820;
+      white-space: nowrap;
+    }}
+    .pdf-annotation-list {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 8px;
+    }}
+    .pdf-annotation-card {{
+      min-width: 0;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      padding: 9px;
+      box-shadow: 0 8px 18px rgba(24, 32, 31, 0.06);
+    }}
+    .pdf-annotation-card[data-active="true"] {{
+      border-color: #d39c3d;
+      background: #fff8ea;
+    }}
+    .pdf-annotation-title {{
+      color: #25322f;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1.3;
+    }}
+    .pdf-annotation-meta {{
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-annotation-action {{
+      margin-top: 8px;
+    }}
+    .pdf-annotation-empty {{
+      border: 1px dashed #cfdbd7;
+      border-radius: 8px;
+      padding: 9px;
+      color: var(--muted);
+      background: #fbfdfc;
+      font-size: 12px;
+      text-align: center;
+    }}
+    .pdf-annotation-empty[hidden] {{ display: none; }}
     .pdf-selection-tray {{
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -1721,9 +1785,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const item = concernId ? document.querySelector(`[data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
       const highlight = evidenceId ? document.querySelector(`[data-evidence-anchor="${{CSS.escape(evidenceId)}}"]`) : null;
       const comment = concernId ? document.querySelector(`[data-paper-concern="${{CSS.escape(concernId)}}"].paper-comment`) : null;
+      const pdfAnnotation = concernId ? document.querySelector(`[data-pdf-annotation-card="${{CSS.escape(concernId)}}"]`) : null;
       if (item) item.dataset.active = 'true';
       if (highlight) highlight.dataset.active = 'true';
       if (comment) comment.dataset.active = 'true';
+      if (pdfAnnotation) pdfAnnotation.dataset.active = 'true';
       const scrollTarget = target === 'queue' ? item : highlight || comment;
       if (scrollTarget) {{
         scrollTarget.scrollIntoView({{behavior: 'smooth', block: 'center'}});
@@ -1737,6 +1803,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       }}
       showToast(target === 'queue' ? '已定位到审稿队列' : '已定位到论文高亮');
     }}
+    window.peerassistFocusAnnotation = focusAnnotation;
     function updateRuntime(state, source) {{
       const runtime = state.runtime || {{}};
       const status = document.getElementById('runtime-status');
@@ -1929,6 +1996,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const pageRail = reader.querySelector('[data-pdf-page-rail]');
       const pageContextTitle = reader.querySelector('[data-pdf-page-context-title]');
       const pageContextCopy = reader.querySelector('[data-pdf-page-context-copy]');
+      const annotationList = reader.querySelector('[data-pdf-annotation-list]');
+      const annotationCount = reader.querySelector('[data-pdf-annotation-count]');
+      const annotationEmpty = reader.querySelector('[data-pdf-annotation-empty]');
       const context = canvas.getContext('2d');
       let pdfDoc = null;
       let pageNumber = 1;
@@ -1952,6 +2022,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           window.peerassistApplyQueueFilter?.('current-page');
         }}
         updatePdfPageContext();
+        syncPdfPageAnnotations();
       }}
 
       function concernCountForPage(page) {{
@@ -1983,6 +2054,47 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }}
       }}
       window.peerassistPdfNextConcernPage = nextConcernPage;
+
+      function queueItemsForPdfPage(page) {{
+        return Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]')).filter((item) => {{
+          return Number(item.dataset.pdfPage || 0) === Number(page);
+        }});
+      }}
+
+      function syncPdfPageAnnotations() {{
+        if (!annotationList || !annotationCount || !annotationEmpty) return;
+        const items = queueItemsForPdfPage(pageNumber);
+        annotationList.replaceChildren();
+        annotationCount.textContent = `${{items.length}} 条`;
+        annotationEmpty.hidden = items.length > 0;
+        items.slice(0, 6).forEach((item) => {{
+          const concernId = item.dataset.concernId || '';
+          const title = item.dataset.concernTitle || '未命名关注点';
+          const level = item.dataset.concernLevel || 'unknown';
+          const category = item.dataset.concernCategory || 'general';
+          const status = item.dataset.concernStatus || 'pending';
+          const card = document.createElement('article');
+          card.className = 'pdf-annotation-card';
+          card.setAttribute('data-pdf-annotation-card', concernId);
+          card.dataset.pdfPage = String(pageNumber);
+          const titleEl = document.createElement('div');
+          titleEl.className = 'pdf-annotation-title';
+          titleEl.textContent = title;
+          const meta = document.createElement('div');
+          meta.className = 'pdf-annotation-meta';
+          meta.textContent = `${{level}} · ${{category}} · ${{status}}`;
+          const action = document.createElement('button');
+          action.className = 'inline-button pdf-annotation-action';
+          action.type = 'button';
+          action.textContent = '核对本条';
+          action.addEventListener('click', () => {{
+            window.peerassistFocusAnnotation?.(concernId, '', 'queue', pageNumber);
+          }});
+          card.append(titleEl, meta, action);
+          annotationList.appendChild(card);
+        }});
+      }}
+      window.peerassistSyncPdfPageAnnotations = syncPdfPageAnnotations;
 
       function updateButtons() {{
         reader.querySelectorAll('[data-pdf-action]').forEach((button) => {{
@@ -3168,6 +3280,14 @@ def _render_source_pdf_viewer() -> str:
           <button class="inline-button" type="button" data-pdf-page-next-concern>下一关注页</button>
         </div>
       </div>
+      <section class="pdf-page-annotations" data-pdf-page-annotations aria-label="PDF 本页审稿批注">
+        <div class="pdf-annotation-head">
+          <span>PDF 本页审稿批注</span>
+          <span class="pdf-annotation-count" data-pdf-annotation-count>0 条</span>
+        </div>
+        <div class="pdf-annotation-list" data-pdf-annotation-list></div>
+        <div class="pdf-annotation-empty" data-pdf-annotation-empty>当前页暂无绑定审稿批注。</div>
+      </section>
       <div class="pdf-selection-tray" data-pdf-selection-tray hidden>
         <div>
           <div class="pdf-selection-meta" data-pdf-selection-meta>尚未选择 PDF 文字</div>
