@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from peerassist.confirmations import apply_confirmations
-from peerassist.concerns import concerns_from_checks
+from peerassist.concerns import concern_from_agent_draft, concerns_from_checks
 from schemas.peerassist import (
+    AgentConcernDraft,
     ConcernStatus,
+    ConcernLevel,
     DeterministicCheck,
     DeterministicCheckApplicability,
     DeterministicCheckStatus,
@@ -64,3 +66,24 @@ def test_apply_confirmations_rewrites_and_deletes_concerns() -> None:
         ],
     )
     assert deleted[0].status is ConcernStatus.DELETED
+
+
+def test_agent_draft_becomes_pending_concern_with_agent_provenance() -> None:
+    concern = concern_from_agent_draft(
+        AgentConcernDraft(
+            id="check_percentage_consistency_001",
+            level=ConcernLevel.CLARIFICATION_NEEDED,
+            category="statistics",
+            title="Reported percentage needs clarification",
+            evidence_ids=["P01-L001"],
+            source_check_ids=["check_percentage_consistency_001"],
+            impact="This may affect support for the result.",
+            benign_explanation="A different denominator may have been used.",
+            author_action="Please clarify the denominator.",
+        ),
+        source_agent_ids=["statistics_agent", "integrator_agent"],
+    )
+
+    assert concern.id == "concern_check_percentage_consistency_001"
+    assert concern.status is ConcernStatus.PENDING_HUMAN_CONFIRMATION
+    assert concern.source_agent_ids == ["statistics_agent", "integrator_agent"]

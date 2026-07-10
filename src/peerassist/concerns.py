@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from schemas.peerassist import (
+    AgentConcernDraft,
     Concern,
     ConcernLevel,
     ConcernStatus,
@@ -47,3 +48,23 @@ def concerns_from_checks(checks: list[DeterministicCheck]) -> list[Concern]:
             )
         )
     return concerns
+
+
+def concern_from_agent_draft(
+    draft: AgentConcernDraft, *, source_agent_ids: list[str] | None = None
+) -> Concern:
+    concern_id = draft.id if draft.id.startswith("concern_") else f"concern_{draft.id}"
+    return Concern(
+        id=concern_id,
+        level=draft.level,
+        category=draft.category,
+        title=draft.title,
+        evidence_ids=list(draft.evidence_ids),
+        impact=draft.impact,
+        benign_explanation=draft.benign_explanation,
+        author_action=draft.author_action,
+        status=ConcernStatus.PENDING_HUMAN_CONFIRMATION,
+        source_agent_ids=list(source_agent_ids or []),
+        source_check_ids=list(draft.source_check_ids),
+        metadata=dict(draft.metadata),
+    )
