@@ -76,3 +76,11 @@ model keys, paper secrets, or reviewer-private material here.
 - Feishu document revision 33 adds section "十二、2026-07-11 文档完整性修复版（以此为准）" after verified tail content block doxcnQBmBBK452sH3G6usanTiXe.
 - Repair method: block_insert_after only; no overwrite, no delete, no history revert.
 - Future Feishu sync rule: fetch outline, anchor to a real tail content block, write with block_insert_after, then fetch outline/section to verify title and body.
+
+## 2026-07-11 00:35 CST - Feishu outline cleanup
+
+- User reported the middle Feishu outline looked strange.
+- Four English timestamp h2 blocks were demoted to normal paragraph blocks so they no longer appear in the left outline:
+  Agent console UI and deterministic stream update; Eval target detail ledger; Unevidenced fact rate accounting fix; Paired crossover recall regression diagnostics.
+- Feishu document revision 40 outline now shows only the numbered Chinese sections 一 through 十二.
+- Repair method: block_replace only on the four heading blocks; no overwrite, no delete, no history revert.
