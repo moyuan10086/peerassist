@@ -114,6 +114,76 @@ def test_evaluate_peerassist_records_reports_target_gate_metrics(tmp_path) -> No
     assert result["targets"]["all_targets_passed"] is True
 
 
+def test_evaluate_peerassist_records_reports_machine_readable_target_details(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    write_json_file(
+        manifest_path,
+        {
+            "schema_version": "peerassist.eval_manifest.v1",
+            "dataset": "PeerAssist-Eval-v1",
+            "policy": {
+                "frozen_samples_must_not_enter_prompts": True,
+                "frozen_samples_must_not_enter_indexes": True,
+                "frozen_samples_must_not_enter_finetuning": True,
+            },
+            "samples": [{"sample_id": "paper-001", "split": "frozen", "sha256": "abc"}],
+        },
+    )
+    records = [
+        {
+            "sample_id": "paper-001",
+            "mode": "fast",
+            "parse_success": False,
+            "evidence_faithful": 95,
+            "evidence_total": 100,
+            "deterministic_tp": 8,
+            "deterministic_fp": 2,
+            "deterministic_fn": 4,
+            "gold_concerns_total": 10,
+            "gold_concerns_covered": 6,
+            "unevidenced_new_facts": 5,
+            "new_facts_total": 100,
+            "latency_seconds": 360,
+            "mechanical_baseline_minutes": 50,
+            "mechanical_assisted_minutes": 35,
+            "review_items_proposed": 10,
+            "review_items_retained": 5,
+            "baseline_core_recall": 0.80,
+            "assisted_core_recall": 0.75,
+        }
+    ]
+
+    result = evaluate_peerassist_records(manifest_path=manifest_path, records=records)
+
+    details = result["target_details"]
+    assert details["document_parse_success_rate"] == {
+        "passed": False,
+        "actual": 0.0,
+        "threshold": 0.95,
+        "direction": ">=",
+        "margin": -0.95,
+    }
+    assert details["fast_median_latency_seconds"] == {
+        "passed": False,
+        "actual": 360,
+        "threshold": 300.0,
+        "direction": "<=",
+        "margin": -60.0,
+    }
+    assert result["failed_target_names"] == [
+        "document_parse_success_rate",
+        "evidence_faithfulness_rate",
+        "deterministic_precision",
+        "deterministic_recall",
+        "gold_concern_coverage",
+        "unevidenced_new_fact_rate",
+        "fast_median_latency_seconds",
+        "mechanical_time_reduction",
+        "review_retention_rate",
+        "core_problem_recall_delta",
+    ]
+
+
 def test_evaluate_peerassist_records_reports_stratified_metrics(tmp_path) -> None:
     manifest_path = tmp_path / "manifest.json"
     write_json_file(

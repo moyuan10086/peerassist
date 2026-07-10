@@ -25,6 +25,19 @@ TARGETS = {
     "core_problem_recall_delta": 0.0,
 }
 
+TARGET_DIRECTIONS = {
+    "document_parse_success_rate": ">=",
+    "evidence_faithfulness_rate": ">=",
+    "deterministic_precision": ">=",
+    "deterministic_recall": ">=",
+    "gold_concern_coverage": ">=",
+    "unevidenced_new_fact_rate": "<=",
+    "fast_median_latency_seconds": "<=",
+    "mechanical_time_reduction": ">=",
+    "review_retention_rate": ">=",
+    "core_problem_recall_delta": ">=",
+}
+
 
 def load_eval_manifest(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -100,6 +113,7 @@ def evaluate_peerassist_records(
     record_coverage_ok = not missing_sample_ids and not unknown_sample_ids and not duplicate_sample_ids
 
     metrics = _compute_metrics(records)
+    target_details = _target_details(metrics)
     targets = _target_results(
         metrics,
         freeze_policy_ok=bool(manifest["freeze_policy_ok"]),
@@ -119,6 +133,10 @@ def evaluate_peerassist_records(
         "duplicate_record_sample_ids": duplicate_sample_ids,
         "metrics": metrics,
         "stratified_metrics": _stratified_metrics(records=records, manifest_samples=manifest["samples"]),
+        "target_details": target_details,
+        "failed_target_names": [
+            name for name, detail in target_details.items() if not bool(detail["passed"])
+        ],
         "targets": targets,
     }
 
@@ -254,6 +272,27 @@ def _target_results(
     results["all_targets_passed"] = all(bool(value) for value in results.values())
     results["thresholds"] = dict(TARGETS)
     return results
+
+
+def _target_details(metrics: dict[str, float]) -> dict[str, dict[str, Any]]:
+    details: dict[str, dict[str, Any]] = {}
+    for name, threshold in TARGETS.items():
+        actual = float(metrics[name])
+        direction = TARGET_DIRECTIONS[name]
+        if direction == ">=":
+            passed = actual >= threshold
+            margin = actual - threshold
+        else:
+            passed = actual <= threshold
+            margin = threshold - actual
+        details[name] = {
+            "passed": passed,
+            "actual": actual,
+            "threshold": threshold,
+            "direction": direction,
+            "margin": round(margin, 12),
+        }
+    return details
 
 
 def _rate(numerator: float, denominator: float) -> float:
