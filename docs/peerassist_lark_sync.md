@@ -30,3 +30,11 @@ model keys, paper secrets, or reviewer-private material here.
 - Added machine-readable target_details to PeerAssist-Eval-v1 aggregate reports, including passed, actual, threshold, direction, and margin for every objective metric.
 - Added failed_target_names so CI, Feishu summaries, and reviewer-facing status can explain exactly which frozen-set targets remain below threshold.
 - Verification: .venv/bin/python -m pytest -q -> 366 passed, 1 skipped, 3 deselected.
+
+## 2026-07-10 23:49 CST - Unevidenced fact rate accounting fix
+
+- GitHub branch: https://github.com/moyuan10086/peerassist/tree/peerassist-mvp
+- Commit: 9ff4f79 fix: count unsupported facts in eval records
+- Eval record building now counts active concerns with bound evidence IDs but unsupported audited facts as unevidenced_new_facts.
+- This prevents the no-evidence-new-fact rate from being under-reported when a concern cites evidence but introduces unsupported numeric content.
+- Verification: .venv/bin/python -m pytest -q -> 367 passed, 1 skipped, 3 deselected.
