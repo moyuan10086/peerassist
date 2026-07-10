@@ -219,6 +219,15 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "Evidence Preview" in html
     assert "证据账本" in html
     assert "data-trace-filter" in html
+    assert "data-trace-audit-card" in html
+    assert "data-capability-audit-card" in html
+    assert "trace-audit-field" in html
+    assert "调用 ID" in html
+    assert "输入摘要" in html
+    assert "输出摘要" in html
+    assert "能力调用可追溯记录" in html
+    assert "证据" in html
+    assert "产物" in html
     assert "data-copy-path" in html
     assert "agent-toast" in html
     assert "复制路径" in html

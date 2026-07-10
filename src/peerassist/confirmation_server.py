@@ -977,6 +977,82 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       max-height: 360px;
       overflow: auto;
     }}
+    .trace-event {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+    }}
+    .trace-event[open] {{
+      border-color: #b8d8cf;
+      box-shadow: 0 12px 28px rgba(20, 35, 35, 0.08);
+    }}
+    .trace-event summary {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      padding: 10px;
+      cursor: pointer;
+      list-style: none;
+    }}
+    .trace-event summary > span {{ min-width: 0; }}
+    .trace-event summary::-webkit-details-marker {{ display: none; }}
+    .trace-event summary::after {{
+      content: "展开";
+      border: 1px solid #c8e1d9;
+      border-radius: 999px;
+      padding: 2px 7px;
+      color: var(--accent-strong);
+      background: #f4fbf8;
+      font-size: 10px;
+      font-weight: 850;
+    }}
+    .trace-event[open] summary::after {{ content: "收起"; }}
+    .trace-audit-body {{
+      display: grid;
+      gap: 8px;
+      padding: 0 10px 10px;
+    }}
+    .trace-audit-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }}
+    .trace-audit-field {{
+      border: 1px solid #e0e7e4;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 8px;
+      min-width: 0;
+    }}
+    .trace-audit-label {{
+      color: #66736f;
+      font-size: 10px;
+      font-weight: 900;
+    }}
+    .trace-audit-value {{
+      margin-top: 3px;
+      color: #26322f;
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }}
+    .trace-chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 4px;
+    }}
+    .trace-chip {{
+      border: 1px solid #c8e1d9;
+      border-radius: 999px;
+      padding: 2px 7px;
+      background: #fff;
+      color: var(--accent-strong);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+      font-weight: 800;
+    }}
     .evidence-focus {{
       padding: 12px 14px 16px;
       display: grid;
@@ -1050,12 +1126,6 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #fff;
     }}
     .trace-empty[data-visible="true"] {{ display: block; }}
-    .trace-event {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      background: var(--panel-soft);
-    }}
     .trace-event[data-status="started"], .trace-event[data-status="queued"] {{
       border-color: #c7d7ef;
       background: #f5f8fe;
@@ -1090,7 +1160,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .status-completed {{ border-color: #b8d8cf; color: var(--accent-strong); background: #eef8f4; }}
     .status-failed {{ border-color: #e6b4b4; color: var(--danger); background: #fff0f0; }}
     .status-approval_required {{ border-color: #e4c783; color: var(--amber); background: #fff8e6; }}
-    .trace-summary {{ margin-top: 6px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }}
+    .trace-summary {{ display: block; margin-top: 6px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }}
     .confirmation-note {{
       padding: 14px 16px 16px;
       color: #2f3835;
@@ -3040,23 +3110,48 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
 
 def _render_trace_events(events: list[Any]) -> str:
     rows = []
-    for row in events[-8:]:
+    visible_events = [row for row in events[-8:] if isinstance(row, dict)]
+    for index, row in enumerate(visible_events):
         if not isinstance(row, dict):
             continue
-        summary = _localized_copy(str(row.get("output_summary") or row.get("input_summary") or ""))
+        input_summary = _localized_copy(str(row.get("input_summary") or ""))
+        output_summary = _localized_copy(str(row.get("output_summary") or ""))
+        summary = output_summary or input_summary or "暂无摘要"
         duration = row.get("duration_ms")
         duration_text = f" · {int(duration)} ms" if isinstance(duration, int) else ""
         status = str(row.get("status") or "unknown")
+        open_attr = " open" if index == len(visible_events) - 1 else ""
+        artifacts = [str(item) for item in row.get("artifact_ids", []) if item]
+        evidence_ids = [str(item) for item in row.get("evidence_ids", []) if item]
+        error_text = " · ".join(
+            str(item)
+            for item in (row.get("error_code"), row.get("error_message"))
+            if item
+        )
         rows.append(
             f"""
-<div class="trace-event" data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}">
-  <div class="trace-head">
-    <div class="trace-tool">{html.escape(str(row.get('tool') or row.get('call_id') or 'tool'))}</div>
-    {_status_pill(status)}
+<details class="trace-event" data-trace-audit-card data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}"{open_attr}>
+  <summary>
+    <span>
+      <span class="trace-head"><span class="trace-tool">{html.escape(str(row.get('tool') or row.get('call_id') or 'tool'))}</span>{_status_pill(status)}</span>
+      <span class="trace-summary">{html.escape(_display_name(str(row.get('agent_id') or 'peerassist')))}{html.escape(duration_text)}</span>
+      <span class="trace-summary">{html.escape(summary)}</span>
+    </span>
+  </summary>
+  <div class="trace-audit-body">
+    <div class="trace-audit-grid">
+      {_render_audit_field('调用 ID', str(row.get('call_id') or '未记录'))}
+      {_render_audit_field('任务 ID', str(row.get('task_id') or '未记录'))}
+      {_render_audit_field('来源', _localized_source(str(row.get('source') or 'internal')))}
+      {_render_audit_field('开始时间', str(row.get('ts') or '未记录'))}
+      {_render_audit_field('输入摘要', input_summary or '未记录')}
+      {_render_audit_field('输出摘要', output_summary or '未记录')}
+    </div>
+    {_render_audit_chips('证据', evidence_ids)}
+    {_render_audit_chips('产物', artifacts)}
+    {_render_audit_field('错误信息', error_text or '无')}
   </div>
-  <div class="trace-summary">{html.escape(_display_name(str(row.get('agent_id') or 'peerassist')))}{html.escape(duration_text)}</div>
-  <div class="trace-summary">{html.escape(summary)}</div>
-</div>
+</details>
 """
         )
     if not rows:
@@ -3089,26 +3184,71 @@ def _render_trace_filters(events: list[Any]) -> str:
 
 def _render_invocations(invocations: list[Any]) -> str:
     rows = []
-    for row in invocations[-4:]:
+    visible_invocations = [row for row in invocations[-4:] if isinstance(row, dict)]
+    for index, row in enumerate(visible_invocations):
         if not isinstance(row, dict):
             continue
-        artifacts = ", ".join(str(item) for item in row.get("artifact_ids", []) if item)
+        artifacts = [str(item) for item in row.get("artifact_ids", []) if item]
+        evidence_ids = [str(item) for item in row.get("evidence_ids", []) if item]
         status = str(row.get("status") or "unknown")
+        duration = row.get("duration_ms")
+        duration_text = f" · {int(duration)} ms" if isinstance(duration, int) else ""
+        open_attr = " open" if index == len(visible_invocations) - 1 else ""
+        error_text = " · ".join(
+            str(item)
+            for item in (row.get("error_code"), row.get("error_message"))
+            if item
+        )
         rows.append(
             f"""
-<div class="trace-event" data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}">
-  <div class="trace-head">
-    <div class="trace-tool">{html.escape(str(row.get('capability_name') or row.get('call_id') or 'capability'))}</div>
-    {_status_pill(status)}
+<details class="trace-event" data-capability-audit-card data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}"{open_attr}>
+  <summary>
+    <span>
+      <span class="trace-head"><span class="trace-tool">{html.escape(str(row.get('capability_name') or row.get('call_id') or 'capability'))}</span>{_status_pill(status)}</span>
+      <span class="trace-summary">来源={html.escape(_localized_source(str(row.get('source') or '')))} · 尝试={html.escape(str(row.get('attempts') or 0))}{html.escape(duration_text)}</span>
+      <span class="trace-summary">能力调用可追溯记录</span>
+    </span>
+  </summary>
+  <div class="trace-audit-body">
+    <div class="trace-audit-grid">
+      {_render_audit_field('调用 ID', str(row.get('call_id') or '未记录'))}
+      {_render_audit_field('任务 ID', str(row.get('task_id') or '未记录'))}
+      {_render_audit_field('代理', _display_name(str(row.get('agent_id') or 'peerassist')))}
+      {_render_audit_field('来源', _localized_source(str(row.get('source') or 'internal')))}
+      {_render_audit_field('尝试次数', str(row.get('attempts') or 0))}
+      {_render_audit_field('状态', _localized_status(status))}
+    </div>
+    {_render_audit_chips('证据', evidence_ids)}
+    {_render_audit_chips('产物', artifacts)}
+    {_render_audit_field('错误信息', error_text or '无')}
   </div>
-  <div class="trace-summary">来源={html.escape(_localized_source(str(row.get('source') or '')))} · 尝试={html.escape(str(row.get('attempts') or 0))}</div>
-  <div class="trace-summary">产物：{html.escape(artifacts or '无')}</div>
-</div>
+</details>
 """
         )
     if not rows:
         rows.append('<div class="trace-summary">暂无能力调用记录。</div>')
     return f'<div class="invocation-list">{"".join(rows)}</div>'
+
+
+def _render_audit_field(label: str, value: str) -> str:
+    return f"""
+<div class="trace-audit-field">
+  <div class="trace-audit-label">{html.escape(label)}</div>
+  <div class="trace-audit-value">{html.escape(value)}</div>
+</div>
+"""
+
+
+def _render_audit_chips(label: str, values: list[str]) -> str:
+    chips = "".join(f'<span class="trace-chip">{html.escape(value)}</span>' for value in values)
+    if not chips:
+        chips = '<span class="trace-chip">无</span>'
+    return f"""
+<div class="trace-audit-field">
+  <div class="trace-audit-label">{html.escape(label)}</div>
+  <div class="trace-chip-row">{chips}</div>
+</div>
+"""
 
 
 def _status_pill(status: str) -> str:
