@@ -38,6 +38,12 @@ TARGET_DIRECTIONS = {
     "core_problem_recall_delta": ">=",
 }
 
+HARD_GATE_NAMES = (
+    "freeze_policy_ok",
+    "manifest_integrity_ok",
+    "record_coverage_ok",
+)
+
 
 def load_eval_manifest(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -136,6 +142,9 @@ def evaluate_peerassist_records(
         "target_details": target_details,
         "failed_target_names": [
             name for name, detail in target_details.items() if not bool(detail["passed"])
+        ],
+        "failed_gate_names": [
+            name for name in HARD_GATE_NAMES if not bool(targets.get(name))
         ],
         "targets": targets,
     }

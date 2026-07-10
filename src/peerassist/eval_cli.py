@@ -158,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         "report_path": str(out_path),
         "all_targets_passed": bool(report["targets"]["all_targets_passed"]),
         "sample_count": report["sample_count"],
+        "failed_target_names": report["failed_target_names"],
+        "failed_gate_names": report["failed_gate_names"],
     }
     print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["all_targets_passed"] else 1

@@ -61,3 +61,10 @@ model keys, paper secrets, or reviewer-private material here.
 - Evidence text remains in its source language to avoid mistranslating paper evidence.
 - The Feishu document had append-order drift because earlier updates anchored on heading blocks; revision 24 adds a complete Chinese repair section named "十、2026-07-10 中文增量日志修复版（完整）".
 - Future Feishu updates should fetch structure first and anchor to a real tail content block, not a heading-only block.
+
+## 2026-07-11 00:10 CST - Eval hard-gate failure summary
+
+- Eval reports now expose failed_gate_names for freeze_policy_ok, manifest_integrity_ok, and record_coverage_ok.
+- The peerassist-eval aggregate CLI summary now prints failed_target_names and failed_gate_names so PeerAssist-Eval-v1 failures identify both metric thresholds and frozen-set integrity gates.
+- Feishu document revision 29 adds section "十一、2026-07-11 Eval 硬门禁失败摘要" after the verified tail content block.
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.

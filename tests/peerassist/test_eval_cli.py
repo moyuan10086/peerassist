@@ -101,7 +101,7 @@ def test_eval_cli_writes_report_and_returns_zero_when_targets_pass(tmp_path: Pat
     assert json.loads(capsys.readouterr().out)["report_path"] == str(report_path)
 
 
-def test_eval_cli_returns_one_when_targets_fail(tmp_path: Path) -> None:
+def test_eval_cli_returns_one_when_targets_fail(tmp_path: Path, capsys) -> None:
     manifest_path = tmp_path / "manifest.json"
     records_path = tmp_path / "records.json"
     _manifest(manifest_path)
@@ -121,6 +121,9 @@ def test_eval_cli_returns_one_when_targets_fail(tmp_path: Path) -> None:
     )
 
     assert exit_code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert "document_parse_success_rate" in summary["failed_target_names"]
+    assert summary["failed_gate_names"] == ["record_coverage_ok"]
 
 
 def test_eval_cli_record_command_writes_record_from_artifacts(tmp_path: Path) -> None:

@@ -309,6 +309,7 @@ def test_evaluate_peerassist_records_requires_complete_manifest_sample_coverage(
     assert result["missing_record_sample_ids"] == ["paper-002"]
     assert result["targets"]["record_coverage_ok"] is False
     assert result["targets"]["all_targets_passed"] is False
+    assert result["failed_gate_names"] == ["record_coverage_ok"]
 
 
 def test_evaluate_peerassist_records_rejects_duplicate_sample_records(tmp_path) -> None:
@@ -412,3 +413,4 @@ def test_evaluate_peerassist_records_rejects_manifest_with_duplicate_or_unhashed
     assert result["manifest_missing_sha256_sample_ids"] == ["paper-002"]
     assert result["targets"]["manifest_integrity_ok"] is False
     assert result["targets"]["all_targets_passed"] is False
+    assert result["failed_gate_names"] == ["manifest_integrity_ok"]
