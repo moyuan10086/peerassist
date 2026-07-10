@@ -112,11 +112,12 @@ def main(argv: list[str] | None = None) -> int:
                     "records_out": str(args.records_out or ""),
                     "records_count": len(result["records"]),
                     "warnings": result["warnings"],
+                    "recall_regression_warnings": result["recall_regression_warnings"],
                 },
                 ensure_ascii=False,
             )
         )
-        return 0 if not result["warnings"] else 1
+        return 0 if not result["warnings"] and not result["recall_regression_warnings"] else 1
 
     if args.command == "merge-records":
         records = merge_eval_records(

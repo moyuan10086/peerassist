@@ -266,6 +266,59 @@ def test_eval_cli_crossover_command_writes_report_and_eval_records(tmp_path: Pat
     assert rows[0]["mechanical_assisted_minutes"] == 20.0
 
 
+def test_eval_cli_crossover_command_fails_on_core_recall_regressions(
+    tmp_path: Path, capsys
+) -> None:
+    input_path = tmp_path / "crossover.json"
+    report_path = tmp_path / "crossover_report.json"
+    write_json_file(
+        input_path,
+        {
+            "schema_version": "peerassist.reviewer_crossover.v1",
+            "trials": [
+                {
+                    "sample_id": "paper-001",
+                    "reviewer_id": "r1",
+                    "condition": "baseline",
+                    "mechanical_minutes": 20,
+                    "evidence_location_minutes": 10,
+                    "gold_core_concerns": ["c1", "c2"],
+                    "core_concerns_found": ["c1", "c2"],
+                },
+                {
+                    "sample_id": "paper-001",
+                    "reviewer_id": "r1",
+                    "condition": "assisted",
+                    "mechanical_minutes": 10,
+                    "evidence_location_minutes": 5,
+                    "gold_core_concerns": ["c1", "c2"],
+                    "core_concerns_found": ["c1"],
+                    "review_items_proposed": 3,
+                    "review_items_retained": 2,
+                },
+            ],
+        },
+    )
+
+    exit_code = eval_cli_main(
+        [
+            "crossover",
+            "--input",
+            str(input_path),
+            "--out",
+            str(report_path),
+        ]
+    )
+
+    assert exit_code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["recall_regression_warnings"] == [
+        "paper-001/r1 assisted core recall lower than baseline: 0.500 < 1.000"
+    ]
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["paired_reviewer_records"][0]["core_recall_regressed"] is True
+
+
 def test_eval_cli_merge_records_combines_peerassist_and_crossover_rows(tmp_path: Path) -> None:
     peerassist_records = tmp_path / "peerassist_records.jsonl"
     crossover_records = tmp_path / "crossover_records.jsonl"
