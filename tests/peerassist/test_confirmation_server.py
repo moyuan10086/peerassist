@@ -293,6 +293,10 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "collectPdfPageConcernCounts" in html
     assert "annotatePdfPageRail" in html
     assert "syncCurrentPdfPage" in html
+    assert "updatePdfPageContext" in html
+    assert "peerassistPdfNextConcernPage" in html
+    assert "data-pdf-page-filter-current" in html
+    assert "data-pdf-page-next-concern" in html
     assert "data-pdf-page-jump" in html
     assert "data-pdf-concern-count" in html
     assert "data-has-concern" in html
@@ -320,6 +324,13 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
 def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     html = confirmation_server._render_source_pdf_viewer()
 
+    assert "data-pdf-page-context" in html
+    assert "data-pdf-page-context-title" in html
+    assert "data-pdf-page-context-copy" in html
+    assert "data-pdf-page-filter-current" in html
+    assert "data-pdf-page-next-concern" in html
+    assert "只看本页队列" in html
+    assert "下一关注页" in html
     assert "data-pdf-selection-review" in html
     assert "data-pdf-selection-use" in html
     assert "基于选区审稿" in html

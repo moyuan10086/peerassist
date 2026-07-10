@@ -639,6 +639,30 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #fff;
       color: var(--accent-strong);
     }}
+    .pdf-page-context {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #fbfdfc;
+    }}
+    .pdf-page-context-title {{
+      color: #25322f;
+      font-size: 12px;
+      font-weight: 880;
+    }}
+    .pdf-page-context-copy {{
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    .pdf-page-context-actions {{
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }}
     .pdf-selection-tray {{
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -1762,6 +1786,25 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-queue-search]').forEach((input) => {{
       input.addEventListener('input', () => applyQueueFilter());
     }});
+    document.querySelectorAll('[data-pdf-page-filter-current]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        document.querySelector('[data-queue-filter="current-page"]')?.click();
+        document.querySelector('[data-panel="review-queue"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        showToast('已切换到当前 PDF 页队列');
+      }});
+    }});
+    document.querySelectorAll('[data-pdf-page-next-concern]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const nextPage = window.peerassistPdfNextConcernPage?.();
+        if (!nextPage) {{
+          showToast('暂无页码级审稿关注');
+          return;
+        }}
+        window.peerassistPdfGoToPage?.(nextPage)
+          .then(() => showToast(`已跳转到第 ${{nextPage}} 页关注`))
+          .catch(() => showToast('PDF 跳页未完成'));
+      }});
+    }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
@@ -1835,6 +1878,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const loading = reader.querySelector('[data-pdf-loading]');
       const fallback = reader.querySelector('[data-pdf-fallback]');
       const pageRail = reader.querySelector('[data-pdf-page-rail]');
+      const pageContextTitle = reader.querySelector('[data-pdf-page-context-title]');
+      const pageContextCopy = reader.querySelector('[data-pdf-page-context-copy]');
       const context = canvas.getContext('2d');
       let pdfDoc = null;
       let pageNumber = 1;
@@ -1857,7 +1902,38 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         if (activeQueueFilter === 'current-page') {{
           window.peerassistApplyQueueFilter?.('current-page');
         }}
+        updatePdfPageContext();
       }}
+
+      function concernCountForPage(page) {{
+        return collectPdfPageConcernCounts().get(Number(page) || 0) || 0;
+      }}
+
+      function nextConcernPage() {{
+        const pages = Array.from(collectPdfPageConcernCounts().keys()).sort((a, b) => a - b);
+        if (pages.length === 0) return null;
+        return pages.find((page) => page > pageNumber) || pages[0];
+      }}
+
+      function updatePdfPageContext() {{
+        const count = concernCountForPage(pageNumber);
+        if (pageContextTitle) {{
+          pageContextTitle.textContent = count > 0
+            ? `PDF 第 ${{pageNumber}} 页 · 本页 ${{count}} 条审稿关注`
+            : `PDF 第 ${{pageNumber}} 页 · 本页暂无审稿关注`;
+        }}
+        if (pageContextCopy) {{
+          const nextPage = nextConcernPage();
+          if (!nextPage) {{
+            pageContextCopy.textContent = '当前论文尚未绑定页码级审稿关注。';
+          }} else if (nextPage === pageNumber && count > 0) {{
+            pageContextCopy.textContent = '当前页已绑定关注，可继续核对本页队列。';
+          }} else {{
+            pageContextCopy.textContent = `下一处有关注的页面：第 ${{nextPage}} 页。`;
+          }}
+        }}
+      }}
+      window.peerassistPdfNextConcernPage = nextConcernPage;
 
       function updateButtons() {{
         reader.querySelectorAll('[data-pdf-action]').forEach((button) => {{
@@ -3025,6 +3101,16 @@ def _render_source_pdf_viewer() -> str:
       </div>
       <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">
         <span class="pdf-page-rail-label">PDF 页码导航</span>
+      </div>
+      <div class="pdf-page-context" data-pdf-page-context>
+        <div>
+          <div class="pdf-page-context-title" data-pdf-page-context-title>正在统计本页审稿关注</div>
+          <div class="pdf-page-context-copy" data-pdf-page-context-copy>页码导航会标记每页绑定的 concerns。</div>
+        </div>
+        <div class="pdf-page-context-actions">
+          <button class="inline-button" type="button" data-pdf-page-filter-current>只看本页队列</button>
+          <button class="inline-button" type="button" data-pdf-page-next-concern>下一关注页</button>
+        </div>
       </div>
       <div class="pdf-selection-tray" data-pdf-selection-tray hidden>
         <div>
