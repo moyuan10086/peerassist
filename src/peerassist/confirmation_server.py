@@ -646,6 +646,41 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-color: #d8fff5;
       background: rgba(255, 255, 255, 0.14);
     }}
+    .pdf-runtime-pulse {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      padding: 9px 10px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #f7faf9;
+    }}
+    .pdf-runtime-chip {{
+      min-height: 42px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 8px;
+    }}
+    .pdf-runtime-label {{
+      color: #66736f;
+      font-size: 10px;
+      font-weight: 900;
+    }}
+    .pdf-runtime-value {{
+      margin-top: 3px;
+      color: #25322f;
+      font-size: 12px;
+      font-weight: 860;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-runtime-pulse[data-stream-source="stream"] .pdf-runtime-chip:first-child {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-runtime-pulse[data-stream-source="poll"] .pdf-runtime-chip:first-child {{
+      border-color: #e4c783;
+      background: #fff8e6;
+    }}
     .pdf-page-button {{
       position: relative;
       width: auto;
@@ -1480,6 +1515,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-page-rail {{ padding: 8px; }}
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
+      .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
@@ -1771,6 +1807,19 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       showToast(isEnabled ? '已进入专注审稿模式' : '已退出专注审稿模式');
     }}
     window.peerassistSetReviewFocusMode = setReviewFocusMode;
+    function updatePdfRuntimePulse(state, source) {{
+      const pulse = document.querySelector('[data-pdf-runtime-pulse]');
+      if (!pulse) return;
+      const runtime = state.runtime || {{}};
+      pulse.dataset.streamSource = source === 'stream' ? 'stream' : 'poll';
+      const stateEl = pulse.querySelector('[data-pdf-runtime-state]');
+      const pendingEl = pulse.querySelector('[data-pdf-runtime-pending]');
+      const eventsEl = pulse.querySelector('[data-pdf-runtime-events]');
+      if (stateEl) stateEl.textContent = source === 'stream' ? '事件流已连接' : '轮询兜底中';
+      if (pendingEl) pendingEl.textContent = `${{state.pending_count || 0}} 条`;
+      if (eventsEl) eventsEl.textContent = `${{runtime.tool_event_count || 0}} 条`;
+    }}
+    window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function handlePdfReviewCommand(command) {{
       if (command === 'agent-review') {{
         document.querySelector('[data-agent-review-start]')?.click();
@@ -1893,6 +1942,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (topbar) {{
         topbar.dataset.streamState = source === 'stream' ? 'live' : 'polling';
       }}
+      updatePdfRuntimePulse(state, source);
       if (source === 'stream') {{
         appendStreamLine('state', `${{runtime.tool_event_count || 0}} 条追踪事件 · ${{state.pending_count || 0}} 条待确认`);
       }}
@@ -2075,6 +2125,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const annotationList = reader.querySelector('[data-pdf-annotation-list]');
       const annotationCount = reader.querySelector('[data-pdf-annotation-count]');
       const annotationEmpty = reader.querySelector('[data-pdf-annotation-empty]');
+      const runtimePage = reader.querySelector('[data-pdf-runtime-page]');
       const context = canvas.getContext('2d');
       let pdfDoc = null;
       let pageNumber = 1;
@@ -2099,6 +2150,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }}
         updatePdfPageContext();
         syncPdfPageAnnotations();
+        syncPdfRuntimePagePulse();
       }}
 
       function concernCountForPage(page) {{
@@ -2130,6 +2182,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }}
       }}
       window.peerassistPdfNextConcernPage = nextConcernPage;
+
+      function syncPdfRuntimePagePulse() {{
+        if (!runtimePage) return;
+        const count = concernCountForPage(pageNumber);
+        runtimePage.textContent = `第 ${{pageNumber}} 页 · ${{count}} 条关注`;
+      }}
+      window.peerassistSyncPdfRuntimePagePulse = syncPdfRuntimePagePulse;
 
       function queueItemsForPdfPage(page) {{
         return Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]')).filter((item) => {{
@@ -3354,6 +3413,24 @@ def _render_source_pdf_viewer() -> str:
           <button class="pdf-command-button" type="button" data-pdf-review-command="current-page">本页队列</button>
           <button class="pdf-command-button" type="button" data-pdf-review-command="next-concern">下一关注</button>
           <button class="pdf-command-button" type="button" data-pdf-review-command="focus">专注模式</button>
+        </div>
+      </div>
+      <div class="pdf-runtime-pulse" data-pdf-runtime-pulse data-stream-source="connecting" aria-label="PDF 审稿运行脉冲">
+        <div class="pdf-runtime-chip">
+          <div class="pdf-runtime-label">事件流</div>
+          <div class="pdf-runtime-value" data-pdf-runtime-state>任务流连接中</div>
+        </div>
+        <div class="pdf-runtime-chip">
+          <div class="pdf-runtime-label">待确认</div>
+          <div class="pdf-runtime-value" data-pdf-runtime-pending>--</div>
+        </div>
+        <div class="pdf-runtime-chip">
+          <div class="pdf-runtime-label">工具事件</div>
+          <div class="pdf-runtime-value" data-pdf-runtime-events>--</div>
+        </div>
+        <div class="pdf-runtime-chip">
+          <div class="pdf-runtime-label">当前页</div>
+          <div class="pdf-runtime-value" data-pdf-runtime-page>等待 PDF</div>
         </div>
       </div>
       <div class="pdf-page-context" data-pdf-page-context>

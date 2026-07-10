@@ -297,6 +297,13 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistPdfNextConcernPage" in html
     assert "wirePdfReviewCommands" in html
     assert "handlePdfReviewCommand" in html
+    assert "updatePdfRuntimePulse" in html
+    assert "syncPdfRuntimePagePulse" in html
+    assert "data-pdf-runtime-pulse" in html
+    assert "data-pdf-runtime-state" in html
+    assert "data-pdf-runtime-pending" in html
+    assert "data-pdf-runtime-events" in html
+    assert "data-pdf-runtime-page" in html
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
     assert "syncPdfPageAnnotations" in html
@@ -353,6 +360,12 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert 'data-pdf-review-command="next-concern"' in html
     assert 'data-pdf-review-command="focus"' in html
     assert "PDF 审稿命令条" in html
+    assert "data-pdf-runtime-pulse" in html
+    assert "data-pdf-runtime-state" in html
+    assert "data-pdf-runtime-pending" in html
+    assert "data-pdf-runtime-events" in html
+    assert "data-pdf-runtime-page" in html
+    assert "任务流连接中" in html
     assert "data-pdf-page-annotations" in html
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
