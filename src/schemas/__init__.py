@@ -16,6 +16,20 @@ from schemas.execution import (
     Task,
 )
 from schemas.paper import Figure, Paper, PaperMetadata, Section, Table
+from schemas.peerassist import (
+    Concern,
+    ConcernLevel,
+    ConcernStatus,
+    DeterministicCheck,
+    DeterministicCheckApplicability,
+    DeterministicCheckStatus,
+    EvidenceItem,
+    EvidenceLedger,
+    EvidenceType,
+    HumanConfirmationAction,
+    ToolTraceEvent,
+    ToolTraceStatus,
+)
 from schemas.positioning import LiteratureContext, NeighborMethod, NoveltyType
 from schemas.review import ClaimAssessment, EvidenceLink, FinalReview
 from schemas.stage import StageResult, StageStatus
@@ -23,13 +37,23 @@ from schemas.stage import StageResult, StageStatus
 __all__ = [
     "ClaimAssessment",
     "ClaimLabel",
+    "Concern",
+    "ConcernLevel",
+    "ConcernStatus",
+    "DeterministicCheck",
+    "DeterministicCheckApplicability",
+    "DeterministicCheckStatus",
     "EvidenceLink",
+    "EvidenceItem",
+    "EvidenceLedger",
+    "EvidenceType",
     "ExecutionEvidence",
     "ExecutionExitStatus",
     "ExecutionPayload",
     "ExecutionStageStatus",
     "Figure",
     "FinalReview",
+    "HumanConfirmationAction",
     "LiteratureContext",
     "NeighborMethod",
     "NoveltyType",
@@ -41,4 +65,6 @@ __all__ = [
     "StageStatus",
     "Table",
     "Task",
+    "ToolTraceEvent",
+    "ToolTraceStatus",
 ]
