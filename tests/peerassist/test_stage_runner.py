@@ -36,7 +36,9 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     for key in (
         "evidence_ledger",
         "deterministic_checks",
+        "agent_results",
         "concerns",
+        "confirmation_bundle",
         "human_confirmations",
         "tool_trace",
         "report_md",
@@ -47,6 +49,14 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
 
     report_payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
     assert report_payload["parse_provider"]["provider_name"] == "mineru"
+    assert report_payload["confirmation_bundle_path"] == result.outputs["confirmation_bundle"]
+    assert report_payload["agent_results_path"] == result.outputs["agent_results"]
+    assert report_payload["concerns"][0]["source_agent_ids"] == [
+        "statistics_agent",
+        "integrator_agent",
+    ]
+    bundle = json.loads(Path(result.outputs["confirmation_bundle"]).read_text(encoding="utf-8"))
+    assert bundle["groups"]["pending_human_confirmation"][0]["evidence"][0]["locator"]
     trace_text = Path(result.outputs["tool_trace"]).read_text(encoding="utf-8")
     assert "resolve_parse_provider" in trace_text
 

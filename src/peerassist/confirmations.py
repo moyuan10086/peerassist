@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus, HumanConfirmationAction
 
 
@@ -47,3 +49,24 @@ def apply_confirmations(
             updated = _apply_action(updated, action)
         result.append(updated)
     return result
+
+
+def build_confirmation_bundle(
+    *, concerns: list[Concern], evidence_lookup: dict[str, str] | None = None
+) -> dict[str, Any]:
+    evidence_lookup = evidence_lookup or {}
+    groups: dict[str, list[dict[str, Any]]] = {status.value: [] for status in ConcernStatus}
+
+    for concern in concerns:
+        row = concern.model_dump(mode="json")
+        row["evidence"] = [
+            {"id": evidence_id, "locator": evidence_lookup.get(evidence_id, evidence_id)}
+            for evidence_id in concern.evidence_ids
+        ]
+        groups[concern.status.value].append(row)
+
+    return {
+        "schema_version": "peerassist.confirmation_bundle.v1",
+        "counts_by_status": {status: len(rows) for status, rows in groups.items()},
+        "groups": groups,
+    }

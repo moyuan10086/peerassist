@@ -12,9 +12,9 @@ from common.pipeline_context import (
     read_json_file,
     write_json_file,
 )
+from peerassist.agents import integrate_agent_results, run_peerassist_agents
 from peerassist.capabilities import default_capability_registry
-from peerassist.confirmations import apply_confirmations
-from peerassist.concerns import concerns_from_checks
+from peerassist.confirmations import apply_confirmations, build_confirmation_bundle
 from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
 from peerassist.ocr_providers import MinerUParseProvider
@@ -138,7 +138,26 @@ def run_peerassist_stage(
         },
     )
 
-    concerns = concerns_from_checks(checks)
+    registry = default_capability_registry()
+    exposed = registry.expose(mode=normalized_mode)
+    capability_names = [capability.name for capability in exposed]
+    agent_results = run_peerassist_agents(
+        mode=normalized_mode,
+        ledger=ledger,
+        checks=checks,
+        capability_names=capability_names,
+    )
+    agent_results_path = out_dir / "agent_results.json"
+    write_json_file(
+        agent_results_path,
+        {
+            "schema_version": "peerassist.agent_results.v1",
+            "mode": normalized_mode,
+            "results": [result.model_dump(mode="json") for result in agent_results],
+        },
+    )
+
+    concerns = integrate_agent_results(agent_results)
     concerns_path = out_dir / "peerassist_concerns.json"
     write_json_file(
         concerns_path,
@@ -155,14 +174,21 @@ def run_peerassist_stage(
             confirmations_path,
             {"schema_version": "peerassist.human_confirmations.v1", "actions": []},
         )
+    evidence_lookup = _evidence_lookup([item.model_dump(mode="json") for item in ledger.items])
+    confirmation_bundle_path = out_dir / "confirmation_bundle.json"
+    write_json_file(
+        confirmation_bundle_path,
+        build_confirmation_bundle(concerns=concerns, evidence_lookup=evidence_lookup),
+    )
+
     confirmed_concerns = apply_confirmations(concerns, _load_confirmations(confirmations_path))
     report_md, report_payload = export_peerassist_report(
         paper_id=paper_key,
         concerns=confirmed_concerns,
-        evidence_lookup=_evidence_lookup([item.model_dump(mode="json") for item in ledger.items]),
+        evidence_lookup=evidence_lookup,
     )
-    registry = default_capability_registry()
-    exposed = registry.expose(mode=normalized_mode)
+    report_payload["agent_results_path"] = str(agent_results_path)
+    report_payload["confirmation_bundle_path"] = str(confirmation_bundle_path)
     report_payload["parse_provider"] = {
         "provider_name": parse_result.provider_name,
         "kind": parse_result.kind.value,
@@ -193,7 +219,9 @@ def run_peerassist_stage(
         outputs={
             "evidence_ledger": str(ledger_path),
             "deterministic_checks": str(checks_path),
+            "agent_results": str(agent_results_path),
             "concerns": str(concerns_path),
+            "confirmation_bundle": str(confirmation_bundle_path),
             "human_confirmations": str(confirmations_path),
             "tool_trace": str(out_dir / "tool_trace.jsonl"),
             "report_md": str(report_md_path),
