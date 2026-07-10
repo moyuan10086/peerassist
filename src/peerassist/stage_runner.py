@@ -10,13 +10,14 @@ from common.pipeline_context import (
     parse_stage_dir,
     peerassist_stage_dir,
     read_json_file,
-    resolve_artifact_path,
     write_json_file,
 )
+from peerassist.capabilities import default_capability_registry
 from peerassist.confirmations import apply_confirmations
 from peerassist.concerns import concerns_from_checks
 from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
+from peerassist.ocr_providers import MinerUParseProvider
 from peerassist.report_export import export_peerassist_report
 from peerassist.tool_trace import ToolTraceRecorder
 from schemas.peerassist import HumanConfirmationAction, ToolTraceStatus
@@ -74,8 +75,26 @@ def run_peerassist_stage(
     trace = ToolTraceRecorder(out_dir / "tool_trace.jsonl")
 
     parse_payload = read_json_file(parse_stage_dir(run_dir) / "paper.json")
-    mineru_markdown = resolve_artifact_path(repo_root, parse_payload.get("mineru_markdown_path"))
-    mineru_content = resolve_artifact_path(repo_root, parse_payload.get("mineru_content_list_path"))
+    trace.record(
+        task_id=paper_key,
+        call_id="resolve_parse_provider",
+        agent_id="peerassist_stage",
+        source="builtin",
+        tool="mineru_parse_artifacts",
+        status=ToolTraceStatus.STARTED,
+        input_summary="resolve FactReview parse artifacts",
+    )
+    parse_provider = MinerUParseProvider()
+    parse_result = parse_provider.from_parse_payload(parse_payload, repo_root=repo_root)
+    trace.record(
+        task_id=paper_key,
+        call_id="resolve_parse_provider",
+        agent_id="peerassist_stage",
+        source="builtin",
+        tool="mineru_parse_artifacts",
+        status=ToolTraceStatus.COMPLETED,
+        output_summary=f"provider={parse_result.provider_name}; warnings={len(parse_result.warnings)}",
+    )
 
     trace.record(
         task_id=paper_key,
@@ -89,8 +108,11 @@ def run_peerassist_stage(
     ledger = build_evidence_ledger(
         paper_id=paper_key,
         source_pdf=paper_pdf,
-        mineru_markdown_path=mineru_markdown,
-        mineru_content_list_path=mineru_content,
+        mineru_markdown_path=parse_result.markdown_path,
+        mineru_content_list_path=parse_result.content_list_path,
+        provider_name=parse_result.provider_name,
+        provider_metadata=parse_result.metadata,
+        provider_warnings=parse_result.warnings,
     )
     ledger_path = out_dir / "evidence_ledger.json"
     write_json_file(ledger_path, ledger.model_dump(mode="json"))
@@ -139,6 +161,21 @@ def run_peerassist_stage(
         concerns=confirmed_concerns,
         evidence_lookup=_evidence_lookup([item.model_dump(mode="json") for item in ledger.items]),
     )
+    registry = default_capability_registry()
+    exposed = registry.expose(mode=normalized_mode)
+    report_payload["parse_provider"] = {
+        "provider_name": parse_result.provider_name,
+        "kind": parse_result.kind.value,
+        "external_upload_required": parse_result.external_upload_required,
+        "enabled": parse_result.enabled,
+        "warnings": list(parse_result.warnings),
+        "metadata": dict(parse_result.metadata),
+    }
+    report_payload["capabilities"] = [capability.to_exposed_schema() for capability in exposed]
+    if normalized_mode in {"standard", "deep"}:
+        report_payload.setdefault("warnings", []).append(
+            "External OCR capabilities are not enabled; using local FactReview/MinerU parse artifacts."
+        )
     report_md_path = out_dir / "peerassist_report.md"
     report_json_path = out_dir / "peerassist_report.json"
     _write_text(report_md_path, report_md)
