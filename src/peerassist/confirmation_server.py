@@ -774,6 +774,23 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #fff;
       color: var(--accent-strong);
     }}
+    .pdf-page-button[data-has-pending="true"] {{
+      border-color: #cf5d1f;
+      box-shadow: inset 0 0 0 1px rgba(207, 93, 31, 0.28);
+    }}
+    .pdf-page-button[data-has-pending="true"]::after {{
+      content: "";
+      position: absolute;
+      right: 5px;
+      bottom: 5px;
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: #cf5d1f;
+    }}
+    .pdf-page-button[aria-current="page"][data-has-pending="true"]::after {{
+      background: #fff;
+    }}
     .pdf-page-context {{
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -2112,6 +2129,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         document.querySelector('[data-pdf-page-filter-current]')?.click();
         return;
       }}
+      if (command === 'next-pending') {{
+        document.querySelector('[data-pdf-page-next-pending]')?.click();
+        return;
+      }}
       if (command === 'next-concern') {{
         document.querySelector('[data-pdf-page-next-concern]')?.click();
         return;
@@ -2321,6 +2342,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         showToast('已切换到当前 PDF 页队列');
       }});
     }});
+    document.querySelectorAll('[data-pdf-page-next-pending]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const nextPage = window.peerassistPdfNextPendingConcernPage?.();
+        if (!nextPage) {{
+          showToast('暂无未处理页码批注');
+          return;
+        }}
+        window.peerassistPdfGoToPage?.(nextPage)
+          .then(() => showToast(`已跳转到第 ${{nextPage}} 页未处理批注`))
+          .catch(() => showToast('PDF 跳页未完成'));
+      }});
+    }});
     document.querySelectorAll('[data-pdf-page-next-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
         const nextPage = window.peerassistPdfNextConcernPage?.();
@@ -2455,25 +2488,44 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         return pages.find((page) => page > pageNumber) || pages[0];
       }}
 
+      function pendingCountForPage(page) {{
+        return collectPdfPagePendingCounts().get(Number(page) || 0) || 0;
+      }}
+
+      function nextPendingConcernPage() {{
+        const pages = Array.from(collectPdfPagePendingCounts().keys()).sort((a, b) => a - b);
+        if (pages.length === 0) return null;
+        return pages.find((page) => page > pageNumber) || pages[0];
+      }}
+
       function updatePdfPageContext() {{
         const count = concernCountForPage(pageNumber);
+        const pendingCount = pendingCountForPage(pageNumber);
         if (pageContextTitle) {{
-          pageContextTitle.textContent = count > 0
-            ? `PDF 第 ${{pageNumber}} 页 · 本页 ${{count}} 条审稿关注`
+          pageContextTitle.textContent = pendingCount > 0
+            ? `PDF 第 ${{pageNumber}} 页 · 本页 ${{pendingCount}} 条未处理`
+            : count > 0
+              ? `PDF 第 ${{pageNumber}} 页 · 本页 ${{count}} 条审稿关注`
             : `PDF 第 ${{pageNumber}} 页 · 本页暂无审稿关注`;
         }}
         if (pageContextCopy) {{
-          const nextPage = nextConcernPage();
-          if (!nextPage) {{
+          const nextPendingPage = nextPendingConcernPage();
+          const nextPage = nextPendingPage || nextConcernPage();
+          if (nextPendingPage === pageNumber && pendingCount > 0) {{
+            pageContextCopy.textContent = '当前页仍有未处理批注，可逐条确认、暂挂、改写或核对。';
+          }} else if (nextPendingPage) {{
+            pageContextCopy.textContent = `下一处未处理批注：第 ${{nextPendingPage}} 页。`;
+          }} else if (!nextPage) {{
             pageContextCopy.textContent = '当前论文尚未绑定页码级审稿关注。';
           }} else if (nextPage === pageNumber && count > 0) {{
-            pageContextCopy.textContent = '当前页已绑定关注，可继续核对本页队列。';
+            pageContextCopy.textContent = '当前页关注已处理，可继续核对本页队列或查看下一关注页。';
           }} else {{
             pageContextCopy.textContent = `下一处有关注的页面：第 ${{nextPage}} 页。`;
           }}
         }}
       }}
       window.peerassistPdfNextConcernPage = nextConcernPage;
+      window.peerassistPdfNextPendingConcernPage = nextPendingConcernPage;
 
       function syncPdfRuntimePagePulse() {{
         if (!runtimePage) return;
@@ -2640,17 +2692,38 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         return new Map(Array.from(pageConcerns, ([page, concerns]) => [page, concerns.size]));
       }}
 
+      function collectPdfPagePendingCounts() {{
+        const pageConcerns = new Map();
+        document.querySelectorAll('.queue-body .item[data-concern-id][data-pdf-page]').forEach((node) => {{
+          if (isResolvedConcernStatus(node.dataset.concernStatus)) return;
+          const page = Number(node.dataset.pdfPage || 0);
+          if (!Number.isFinite(page) || page <= 0) return;
+          const concernId = node.dataset.concernId || `page-${{page}}-${{pageConcerns.size}}`;
+          if (!pageConcerns.has(page)) pageConcerns.set(page, new Set());
+          pageConcerns.get(page).add(concernId);
+        }});
+        return new Map(Array.from(pageConcerns, ([page, concerns]) => [page, concerns.size]));
+      }}
+
       function annotatePdfPageRail() {{
         const counts = collectPdfPageConcernCounts();
+        const pendingCounts = collectPdfPagePendingCounts();
         reader.querySelectorAll('[data-pdf-page-jump]').forEach((button) => {{
           const page = Number(button.dataset.pdfPageJump || 0);
           const count = counts.get(page) || 0;
+          const pendingCount = pendingCounts.get(page) || 0;
           button.querySelector('.pdf-page-badge')?.remove();
           button.setAttribute('data-pdf-concern-count', String(count));
+          button.setAttribute('data-pdf-pending-count', String(pendingCount));
           button.setAttribute('data-has-concern', count > 0 ? 'true' : 'false');
+          button.setAttribute('data-has-pending', pendingCount > 0 ? 'true' : 'false');
           button.setAttribute(
             'aria-label',
-            count > 0 ? `跳转到第 ${{page}} 页，本页 ${{count}} 条审稿关注` : `跳转到第 ${{page}} 页`
+            pendingCount > 0
+              ? `跳转到第 ${{page}} 页，本页 ${{pendingCount}} 条未处理，${{count}} 条审稿关注`
+              : count > 0
+                ? `跳转到第 ${{page}} 页，本页 ${{count}} 条审稿关注`
+                : `跳转到第 ${{page}} 页`
           );
           if (count > 0) {{
             const badge = document.createElement('span');
@@ -3902,6 +3975,7 @@ def _render_source_pdf_viewer() -> str:
           <button class="pdf-command-button primary" type="button" data-pdf-review-command="agent-review">全篇审稿</button>
           <button class="pdf-command-button" type="button" data-pdf-review-command="selection-review">选区审稿</button>
           <button class="pdf-command-button" type="button" data-pdf-review-command="current-page">本页队列</button>
+          <button class="pdf-command-button" type="button" data-pdf-review-command="next-pending">下一未处理</button>
           <button class="pdf-command-button" type="button" data-pdf-review-command="next-concern">下一关注</button>
           <button class="pdf-command-button" type="button" data-pdf-review-command="focus">专注模式</button>
         </div>
@@ -3939,6 +4013,7 @@ def _render_source_pdf_viewer() -> str:
         </div>
         <div class="pdf-page-context-actions">
           <button class="inline-button" type="button" data-pdf-page-filter-current>只看本页队列</button>
+          <button class="inline-button" type="button" data-pdf-page-next-pending>下一未处理</button>
           <button class="inline-button" type="button" data-pdf-page-next-concern>下一关注页</button>
         </div>
       </div>

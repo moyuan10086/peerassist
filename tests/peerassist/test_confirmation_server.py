@@ -303,6 +303,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "syncCurrentPdfPage" in html
     assert "updatePdfPageContext" in html
     assert "peerassistPdfNextConcernPage" in html
+    assert "peerassistPdfNextPendingConcernPage" in html
     assert "wirePdfReviewCommands" in html
     assert "handlePdfReviewCommand" in html
     assert "updatePdfRuntimePulse" in html
@@ -317,6 +318,9 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-pdf-annotation-empty" in html
     assert "syncPdfPageAnnotations" in html
     assert "syncPdfAnnotationProgress" in html
+    assert "collectPdfPagePendingCounts" in html
+    assert "nextPendingConcernPage" in html
+    assert "pendingCountForPage" in html
     assert "setPdfAnnotationDensity" in html
     assert "peerassistSetPdfAnnotationDensity" in html
     assert "isResolvedConcernStatus" in html
@@ -330,10 +334,13 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "已打开该条审稿意见编辑框" in html
     assert "核对" in html
     assert "data-pdf-page-filter-current" in html
+    assert "data-pdf-page-next-pending" in html
     assert "data-pdf-page-next-concern" in html
     assert "data-pdf-page-jump" in html
     assert "data-pdf-concern-count" in html
+    assert "data-pdf-pending-count" in html
     assert "data-has-concern" in html
+    assert "data-has-pending" in html
     assert "data-focus-review-toggle" in html
     assert "data-review-focus" in html
     assert "setReviewFocusMode" in html
@@ -344,6 +351,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "已退出专注审稿模式" in html
     assert "pdf-page-badge" in html
     assert "本页 ${count} 条审稿关注" in html
+    assert "本页 ${pendingCount} 条未处理" in html
+    assert "下一处未处理批注" in html
     assert "data-pdf-selection-tray" in html
     assert "data-pdf-selection-quote" in html
     assert "data-pdf-selection-copy" in html
@@ -370,13 +379,16 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-page-context-title" in html
     assert "data-pdf-page-context-copy" in html
     assert "data-pdf-page-filter-current" in html
+    assert "data-pdf-page-next-pending" in html
     assert "data-pdf-page-next-concern" in html
     assert "只看本页队列" in html
+    assert "下一未处理" in html
     assert "下一关注页" in html
     assert "data-pdf-review-command-strip" in html
     assert 'data-pdf-review-command="agent-review"' in html
     assert 'data-pdf-review-command="selection-review"' in html
     assert 'data-pdf-review-command="current-page"' in html
+    assert 'data-pdf-review-command="next-pending"' in html
     assert 'data-pdf-review-command="next-concern"' in html
     assert 'data-pdf-review-command="focus"' in html
     assert "PDF 审稿命令条" in html
