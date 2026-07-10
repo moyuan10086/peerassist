@@ -109,6 +109,22 @@ def test_export_omits_deleted_concerns() -> None:
     assert payload["confirmed_count"] == 0
 
 
+def test_export_rejects_confirmed_concern_without_evidence() -> None:
+    concern = Concern(
+        id="concern_no_evidence_001",
+        level=ConcernLevel.CLARIFICATION_NEEDED,
+        category="statistics",
+        title="Needs evidence before becoming a review concern",
+        evidence_ids=[],
+        impact="May affect support for the result.",
+        author_action="Please clarify.",
+        status=ConcernStatus.CONFIRMED,
+    )
+
+    with pytest.raises(ValueError, match="confirmed concern .* lacks evidence"):
+        export_peerassist_report(paper_id="demo", concerns=[concern])
+
+
 def test_export_rejects_accusatory_system_language() -> None:
     concern = Concern(
         id="concern_bad_001",

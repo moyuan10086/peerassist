@@ -4,6 +4,8 @@ import json
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from common.pipeline_context import init_full_pipeline_context, peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 from peerassist.confirmation_cli import main as confirmation_cli_main
@@ -128,6 +130,24 @@ def test_confirmation_cli_applies_decision(tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["actions_count"] == 1
     assert json.loads((out_dir / "peerassist_report.json").read_text(encoding="utf-8"))["confirmed_count"] == 1
+
+
+def test_apply_confirmation_decision_rejects_confirming_item_without_evidence(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_peerassist_stage(run_dir)
+    payload = json.loads((out_dir / "peerassist_concerns.json").read_text(encoding="utf-8"))
+    payload["concerns"][0]["evidence_ids"] = []
+    write_json_file(out_dir / "peerassist_concerns.json", payload)
+
+    with pytest.raises(ValueError, match="confirmed concern .* lacks evidence"):
+        apply_confirmation_decision(
+            run_dir=run_dir,
+            paper_id="demo",
+            concern_id="concern_pending_001",
+            action="confirm",
+            reviewer_id="reviewer-1",
+            timestamp="2026-07-10T00:00:00Z",
+        )
 
 
 def test_peerassist_confirm_console_script_is_registered() -> None:

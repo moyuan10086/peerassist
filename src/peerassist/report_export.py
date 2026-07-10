@@ -90,6 +90,12 @@ def _guard_review_language(concerns: list[Concern]) -> None:
             )
 
 
+def _guard_confirmed_evidence(concerns: list[Concern]) -> None:
+    for concern in concerns:
+        if concern.status in CONFIRMED_STATUSES and not concern.evidence_ids:
+            raise ValueError(f"confirmed concern {concern.id} lacks evidence")
+
+
 def _copy(language: str) -> dict[str, object]:
     return REPORT_COPY.get(language, REPORT_COPY["en"])
 
@@ -132,6 +138,7 @@ def export_peerassist_report(
         normalized_language = "en"
     active = [concern for concern in concerns if concern.status is not ConcernStatus.DELETED]
     _guard_review_language(active)
+    _guard_confirmed_evidence(active)
 
     confirmed = [concern for concern in active if concern.status in CONFIRMED_STATUSES]
     pending = [concern for concern in active if concern.status is ConcernStatus.PENDING_HUMAN_CONFIRMATION]
