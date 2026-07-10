@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from schemas.peerassist import (
+    AgentConcernDraft,
+    AgentInputPacket,
+    AgentReviewResult,
+    AgentRunStatus,
     Concern,
     ConcernLevel,
     ConcernStatus,
@@ -94,3 +98,41 @@ def test_tool_trace_event_has_required_lifecycle_fields() -> None:
     )
 
     assert event.status is ToolTraceStatus.STARTED
+
+
+def test_agent_input_packet_records_scope_and_capabilities() -> None:
+    packet = AgentInputPacket(
+        agent_id="statistics_agent",
+        mode="fast",
+        evidence_ids=["P01-L001"],
+        check_ids=["check_percentage_consistency_001"],
+        capability_names=["percentage_consistency_check"],
+    )
+
+    assert packet.agent_id == "statistics_agent"
+    assert packet.evidence_ids == ["P01-L001"]
+    assert packet.capability_names == ["percentage_consistency_check"]
+
+
+def test_agent_review_result_preserves_draft_concerns_and_status() -> None:
+    draft = AgentConcernDraft(
+        id="draft_001",
+        level=ConcernLevel.CLARIFICATION_NEEDED,
+        category="statistics",
+        title="Percentage needs clarification",
+        evidence_ids=["P01-L001"],
+        source_check_ids=["check_percentage_consistency_001"],
+        impact="May affect support for the reported result.",
+        benign_explanation="A different denominator may have been used.",
+        author_action="Please clarify the denominator.",
+    )
+    result = AgentReviewResult(
+        agent_id="statistics_agent",
+        status=AgentRunStatus.COMPLETED,
+        drafts=[draft],
+        warnings=["review language kept cautious"],
+    )
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert result.drafts[0].source_check_ids == ["check_percentage_consistency_001"]
+    assert result.warnings == ["review language kept cautious"]

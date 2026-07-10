@@ -17,6 +17,10 @@ from schemas.execution import (
 )
 from schemas.paper import Figure, Paper, PaperMetadata, Section, Table
 from schemas.peerassist import (
+    AgentConcernDraft,
+    AgentInputPacket,
+    AgentReviewResult,
+    AgentRunStatus,
     Concern,
     ConcernLevel,
     ConcernStatus,
@@ -35,6 +39,10 @@ from schemas.review import ClaimAssessment, EvidenceLink, FinalReview
 from schemas.stage import StageResult, StageStatus
 
 __all__ = [
+    "AgentConcernDraft",
+    "AgentInputPacket",
+    "AgentReviewResult",
+    "AgentRunStatus",
     "ClaimAssessment",
     "ClaimLabel",
     "Concern",

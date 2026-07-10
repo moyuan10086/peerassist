@@ -121,6 +121,48 @@ class Concern(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentRunStatus(StrEnum):
+    COMPLETED = "completed"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+
+
+class AgentInputPacket(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    agent_id: str
+    mode: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    check_ids: list[str] = Field(default_factory=list)
+    capability_names: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentConcernDraft(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    level: ConcernLevel
+    category: str
+    title: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    source_check_ids: list[str] = Field(default_factory=list)
+    impact: str = ""
+    benign_explanation: str = ""
+    author_action: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentReviewResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    agent_id: str
+    status: AgentRunStatus
+    drafts: list[AgentConcernDraft] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class HumanConfirmationAction(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
