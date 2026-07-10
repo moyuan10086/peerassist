@@ -66,6 +66,86 @@ def _seed_peerassist_stage(run_dir: Path) -> Path:
         out_dir / "human_confirmations.json",
         {"schema_version": "peerassist.human_confirmations.v1", "actions": []},
     )
+    write_json_file(
+        out_dir / "agent_results.json",
+        {
+            "schema_version": "peerassist.agent_results.v1",
+            "mode": "fast",
+            "results": [
+                {
+                    "agent_id": "statistics_agent",
+                    "status": "completed",
+                    "drafts": [concern_row],
+                    "warnings": [],
+                    "metadata": {"lead_count": 1},
+                },
+                {
+                    "agent_id": "defense_agent",
+                    "status": "completed",
+                    "drafts": [],
+                    "warnings": [],
+                    "metadata": {"pressure_tests": ["check_001: pressure-test against denominator"]},
+                },
+            ],
+        },
+    )
+    write_json_file(
+        out_dir / "capability_invocations.json",
+        {
+            "schema_version": "peerassist.capability_invocations.v1",
+            "mode": "fast",
+            "results": [
+                {
+                    "task_id": "demo",
+                    "call_id": "percentage_consistency_check",
+                    "agent_id": "statistics_agent",
+                    "capability_name": "percentage_consistency_check",
+                    "source": "builtin",
+                    "status": "completed",
+                    "artifact_ids": ["deterministic_checks"],
+                    "attempts": 1,
+                    "duration_ms": 42,
+                    "evidence_ids": ["P01-L001"],
+                }
+            ],
+        },
+    )
+    (out_dir / "tool_trace.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "task_id": "demo",
+                        "call_id": "percentage_consistency_check",
+                        "agent_id": "statistics_agent",
+                        "source": "builtin",
+                        "tool": "percentage_consistency_check",
+                        "status": "queued",
+                        "ts": "2026-07-10T00:00:00Z",
+                        "input_summary": "run deterministic percentage consistency checks",
+                        "evidence_ids": ["P01-L001"],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "demo",
+                        "call_id": "percentage_consistency_check",
+                        "agent_id": "statistics_agent",
+                        "source": "builtin",
+                        "tool": "percentage_consistency_check",
+                        "status": "completed",
+                        "ts": "2026-07-10T00:00:01Z",
+                        "output_summary": "1 check completed",
+                        "artifact_ids": ["deterministic_checks"],
+                        "duration_ms": 42,
+                        "evidence_ids": ["P01-L001"],
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return out_dir
 
 
@@ -76,6 +156,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     html = render_confirmation_page(run_dir=run_dir, paper_id="demo")
 
     assert "PeerAssist Review Console" in html
+    assert "data-peerassist-agent-console" in html
+    assert 'data-panel="review-queue"' in html
+    assert 'data-panel="tool-trace"' in html
+    assert 'data-panel="human-confirmation"' in html
+    assert "agent-timeline" in html
+    assert "Statistics Agent" in html
     assert "Reported percentage needs clarification" in html
     assert "p.1 line 1" in html
     assert "data-action=\"confirm\"" in html
@@ -98,6 +184,12 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
         with urllib.request.urlopen(f"{base_url}/api/state", timeout=5) as response:
             state = json.loads(response.read().decode("utf-8"))
         assert state["pending_count"] == 1
+        assert state["runtime"]["mode"] == "fast"
+        assert state["agent_runs"][0]["agent_id"] == "statistics_agent"
+        assert state["agent_runs"][0]["draft_count"] == 1
+        assert state["tool_trace"]["counts_by_status"]["completed"] == 1
+        assert state["tool_trace"]["latest_status_by_call"]["percentage_consistency_check"] == "completed"
+        assert state["capability_invocations"][0]["capability_name"] == "percentage_consistency_check"
 
         payload = json.dumps(
             {

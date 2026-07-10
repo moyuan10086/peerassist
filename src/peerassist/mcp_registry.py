@@ -50,6 +50,7 @@ class MCPServerSpec(BaseModel):
     transport: str
     command: str = ""
     args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     connect_timeout_seconds: int = 60

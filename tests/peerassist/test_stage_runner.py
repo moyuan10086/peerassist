@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from common.pipeline_context import init_full_pipeline_context, parse_stage_dir
@@ -145,3 +146,102 @@ def test_run_peerassist_stage_standard_warns_when_external_ocr_disabled(tmp_path
 
     payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
     assert any("External OCR capabilities are not enabled" in warning for warning in payload["warnings"])
+
+
+def test_run_peerassist_stage_registers_manifest_mcp_capabilities(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    init_full_pipeline_context(run_dir=run_dir)
+    source_pdf = tmp_path / "paper.pdf"
+    source_pdf.write_bytes(b"%PDF demo")
+    markdown = tmp_path / "mineru_full.md"
+    markdown.write_text("The success rate was 30/100 (40%).\n", encoding="utf-8")
+    write_json_file(
+        parse_stage_dir(run_dir) / "paper.json",
+        {
+            "source_pdf": str(source_pdf),
+            "mineru_markdown_path": str(markdown),
+            "mineru_content_list_path": "",
+        },
+    )
+    server_script = tmp_path / "fake_mcp_server.py"
+    server_script.write_text("print('{}', flush=True)\n", encoding="utf-8")
+    manifest_path = tmp_path / "mcp_servers.json"
+    write_json_file(
+        manifest_path,
+        {
+            "schema_version": "peerassist.mcp_servers.v1",
+            "servers": [
+                {
+                    "name": "local_ref",
+                    "transport": "stdio",
+                    "command": sys.executable,
+                    "args": [str(server_script)],
+                    "tools": [
+                        {
+                            "name": "lookup_reference",
+                            "description": "Look up local reference metadata.",
+                            "permissions": ["read_artifact"],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(),
+        run_dir=run_dir,
+        paper_key="demo",
+        paper_pdf=source_pdf,
+        mode="fast",
+        mcp_manifest_path=manifest_path,
+    )
+
+    payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
+    capabilities = {row["name"]: row for row in payload["capabilities"]}
+    assert capabilities["mcp_local_ref_lookup_reference"]["source"] == "mcp"
+    assert capabilities["mcp_local_ref_lookup_reference"]["metadata"]["transport"] == "stdio"
+
+
+def test_run_peerassist_stage_registers_skill_root_capabilities(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    init_full_pipeline_context(run_dir=run_dir)
+    source_pdf = tmp_path / "paper.pdf"
+    source_pdf.write_bytes(b"%PDF demo")
+    markdown = tmp_path / "mineru_full.md"
+    markdown.write_text("The success rate was 30/100 (40%).\n", encoding="utf-8")
+    write_json_file(
+        parse_stage_dir(run_dir) / "paper.json",
+        {
+            "source_pdf": str(source_pdf),
+            "mineru_markdown_path": str(markdown),
+            "mineru_content_list_path": "",
+        },
+    )
+    skill_dir = tmp_path / "skills" / "method-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: method-skill
+description: Methodology helper.
+permissions:
+  - read_artifact
+---
+FULL METHOD SKILL BODY
+""",
+        encoding="utf-8",
+    )
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(),
+        run_dir=run_dir,
+        paper_key="demo",
+        paper_pdf=source_pdf,
+        mode="fast",
+        skill_roots=[tmp_path / "skills"],
+    )
+
+    payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
+    capabilities = {row["name"]: row for row in payload["capabilities"]}
+    assert capabilities["method-skill"]["source"] == "skill"
+    assert "FULL METHOD SKILL BODY" not in json.dumps(capabilities["method-skill"])

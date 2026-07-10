@@ -44,12 +44,25 @@ def load_eval_manifest(path: Path) -> dict[str, Any]:
     )
     samples = payload.get("samples") if isinstance(payload.get("samples"), list) else []
     sample_ids = [str(row.get("sample_id")) for row in samples if isinstance(row, dict) and row.get("sample_id")]
+    duplicate_sample_ids = sorted(
+        sample_id for sample_id in set(sample_ids) if sample_ids.count(sample_id) > 1
+    )
+    missing_sha256_sample_ids = sorted(
+        str(row.get("sample_id"))
+        for row in samples
+        if isinstance(row, dict)
+        and row.get("sample_id")
+        and not str(row.get("sha256") or "").strip()
+    )
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "dataset": DATASET_NAME,
         "path": str(path),
         "sample_count": len(sample_ids),
         "sample_ids": sample_ids,
+        "duplicate_sample_ids": duplicate_sample_ids,
+        "missing_sha256_sample_ids": missing_sha256_sample_ids,
+        "integrity_ok": not duplicate_sample_ids and not missing_sha256_sample_ids,
         "freeze_policy_ok": freeze_policy_ok,
         "policy": policy,
         "samples": samples,
@@ -61,6 +74,21 @@ def evaluate_peerassist_records(
 ) -> dict[str, Any]:
     manifest = load_eval_manifest(manifest_path)
     manifest_sample_ids = set(manifest["sample_ids"])
+    record_sample_id_list = [
+        str(row.get("sample_id"))
+        for row in records
+        if row.get("sample_id")
+    ]
+    record_sample_ids = {
+        sample_id for sample_id in record_sample_id_list
+    }
+    record_counts = {
+        sample_id: record_sample_id_list.count(sample_id)
+        for sample_id in record_sample_ids
+    }
+    duplicate_sample_ids = sorted(
+        sample_id for sample_id, count in record_counts.items() if count > 1
+    )
     unknown_sample_ids = sorted(
         {
             str(row.get("sample_id"))
@@ -68,6 +96,8 @@ def evaluate_peerassist_records(
             if row.get("sample_id") and str(row.get("sample_id")) not in manifest_sample_ids
         }
     )
+    missing_sample_ids = sorted(manifest_sample_ids - record_sample_ids)
+    record_coverage_ok = not missing_sample_ids and not unknown_sample_ids and not duplicate_sample_ids
 
     parse_success_rate = _rate(
         sum(1 for row in records if bool(row.get("parse_success"))),
@@ -121,22 +151,39 @@ def evaluate_peerassist_records(
         "review_retention_rate": review_retention_rate,
         "core_problem_recall_delta": core_problem_recall_delta,
     }
-    targets = _target_results(metrics, freeze_policy_ok=bool(manifest["freeze_policy_ok"]))
+    targets = _target_results(
+        metrics,
+        freeze_policy_ok=bool(manifest["freeze_policy_ok"]),
+        manifest_integrity_ok=bool(manifest["integrity_ok"]),
+        record_coverage_ok=record_coverage_ok,
+    )
     return {
         "schema_version": "peerassist.eval_report.v1",
         "dataset": DATASET_NAME,
         "manifest_path": str(manifest_path),
         "sample_count": len(records),
         "manifest_sample_count": manifest["sample_count"],
+        "manifest_duplicate_sample_ids": manifest["duplicate_sample_ids"],
+        "manifest_missing_sha256_sample_ids": manifest["missing_sha256_sample_ids"],
+        "missing_record_sample_ids": missing_sample_ids,
         "unknown_record_sample_ids": unknown_sample_ids,
+        "duplicate_record_sample_ids": duplicate_sample_ids,
         "metrics": metrics,
         "targets": targets,
     }
 
 
-def _target_results(metrics: dict[str, float], *, freeze_policy_ok: bool) -> dict[str, Any]:
+def _target_results(
+    metrics: dict[str, float],
+    *,
+    freeze_policy_ok: bool,
+    manifest_integrity_ok: bool,
+    record_coverage_ok: bool,
+) -> dict[str, Any]:
     results = {
         "freeze_policy_ok": freeze_policy_ok,
+        "manifest_integrity_ok": manifest_integrity_ok,
+        "record_coverage_ok": record_coverage_ok,
         "document_parse_success_rate": metrics["document_parse_success_rate"]
         >= TARGETS["document_parse_success_rate"],
         "evidence_faithfulness_rate": metrics["evidence_faithfulness_rate"]

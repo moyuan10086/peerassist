@@ -112,3 +112,155 @@ def test_evaluate_peerassist_records_reports_target_gate_metrics(tmp_path) -> No
     assert metrics["review_retention_rate"] == 13 / 20
     assert metrics["core_problem_recall_delta"] == 0.01
     assert result["targets"]["all_targets_passed"] is True
+
+
+def test_evaluate_peerassist_records_requires_complete_manifest_sample_coverage(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    write_json_file(
+        manifest_path,
+        {
+            "schema_version": "peerassist.eval_manifest.v1",
+            "dataset": "PeerAssist-Eval-v1",
+            "policy": {
+                "frozen_samples_must_not_enter_prompts": True,
+                "frozen_samples_must_not_enter_indexes": True,
+                "frozen_samples_must_not_enter_finetuning": True,
+            },
+            "samples": [
+                {"sample_id": "paper-001", "split": "frozen", "sha256": "abc"},
+                {"sample_id": "paper-002", "split": "frozen", "sha256": "def"},
+            ],
+        },
+    )
+    records = [
+        {
+            "sample_id": "paper-001",
+            "mode": "fast",
+            "parse_success": True,
+            "evidence_faithful": 100,
+            "evidence_total": 100,
+            "deterministic_tp": 10,
+            "deterministic_fp": 0,
+            "deterministic_fn": 0,
+            "gold_concerns_total": 10,
+            "gold_concerns_covered": 10,
+            "unevidenced_new_facts": 0,
+            "new_facts_total": 100,
+            "latency_seconds": 120,
+            "mechanical_baseline_minutes": 50,
+            "mechanical_assisted_minutes": 20,
+            "review_items_proposed": 10,
+            "review_items_retained": 8,
+            "baseline_core_recall": 0.80,
+            "assisted_core_recall": 0.80,
+        }
+    ]
+
+    result = evaluate_peerassist_records(manifest_path=manifest_path, records=records)
+
+    assert result["missing_record_sample_ids"] == ["paper-002"]
+    assert result["targets"]["record_coverage_ok"] is False
+    assert result["targets"]["all_targets_passed"] is False
+
+
+def test_evaluate_peerassist_records_rejects_duplicate_sample_records(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    write_json_file(
+        manifest_path,
+        {
+            "schema_version": "peerassist.eval_manifest.v1",
+            "dataset": "PeerAssist-Eval-v1",
+            "policy": {
+                "frozen_samples_must_not_enter_prompts": True,
+                "frozen_samples_must_not_enter_indexes": True,
+                "frozen_samples_must_not_enter_finetuning": True,
+            },
+            "samples": [
+                {"sample_id": "paper-001", "split": "frozen", "sha256": "abc"},
+                {"sample_id": "paper-002", "split": "frozen", "sha256": "def"},
+            ],
+        },
+    )
+    base_record = {
+        "mode": "fast",
+        "parse_success": True,
+        "evidence_faithful": 100,
+        "evidence_total": 100,
+        "deterministic_tp": 10,
+        "deterministic_fp": 0,
+        "deterministic_fn": 0,
+        "gold_concerns_total": 10,
+        "gold_concerns_covered": 10,
+        "unevidenced_new_facts": 0,
+        "new_facts_total": 100,
+        "latency_seconds": 120,
+        "mechanical_baseline_minutes": 50,
+        "mechanical_assisted_minutes": 20,
+        "review_items_proposed": 10,
+        "review_items_retained": 8,
+        "baseline_core_recall": 0.80,
+        "assisted_core_recall": 0.80,
+    }
+    records = [
+        {"sample_id": "paper-001", **base_record},
+        {"sample_id": "paper-001", **base_record},
+        {"sample_id": "paper-002", **base_record},
+    ]
+
+    result = evaluate_peerassist_records(manifest_path=manifest_path, records=records)
+
+    assert result["duplicate_record_sample_ids"] == ["paper-001"]
+    assert result["targets"]["record_coverage_ok"] is False
+    assert result["targets"]["all_targets_passed"] is False
+
+
+def test_evaluate_peerassist_records_rejects_manifest_with_duplicate_or_unhashed_samples(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    write_json_file(
+        manifest_path,
+        {
+            "schema_version": "peerassist.eval_manifest.v1",
+            "dataset": "PeerAssist-Eval-v1",
+            "policy": {
+                "frozen_samples_must_not_enter_prompts": True,
+                "frozen_samples_must_not_enter_indexes": True,
+                "frozen_samples_must_not_enter_finetuning": True,
+            },
+            "samples": [
+                {"sample_id": "paper-001", "split": "frozen", "sha256": "abc"},
+                {"sample_id": "paper-001", "split": "frozen", "sha256": "abc"},
+                {"sample_id": "paper-002", "split": "frozen"},
+            ],
+        },
+    )
+    base_record = {
+        "mode": "fast",
+        "parse_success": True,
+        "evidence_faithful": 100,
+        "evidence_total": 100,
+        "deterministic_tp": 10,
+        "deterministic_fp": 0,
+        "deterministic_fn": 0,
+        "gold_concerns_total": 10,
+        "gold_concerns_covered": 10,
+        "unevidenced_new_facts": 0,
+        "new_facts_total": 100,
+        "latency_seconds": 120,
+        "mechanical_baseline_minutes": 50,
+        "mechanical_assisted_minutes": 20,
+        "review_items_proposed": 10,
+        "review_items_retained": 8,
+        "baseline_core_recall": 0.80,
+        "assisted_core_recall": 0.80,
+    }
+    records = [
+        {"sample_id": "paper-001", **base_record},
+        {"sample_id": "paper-002", **base_record},
+    ]
+
+    result = evaluate_peerassist_records(manifest_path=manifest_path, records=records)
+
+    assert result["manifest_duplicate_sample_ids"] == ["paper-001"]
+    assert result["manifest_missing_sha256_sample_ids"] == ["paper-002"]
+    assert result["targets"]["manifest_integrity_ok"] is False
+    assert result["targets"]["all_targets_passed"] is False

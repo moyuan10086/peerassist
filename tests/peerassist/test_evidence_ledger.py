@@ -91,3 +91,61 @@ def test_build_evidence_ledger_records_missing_parser_coverage(tmp_path) -> None
     assert ledger.items == []
     assert ledger.coverage["text_span"] == 0
     assert "mineru_markdown_missing" in ledger.metadata["warnings"]
+
+
+def test_build_evidence_ledger_marks_numbered_reference_lines(tmp_path) -> None:
+    source_pdf = tmp_path / "paper.pdf"
+    source_pdf.write_bytes(b"%PDF demo")
+    markdown = tmp_path / "mineru_full.md"
+    markdown.write_text(
+        "\n".join(
+            [
+                "# Introduction",
+                "Prior work established this benchmark [1].",
+                "# References",
+                "[1] Smith et al. Benchmark paper.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    ledger = build_evidence_ledger(
+        paper_id="demo",
+        source_pdf=source_pdf,
+        mineru_markdown_path=markdown,
+    )
+
+    references = [item for item in ledger.items if item.type is EvidenceType.REFERENCE]
+    assert len(references) == 1
+    assert references[0].text.startswith("[1]")
+    assert references[0].metadata["reference_number"] == "1"
+
+
+def test_build_evidence_ledger_does_not_classify_body_cross_references_as_captions(tmp_path) -> None:
+    source_pdf = tmp_path / "paper.pdf"
+    source_pdf.write_bytes(b"%PDF demo")
+    markdown = tmp_path / "mineru_full.md"
+    markdown.write_text(
+        "\n".join(
+            [
+                "# Results",
+                "Figure 2 shows the ablation trend.",
+                "Table 3 reports the error breakdown.",
+                "Figure 1: Overview of the pipeline.",
+                "Table 1: Main results.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    ledger = build_evidence_ledger(
+        paper_id="demo",
+        source_pdf=source_pdf,
+        mineru_markdown_path=markdown,
+    )
+
+    by_text = {item.text: item for item in ledger.items}
+    assert by_text["Figure 2 shows the ablation trend."].type is EvidenceType.TEXT_SPAN
+    assert by_text["Table 3 reports the error breakdown."].type is EvidenceType.TEXT_SPAN
+    assert by_text["Figure 1: Overview of the pipeline."].type is EvidenceType.FIGURE_CAPTION
+    assert by_text["Table 1: Main results."].type is EvidenceType.TABLE

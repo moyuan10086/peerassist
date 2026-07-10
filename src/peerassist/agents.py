@@ -23,7 +23,7 @@ from schemas.peerassist import (
     EvidenceLedger,
 )
 
-FAST_AGENT_IDS = ("statistics_agent", "defense_agent", "integrator_agent")
+FAST_AGENT_IDS = ("statistics_agent", "figure_table_agent", "defense_agent", "integrator_agent")
 STANDARD_EXTRA_AGENT_IDS = ("citation_agent", "novelty_agent")
 DEEP_EXTRA_AGENT_IDS = (*STANDARD_EXTRA_AGENT_IDS, "methodology_agent", "reproducibility_agent")
 
@@ -85,12 +85,31 @@ def _lead_checks(checks: list[DeterministicCheck]) -> list[DeterministicCheck]:
     return [check for check in checks if check.status is DeterministicCheckStatus.LEAD]
 
 
+def _lead_checks_for_category(checks: list[DeterministicCheck], category: str) -> list[DeterministicCheck]:
+    return [
+        check
+        for check in _lead_checks(checks)
+        if _category_for_check_kind(check.kind) == category
+    ]
+
+
 def _statistics_agent(checks: list[DeterministicCheck]) -> AgentReviewResult:
-    drafts = [_draft_for_check(check) for check in _lead_checks(checks)]
+    drafts = [_draft_for_check(check) for check in _lead_checks_for_category(checks, "statistics")]
     return AgentReviewResult(
         agent_id="statistics_agent",
         status=AgentRunStatus.COMPLETED,
         drafts=drafts,
+        metadata={"lead_count": len(drafts)},
+    )
+
+
+def _figure_table_agent(checks: list[DeterministicCheck]) -> AgentReviewResult:
+    drafts = [_draft_for_check(check) for check in _lead_checks_for_category(checks, "figure_table")]
+    return AgentReviewResult(
+        agent_id="figure_table_agent",
+        status=AgentRunStatus.COMPLETED,
+        drafts=drafts,
+        warnings=[] if drafts else ["No figure/table deterministic leads found."],
         metadata={"lead_count": len(drafts)},
     )
 
@@ -114,6 +133,17 @@ def _integrator_agent(statistics_result: AgentReviewResult) -> AgentReviewResult
         status=AgentRunStatus.COMPLETED,
         drafts=[draft.model_copy(deep=True) for draft in statistics_result.drafts],
         metadata={"integrated_from": ["statistics_agent", "defense_agent"]},
+    )
+
+
+def _citation_agent(checks: list[DeterministicCheck]) -> AgentReviewResult:
+    drafts = [_draft_for_check(check) for check in _lead_checks_for_category(checks, "citation")]
+    return AgentReviewResult(
+        agent_id="citation_agent",
+        status=AgentRunStatus.COMPLETED,
+        drafts=drafts,
+        warnings=[] if drafts else ["No citation/reference deterministic leads found."],
+        metadata={"lead_count": len(drafts)},
     )
 
 
@@ -145,13 +175,26 @@ def run_peerassist_agents(
     statistics_result = _statistics_agent(checks)
     results = [
         statistics_result,
+        _figure_table_agent(checks),
         _defense_agent(checks),
         _integrator_agent(statistics_result),
     ]
     if normalized_mode == "standard":
-        results.extend(_unsupported_agent(agent_id, normalized_mode) for agent_id in STANDARD_EXTRA_AGENT_IDS)
+        results.extend(
+            [
+                _citation_agent(checks),
+                _unsupported_agent("novelty_agent", normalized_mode),
+            ]
+        )
     elif normalized_mode == "deep":
-        results.extend(_unsupported_agent(agent_id, normalized_mode) for agent_id in DEEP_EXTRA_AGENT_IDS)
+        results.extend(
+            [
+                _citation_agent(checks),
+                _unsupported_agent("novelty_agent", normalized_mode),
+                _unsupported_agent("methodology_agent", normalized_mode),
+                _unsupported_agent("reproducibility_agent", normalized_mode),
+            ]
+        )
     return results
 
 

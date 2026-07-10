@@ -46,6 +46,22 @@ class ParseProviderResult(BaseModel):
     enabled: bool = True
 
 
+class ExternalOCRRequestPlan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    provider_name: str
+    kind: ParseProviderKind
+    source_pdf: str
+    endpoint: str = ""
+    request_mode: str
+    expected_artifacts: list[str] = Field(default_factory=list)
+    external_upload_required: bool = True
+    approval_required: bool = True
+    risk_summary: str = (
+        "Requires manuscript upload to an external OCR provider; human approval is required before use."
+    )
+
+
 class MinerUParseProvider:
     provider_name = "mineru"
     kind = ParseProviderKind.MINERU
@@ -91,10 +107,19 @@ class _StubParseProvider:
     provider_name: str
     kind: ParseProviderKind
     external_upload_required: bool
+    request_mode = "adapter_stub"
+    expected_artifacts: list[str] = []
 
-    def __init__(self, *, enabled: bool = False, credentials_available: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        credentials_available: bool = False,
+        endpoint: str = "",
+    ) -> None:
         self.enabled = bool(enabled)
         self.credentials_available = bool(credentials_available)
+        self.endpoint = str(endpoint or "").strip()
 
     def metadata(self) -> ParseProviderMetadata:
         return ParseProviderMetadata(
@@ -104,6 +129,18 @@ class _StubParseProvider:
             enabled=self.enabled,
             request_mode="adapter_stub",
             warnings=[] if self.enabled else ["provider_not_enabled"],
+        )
+
+    def build_request_plan(self, *, paper_pdf: Path) -> ExternalOCRRequestPlan:
+        return ExternalOCRRequestPlan(
+            provider_name=self.provider_name,
+            kind=self.kind,
+            source_pdf=str(paper_pdf),
+            endpoint=self.endpoint,
+            request_mode=self.request_mode,
+            expected_artifacts=list(self.expected_artifacts),
+            external_upload_required=self.external_upload_required,
+            approval_required=self.external_upload_required,
         )
 
     def resolve_parse_result(self, *, paper_pdf: Path) -> ParseProviderResult:
@@ -119,10 +156,13 @@ class _StubParseProvider:
         if self.enabled and not paper_pdf.exists():
             warnings.append("source_pdf_missing")
         usable = self.enabled and not warnings
+        metadata: dict[str, Any] = {"paper_pdf": str(paper_pdf)}
+        if usable:
+            metadata["request_plan"] = self.build_request_plan(paper_pdf=paper_pdf).model_dump(mode="json")
         return ParseProviderResult(
             provider_name=self.provider_name,
             kind=self.kind,
-            metadata={"paper_pdf": str(paper_pdf)},
+            metadata=metadata,
             warnings=warnings,
             external_upload_required=self.external_upload_required,
             enabled=usable,
@@ -133,21 +173,29 @@ class PaddleOCRStructureProvider(_StubParseProvider):
     provider_name = "paddleocr_structure_v3"
     kind = ParseProviderKind.PADDLEOCR_STRUCTURE_V3
     external_upload_required = False
+    request_mode = "local_paddleocr_structure_v3"
+    expected_artifacts = ["markdown", "structured_layout_json"]
 
 
 class BaiduDocumentParseProvider(_StubParseProvider):
     provider_name = "baidu_doc_parser"
     kind = ParseProviderKind.BAIDU_DOC_PARSER
     external_upload_required = True
+    request_mode = "baidu_document_parse"
+    expected_artifacts = ["markdown", "structured_layout_json"]
 
 
 class BaiduPaddleOCRVLProvider(_StubParseProvider):
     provider_name = "baidu_paddleocr_vl"
     kind = ParseProviderKind.BAIDU_PADDLEOCR_VL
     external_upload_required = True
+    request_mode = "baidu_paddleocr_vl"
+    expected_artifacts = ["multimodal_layout_json", "markdown"]
 
 
 class BaiduUnlimitedOCRProvider(_StubParseProvider):
     provider_name = "baidu_unlimited_ocr"
     kind = ParseProviderKind.BAIDU_UNLIMITED_OCR
     external_upload_required = True
+    request_mode = "baidu_unlimited_ocr"
+    expected_artifacts = ["ocr_text", "structured_layout_json"]

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from common.pipeline_context import peerassist_stage_dir, read_json_file
+from peerassist.evidence_audit import audit_concern_evidence
 
 
 def build_eval_record_from_artifacts(
@@ -16,12 +17,18 @@ def build_eval_record_from_artifacts(
     runtime = read_json_file(out_dir / "peerassist_eval_runtime.json")
     report = read_json_file(out_dir / "peerassist_report.json")
     checks_payload = read_json_file(out_dir / "deterministic_checks.json")
+    ledger_payload = read_json_file(out_dir / "evidence_ledger.json")
 
     concerns = _rows(report.get("concerns"))
     checks = _rows(checks_payload.get("checks"))
     gold_concerns = _rows(gold.get("gold_concerns"))
     deterministic_errors = _rows(gold.get("deterministic_errors"))
     evidence_checks = _rows(gold.get("evidence_checks"))
+    if not evidence_checks:
+        evidence_checks = audit_concern_evidence(
+            concerns=concerns,
+            ledger_items=_rows(ledger_payload.get("items")),
+        )
     crossover = gold.get("reviewer_crossover") if isinstance(gold.get("reviewer_crossover"), dict) else {}
 
     deterministic_leads = {

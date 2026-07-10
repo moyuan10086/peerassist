@@ -10,6 +10,7 @@ from typing import Any
 from common.pipeline_context import write_json_file
 from peerassist.eval_harness import evaluate_peerassist_records, load_eval_manifest
 from peerassist.eval_record_builder import build_eval_record_from_artifacts
+from peerassist.reviewer_crossover import analyze_reviewer_crossover
 
 
 def load_eval_records(path: Path) -> list[dict[str, Any]]:
@@ -51,6 +52,20 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--manifest", required=True)
     batch.add_argument("--out", required=True)
 
+    crossover = subparsers.add_parser("crossover", help="Analyze reviewer crossover raw trials.")
+    crossover.add_argument("--input", required=True, help="Path to reviewer crossover JSON or JSONL.")
+    crossover.add_argument("--out", required=True, help="Path to write crossover report JSON.")
+    crossover.add_argument(
+        "--records-out",
+        default="",
+        help="Optional path to write eval-ready crossover records as JSONL.",
+    )
+
+    merge = subparsers.add_parser("merge-records", help="Merge eval record JSONL files by sample_id.")
+    merge.add_argument("--base-records", required=True)
+    merge.add_argument("--overlay-records", required=True)
+    merge.add_argument("--out", required=True)
+
     parser.add_argument("--manifest", help=argparse.SUPPRESS)
     parser.add_argument("--records", help=argparse.SUPPRESS)
     parser.add_argument("--out", help=argparse.SUPPRESS)
@@ -83,6 +98,43 @@ def main(argv: list[str] | None = None) -> int:
         result = build_records_from_manifest(manifest_path=Path(args.manifest), out_path=Path(args.out))
         print(json.dumps(result, ensure_ascii=False))
         return 0 if not result["skipped_sample_ids"] else 1
+
+    if args.command == "crossover":
+        result = analyze_reviewer_crossover(Path(args.input))
+        write_json_file(Path(args.out), result)
+        if str(args.records_out or "").strip():
+            _write_records_jsonl(Path(args.records_out), result["records"])
+        print(
+            json.dumps(
+                {
+                    "schema_version": "peerassist.crossover_cli_result.v1",
+                    "report_path": str(Path(args.out)),
+                    "records_out": str(args.records_out or ""),
+                    "records_count": len(result["records"]),
+                    "warnings": result["warnings"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0 if not result["warnings"] else 1
+
+    if args.command == "merge-records":
+        records = merge_eval_records(
+            base_records=load_eval_records(Path(args.base_records)),
+            overlay_records=load_eval_records(Path(args.overlay_records)),
+        )
+        _write_records_jsonl(Path(args.out), records)
+        print(
+            json.dumps(
+                {
+                    "schema_version": "peerassist.eval_merge_records_result.v1",
+                    "records_path": str(Path(args.out)),
+                    "records_count": len(records),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     if not args.command and args.manifest and args.records and args.out:
         # Backward-compatible aggregate mode for the original CLI shape.
@@ -143,6 +195,35 @@ def build_records_from_manifest(*, manifest_path: Path, out_path: Path) -> dict[
         "records_count": len(records),
         "skipped_sample_ids": skipped,
     }
+
+
+def _write_records_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def merge_eval_records(
+    *, base_records: list[dict[str, Any]], overlay_records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    overlays = {
+        str(row.get("sample_id")): row
+        for row in overlay_records
+        if str(row.get("sample_id") or "").strip()
+    }
+    merged: list[dict[str, Any]] = []
+    for row in base_records:
+        sample_id = str(row.get("sample_id") or "").strip()
+        combined = dict(row)
+        if sample_id in overlays:
+            for key, value in overlays[sample_id].items():
+                if key == "sample_id":
+                    continue
+                combined[key] = value
+        merged.append(combined)
+    return merged
 
 
 if __name__ == "__main__":  # pragma: no cover

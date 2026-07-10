@@ -212,6 +212,122 @@ def test_eval_cli_batch_records_command_uses_manifest_run_and_gold_paths(tmp_pat
     assert rows[0]["gold_concerns_covered"] == 1
 
 
+def test_eval_cli_crossover_command_writes_report_and_eval_records(tmp_path: Path) -> None:
+    input_path = tmp_path / "crossover.json"
+    report_path = tmp_path / "crossover_report.json"
+    records_path = tmp_path / "crossover_records.jsonl"
+    write_json_file(
+        input_path,
+        {
+            "schema_version": "peerassist.reviewer_crossover.v1",
+            "trials": [
+                {
+                    "sample_id": "paper-001",
+                    "reviewer_id": "r1",
+                    "condition": "baseline",
+                    "mechanical_minutes": 30,
+                    "evidence_location_minutes": 20,
+                    "gold_core_concerns": ["c1", "c2"],
+                    "core_concerns_found": ["c1"],
+                },
+                {
+                    "sample_id": "paper-001",
+                    "reviewer_id": "r1",
+                    "condition": "assisted",
+                    "mechanical_minutes": 10,
+                    "evidence_location_minutes": 10,
+                    "gold_core_concerns": ["c1", "c2"],
+                    "core_concerns_found": ["c1", "c2"],
+                    "review_items_proposed": 5,
+                    "review_items_retained": 4,
+                },
+            ],
+        },
+    )
+
+    exit_code = eval_cli_main(
+        [
+            "crossover",
+            "--input",
+            str(input_path),
+            "--out",
+            str(report_path),
+            "--records-out",
+            str(records_path),
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["aggregate"]["review_retention_rate"] == 0.8
+    rows = load_eval_records(records_path)
+    assert rows[0]["sample_id"] == "paper-001"
+    assert rows[0]["mechanical_baseline_minutes"] == 50.0
+    assert rows[0]["mechanical_assisted_minutes"] == 20.0
+
+
+def test_eval_cli_merge_records_combines_peerassist_and_crossover_rows(tmp_path: Path) -> None:
+    peerassist_records = tmp_path / "peerassist_records.jsonl"
+    crossover_records = tmp_path / "crossover_records.jsonl"
+    merged_records = tmp_path / "merged.jsonl"
+    peerassist_records.write_text(
+        json.dumps(
+            {
+                "sample_id": "paper-001",
+                "mode": "fast",
+                "parse_success": True,
+                "deterministic_tp": 1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    crossover_records.write_text(
+        json.dumps(
+            {
+                "sample_id": "paper-001",
+                "mechanical_baseline_minutes": 50,
+                "mechanical_assisted_minutes": 20,
+                "review_items_proposed": 5,
+                "review_items_retained": 4,
+                "baseline_core_recall": 0.5,
+                "assisted_core_recall": 1.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = eval_cli_main(
+        [
+            "merge-records",
+            "--base-records",
+            str(peerassist_records),
+            "--overlay-records",
+            str(crossover_records),
+            "--out",
+            str(merged_records),
+        ]
+    )
+
+    assert exit_code == 0
+    rows = load_eval_records(merged_records)
+    assert rows == [
+        {
+            "sample_id": "paper-001",
+            "mode": "fast",
+            "parse_success": True,
+            "deterministic_tp": 1,
+            "mechanical_baseline_minutes": 50,
+            "mechanical_assisted_minutes": 20,
+            "review_items_proposed": 5,
+            "review_items_retained": 4,
+            "baseline_core_recall": 0.5,
+            "assisted_core_recall": 1.0,
+        }
+    ]
+
+
 def test_peerassist_eval_console_script_is_registered() -> None:
     payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 

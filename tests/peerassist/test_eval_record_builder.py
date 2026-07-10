@@ -10,7 +10,10 @@ def _seed_stage(run_dir: Path) -> Path:
     init_full_pipeline_context(run_dir=run_dir)
     out_dir = peerassist_stage_dir(run_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_json_file(out_dir / "evidence_ledger.json", {"items": [{"id": "P01-L001"}]})
+    write_json_file(
+        out_dir / "evidence_ledger.json",
+        {"items": [{"id": "P01-L001", "text": "The reported percentage was 40%."}]},
+    )
     write_json_file(
         out_dir / "deterministic_checks.json",
         {
@@ -121,3 +124,67 @@ def test_build_eval_record_from_artifacts_counts_gold_and_runtime_metrics(tmp_pa
     assert record["review_items_retained"] == 1
     assert record["baseline_core_recall"] == 0.75
     assert record["assisted_core_recall"] == 0.76
+
+
+def test_build_eval_record_falls_back_to_automatic_evidence_audit(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_stage(run_dir)
+    write_json_file(
+        out_dir / "evidence_ledger.json",
+        {"items": [{"id": "P01-L001", "text": "The reported percentage was 40%."}]},
+    )
+    write_json_file(
+        out_dir / "peerassist_report.json",
+        {
+            "concerns": [
+                {
+                    "id": "concern_valid_evidence",
+                    "status": "confirmed",
+                    "evidence_ids": ["P01-L001"],
+                    "title": "Reported percentage 40% needs clarification",
+                },
+                {
+                    "id": "concern_missing_evidence",
+                    "status": "confirmed",
+                    "evidence_ids": ["P99-L999"],
+                },
+                {
+                    "id": "concern_pending_without_evidence",
+                    "status": "pending_human_confirmation",
+                    "evidence_ids": [],
+                },
+            ],
+        },
+    )
+
+    record = build_eval_record_from_artifacts(sample_id="paper-001", run_dir=run_dir)
+
+    assert record["evidence_faithful"] == 1
+    assert record["evidence_total"] == 2
+
+
+def test_build_eval_record_evidence_audit_counts_unsupported_numeric_facts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_stage(run_dir)
+    write_json_file(
+        out_dir / "evidence_ledger.json",
+        {"items": [{"id": "P01-L001", "text": "The reported success rate was 40%."}]},
+    )
+    write_json_file(
+        out_dir / "peerassist_report.json",
+        {
+            "concerns": [
+                {
+                    "id": "concern_unsupported_numeric",
+                    "status": "confirmed",
+                    "evidence_ids": ["P01-L001"],
+                    "title": "Reported success rate 90% needs clarification",
+                }
+            ],
+        },
+    )
+
+    record = build_eval_record_from_artifacts(sample_id="paper-001", run_dir=run_dir)
+
+    assert record["evidence_faithful"] == 0
+    assert record["evidence_total"] == 1

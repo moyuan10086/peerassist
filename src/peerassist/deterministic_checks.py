@@ -22,6 +22,10 @@ COUNT_PERCENT_RE = re.compile(
     r"(?P<count>\d+(?:\.\d+)?)\s*/\s*(?P<denom>\d+(?:\.\d+)?)\s*"
     r"\(\s*(?P<percent>\d+(?:\.\d+)?)\s*%\s*\)"
 )
+FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>S?\d+[A-Za-z0-9_.-]*)\b", re.I)
+TABLE_REF_RE = re.compile(r"\btable\s*(?P<num>S?\d+[A-Za-z0-9_.-]*)\b", re.I)
+CITATION_BRACKET_RE = re.compile(r"\[(?P<body>\d+(?:\s*,\s*\d+)*)\]")
+REFERENCE_NUMBER_RE = re.compile(r"^\[\s*(?P<num>\d+)\s*\]")
 
 
 def _checkable_items(ledger: EvidenceLedger) -> list[EvidenceItem]:
@@ -101,5 +105,208 @@ def _percentage_consistency_checks(ledger: EvidenceLedger) -> list[Deterministic
     ]
 
 
+def _normalized_num(raw: str) -> str:
+    return str(raw or "").strip().rstrip(".,;:").upper()
+
+
+def _reference_label(kind: str, number: str) -> str:
+    return f"{kind.title()} {number}"
+
+
+def _available_figure_table_numbers(ledger: EvidenceLedger) -> dict[str, set[str]]:
+    available = {"figure": set(), "table": set()}
+    for item in ledger.items:
+        if item.type in {EvidenceType.FIGURE, EvidenceType.FIGURE_CAPTION}:
+            available["figure"].update(
+                _normalized_num(match.group("num")) for match in FIGURE_REF_RE.finditer(item.text)
+            )
+        elif item.type is EvidenceType.TABLE:
+            available["table"].update(
+                _normalized_num(match.group("num")) for match in TABLE_REF_RE.finditer(item.text)
+            )
+    return available
+
+
+def _referenced_figure_table_numbers(ledger: EvidenceLedger) -> list[tuple[str, str, EvidenceItem]]:
+    references: list[tuple[str, str, EvidenceItem]] = []
+    for item in ledger.items:
+        if item.type not in {EvidenceType.TEXT_SPAN, EvidenceType.TABLE_CELL}:
+            continue
+        references.extend(
+            ("figure", _normalized_num(match.group("num")), item)
+            for match in FIGURE_REF_RE.finditer(item.text)
+        )
+        references.extend(
+            ("table", _normalized_num(match.group("num")), item)
+            for match in TABLE_REF_RE.finditer(item.text)
+        )
+    return [(kind, number, item) for kind, number, item in references if number]
+
+
+def _figure_table_reference_checks(ledger: EvidenceLedger) -> list[DeterministicCheck]:
+    references = _referenced_figure_table_numbers(ledger)
+    if not references:
+        return [
+            DeterministicCheck(
+                id="check_figure_table_reference_000",
+                kind="figure_table_reference",
+                applicability=DeterministicCheckApplicability.INSUFFICIENT_EVIDENCE,
+                status=DeterministicCheckStatus.INCONCLUSIVE,
+                evidence_ids=[],
+                message="No explicit Figure/Table references were available for deterministic checking.",
+                benign_explanations=["paper may not include explicit figure or table cross-references"],
+                requires_human_review=False,
+            )
+        ]
+
+    available = _available_figure_table_numbers(ledger)
+    missing: list[str] = []
+    missing_evidence_ids: list[str] = []
+    for kind, number, item in references:
+        if number in available[kind]:
+            continue
+        label = _reference_label(kind, number)
+        if label not in missing:
+            missing.append(label)
+        if item.id not in missing_evidence_ids:
+            missing_evidence_ids.append(item.id)
+
+    if not missing:
+        return [
+            DeterministicCheck(
+                id="check_figure_table_reference_001",
+                kind="figure_table_reference",
+                applicability=DeterministicCheckApplicability.APPLICABLE,
+                status=DeterministicCheckStatus.PASS,
+                evidence_ids=[],
+                message="All explicit Figure/Table references found matching parsed figure/table evidence.",
+                benign_explanations=["parser may normalize labels differently"],
+                requires_human_review=False,
+                metadata={"checked_references": len(references)},
+            )
+        ]
+
+    return [
+        DeterministicCheck(
+            id="check_figure_table_reference_001",
+            kind="figure_table_reference",
+            applicability=DeterministicCheckApplicability.APPLICABLE,
+            status=DeterministicCheckStatus.LEAD,
+            evidence_ids=missing_evidence_ids,
+            message=(
+                "Referenced Figure/Table labels were not found in parsed figure/table evidence: "
+                + ", ".join(missing)
+                + "."
+            ),
+            benign_explanations=[
+                "parser missed a caption",
+                "supplementary material reference",
+                "label formatting changed",
+            ],
+            metadata={"missing_references": missing},
+        )
+    ]
+
+
+def _available_reference_numbers(ledger: EvidenceLedger) -> set[str]:
+    numbers: set[str] = set()
+    for item in ledger.items:
+        if item.type is not EvidenceType.REFERENCE:
+            continue
+        metadata_number = str(item.metadata.get("reference_number") or "").strip()
+        if metadata_number:
+            numbers.add(metadata_number)
+            continue
+        match = REFERENCE_NUMBER_RE.search(item.text)
+        if match:
+            numbers.add(match.group("num"))
+    return numbers
+
+
+def _referenced_citation_numbers(ledger: EvidenceLedger) -> list[tuple[str, EvidenceItem]]:
+    references: list[tuple[str, EvidenceItem]] = []
+    for item in ledger.items:
+        if item.type is not EvidenceType.TEXT_SPAN:
+            continue
+        for match in CITATION_BRACKET_RE.finditer(item.text):
+            numbers = [part.strip() for part in match.group("body").split(",")]
+            references.extend((number, item) for number in numbers if number)
+    return references
+
+
+def _numbered_citation_reference_checks(ledger: EvidenceLedger) -> list[DeterministicCheck]:
+    citations = _referenced_citation_numbers(ledger)
+    if not citations:
+        return [
+            DeterministicCheck(
+                id="check_numbered_citation_reference_000",
+                kind="numbered_citation_reference",
+                applicability=DeterministicCheckApplicability.INSUFFICIENT_EVIDENCE,
+                status=DeterministicCheckStatus.INCONCLUSIVE,
+                evidence_ids=[],
+                message="No standard numbered citation brackets were available for deterministic checking.",
+                benign_explanations=["paper may use author-year citations or parser may split citation tokens"],
+                requires_human_review=False,
+            )
+        ]
+
+    available = _available_reference_numbers(ledger)
+    if not available:
+        return [
+            DeterministicCheck(
+                id="check_numbered_citation_reference_001",
+                kind="numbered_citation_reference",
+                applicability=DeterministicCheckApplicability.PARSER_UNCERTAIN,
+                status=DeterministicCheckStatus.INCONCLUSIVE,
+                evidence_ids=[item.id for _number, item in citations][:1],
+                message="Numbered citations were found, but parsed reference entries were unavailable.",
+                benign_explanations=["reference section parser missing", "references may be in supplementary material"],
+            )
+        ]
+
+    missing: list[str] = []
+    missing_evidence_ids: list[str] = []
+    for number, item in citations:
+        if number in available:
+            continue
+        label = f"[{number}]"
+        if label not in missing:
+            missing.append(label)
+        if item.id not in missing_evidence_ids:
+            missing_evidence_ids.append(item.id)
+
+    if not missing:
+        return [
+            DeterministicCheck(
+                id="check_numbered_citation_reference_001",
+                kind="numbered_citation_reference",
+                applicability=DeterministicCheckApplicability.APPLICABLE,
+                status=DeterministicCheckStatus.PASS,
+                evidence_ids=[],
+                message="All standard numbered citations found matching parsed reference entries.",
+                benign_explanations=["parser may normalize references differently"],
+                requires_human_review=False,
+                metadata={"checked_citations": len(citations)},
+            )
+        ]
+
+    return [
+        DeterministicCheck(
+            id="check_numbered_citation_reference_001",
+            kind="numbered_citation_reference",
+            applicability=DeterministicCheckApplicability.APPLICABLE,
+            status=DeterministicCheckStatus.LEAD,
+            evidence_ids=missing_evidence_ids,
+            message="Numbered citations were not found in parsed references: " + ", ".join(missing) + ".",
+            benign_explanations=["parser missed a reference entry", "citation points to supplementary references"],
+            metadata={"missing_references": missing},
+        )
+    ]
+
+
 def run_deterministic_checks(ledger: EvidenceLedger) -> list[DeterministicCheck]:
-    return [*_percentage_consistency_checks(ledger)]
+    return [
+        *_percentage_consistency_checks(ledger),
+        *_figure_table_reference_checks(ledger),
+        *_numbered_citation_reference_checks(ledger),
+    ]

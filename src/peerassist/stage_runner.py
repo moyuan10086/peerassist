@@ -23,8 +23,12 @@ from peerassist.confirmations import (
 )
 from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
+from peerassist.mcp_executor import build_mcp_handlers
+from peerassist.mcp_registry import MCPServerCatalog, register_mcp_capabilities
 from peerassist.ocr_providers import MinerUParseProvider
 from peerassist.report_export import export_peerassist_report
+from peerassist.skill_executor import build_skill_handlers
+from peerassist.skill_loader import SkillCatalog, register_skill_capabilities
 from peerassist.tool_invocations import CapabilityInvocationRequest, CapabilityInvoker
 from peerassist.tool_trace import ToolTraceRecorder
 from schemas.peerassist import (
@@ -101,6 +105,8 @@ def run_peerassist_stage(
     paper_key: str,
     paper_pdf: Path,
     mode: str = "off",
+    mcp_manifest_path: Path | None = None,
+    skill_roots: list[Path] | None = None,
 ) -> StageResult:
     started_monotonic = monotonic()
     started_at = datetime.now(UTC).isoformat()
@@ -170,20 +176,29 @@ def run_peerassist_stage(
     )
 
     registry = default_capability_registry()
+    handlers = {
+        "percentage_consistency_check": lambda _payload: {
+            "checks": [
+                check.model_dump(mode="json") for check in run_deterministic_checks(ledger)
+            ],
+            "artifact_ids": ["deterministic_checks"],
+        }
+    }
+    if mcp_manifest_path is not None:
+        catalog = MCPServerCatalog(Path(mcp_manifest_path))
+        mcp_specs = register_mcp_capabilities(registry, catalog)
+        handlers.update(build_mcp_handlers(catalog, mcp_specs))
+    if skill_roots:
+        skill_catalog = SkillCatalog([Path(root) for root in skill_roots])
+        skill_specs = register_skill_capabilities(registry, skill_catalog)
+        handlers.update(build_skill_handlers(skill_catalog, skill_specs))
     exposed = registry.expose(mode=normalized_mode)
     capability_names = [capability.name for capability in exposed]
     invocation_results = []
     invoker = CapabilityInvoker(
         registry=registry,
         trace=trace,
-        handlers={
-            "percentage_consistency_check": lambda _payload: {
-                "checks": [
-                    check.model_dump(mode="json") for check in run_deterministic_checks(ledger)
-                ],
-                "artifact_ids": ["deterministic_checks"],
-            }
-        },
+        handlers=handlers,
     )
 
     deterministic_invocation = invoker.invoke(

@@ -11,8 +11,16 @@ from typing import Any
 from schemas.peerassist import EvidenceItem, EvidenceLedger, EvidenceType
 
 PAGE_MARKER_RE = re.compile(r"<!--\s*page\s*:\s*(?P<page>\d+)\s*-->", re.I)
-FIGURE_RE = re.compile(r"\b(?:fig(?:ure)?\.?|图)\s*(?P<num>S?\d+[A-Za-z0-9_.-]*)\s*[:：]?", re.I)
-TABLE_RE = re.compile(r"\b(?:table|表)\s*(?P<num>S?\d+[A-Za-z0-9_.-]*)\s*[:：]?", re.I)
+FIGURE_CAPTION_RE = re.compile(
+    r"^\s*(?:fig(?:ure)?\.?|图)\s*S?\d+[A-Za-z0-9_.-]*\s*(?:[:：\-–—])",
+    re.I,
+)
+TABLE_CAPTION_RE = re.compile(
+    r"^\s*(?:table|表)\s*S?\d+[A-Za-z0-9_.-]*\s*(?:[:：\-–—])",
+    re.I,
+)
+REFERENCE_SECTION_RE = re.compile(r"^(?:references|bibliography|参考文献)$", re.I)
+NUMBERED_REFERENCE_RE = re.compile(r"^\[\s*(?P<num>\d+)\s*\]\s+")
 
 
 def _sha256(path: Path) -> str:
@@ -39,13 +47,15 @@ def _read_json(path: Path | None) -> Any:
         return None
 
 
-def _line_item_type(text: str) -> EvidenceType:
+def _line_item_type(text: str, *, current_section: str = "") -> EvidenceType:
     stripped = text.strip()
     if stripped.startswith("#"):
         return EvidenceType.SECTION
-    if FIGURE_RE.search(stripped):
+    if REFERENCE_SECTION_RE.match(current_section.strip()) and NUMBERED_REFERENCE_RE.search(stripped):
+        return EvidenceType.REFERENCE
+    if FIGURE_CAPTION_RE.search(stripped):
         return EvidenceType.FIGURE_CAPTION
-    if TABLE_RE.search(stripped) or (stripped.startswith("|") and stripped.endswith("|")):
+    if TABLE_CAPTION_RE.search(stripped) or (stripped.startswith("|") and stripped.endswith("|")):
         return EvidenceType.TABLE
     return EvidenceType.TEXT_SPAN
 
@@ -67,9 +77,14 @@ def _items_from_markdown(markdown_path: Path, *, warnings: list[str]) -> list[Ev
             continue
 
         line_on_page += 1
-        item_type = _line_item_type(text)
+        item_type = _line_item_type(text, current_section=current_section)
         if item_type is EvidenceType.SECTION:
             current_section = text.lstrip("#").strip()
+        metadata: dict[str, Any] = {"line": line_on_page}
+        if item_type is EvidenceType.REFERENCE:
+            reference_match = NUMBERED_REFERENCE_RE.search(text)
+            if reference_match:
+                metadata["reference_number"] = reference_match.group("num")
         item_id = f"P{page:02d}-L{line_on_page:03d}"
         locator = f"page {page}, line {line_on_page}"
         items.append(
@@ -81,7 +96,7 @@ def _items_from_markdown(markdown_path: Path, *, warnings: list[str]) -> list[Ev
                 locator=locator,
                 text=text,
                 source_path=str(markdown_path),
-                metadata={"line": line_on_page},
+                metadata=metadata,
             )
         )
 

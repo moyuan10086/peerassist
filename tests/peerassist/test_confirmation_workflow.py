@@ -148,6 +148,8 @@ def test_apply_confirmation_decision_rejects_confirming_item_without_evidence(tm
             reviewer_id="reviewer-1",
             timestamp="2026-07-10T00:00:00Z",
         )
+    confirmations = json.loads((out_dir / "human_confirmations.json").read_text(encoding="utf-8"))
+    assert confirmations["actions"] == []
 
 
 def test_peerassist_confirm_console_script_is_registered() -> None:

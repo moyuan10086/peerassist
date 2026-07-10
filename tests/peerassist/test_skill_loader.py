@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from peerassist.capabilities import CapabilityRegistry, CapabilitySource, PermissionClass
+from peerassist.skill_executor import build_skill_handlers
 from peerassist.skill_loader import SkillCatalog, register_skill_capabilities
 from peerassist.tool_invocations import CapabilityInvocationRequest, CapabilityInvoker
 from peerassist.tool_trace import ToolTraceRecorder
@@ -141,3 +142,47 @@ FULL SKILL BODY
     assert approved.status is ToolTraceStatus.COMPLETED
     assert approved.output["skill_body"].endswith("FULL SKILL BODY\n")
     assert body_loads == 1
+
+
+def test_skill_executor_loads_full_body_only_after_invoker_approval(tmp_path) -> None:
+    _write_skill(
+        tmp_path,
+        "method-skill",
+        """---
+name: method-skill
+description: Methodology helper.
+permissions:
+  - read_artifact
+---
+# Method Skill
+
+Full methodology instructions.
+""",
+    )
+    catalog = SkillCatalog([tmp_path])
+    specs = catalog.discover()
+    registry = CapabilityRegistry(specs)
+    trace_path = tmp_path / "tool_trace.jsonl"
+    invoker = CapabilityInvoker(
+        registry=registry,
+        trace=ToolTraceRecorder(trace_path),
+        handlers=build_skill_handlers(catalog, specs),
+    )
+
+    result = invoker.invoke(
+        CapabilityInvocationRequest(
+            task_id="paper-1",
+            call_id="skill-call",
+            agent_id="method_agent",
+            capability_name="method-skill",
+            input_summary="load methodology skill",
+            payload={"evidence_ids": ["P01-L001"]},
+            approved=True,
+            evidence_ids=["P01-L001"],
+        )
+    )
+
+    assert result.status is ToolTraceStatus.COMPLETED
+    assert result.output["skill_name"] == "method-skill"
+    assert result.output["skill_body"].endswith("Full methodology instructions.\n")
+    assert result.output["input_payload"] == {"evidence_ids": ["P01-L001"]}

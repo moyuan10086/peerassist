@@ -60,3 +60,36 @@ def test_peerassist_mode_accepts_fast(monkeypatch) -> None:
     args = parse_args()
 
     assert args.peerassist_mode == "fast"
+
+
+def test_peerassist_mcp_manifest_argument_is_available(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["pipeline", "paper.pdf", "--peerassist-mode", "standard", "--peerassist-mcp-manifest", "mcp.json"],
+    )
+
+    args = parse_args()
+
+    assert args.peerassist_mcp_manifest == "mcp.json"
+
+
+def test_peerassist_skill_root_argument_is_repeatable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pipeline",
+            "paper.pdf",
+            "--peerassist-mode",
+            "standard",
+            "--peerassist-skill-root",
+            "skills/a",
+            "--peerassist-skill-root",
+            "skills/b",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.peerassist_skill_root == ["skills/a", "skills/b"]

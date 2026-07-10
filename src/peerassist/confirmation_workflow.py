@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,20 +19,47 @@ def load_confirmation_state(*, run_dir: Path) -> dict[str, Any]:
     out_dir = peerassist_stage_dir(run_dir)
     queue = read_json_file(out_dir / "confirmation_review_queue.json")
     confirmations = read_json_file(out_dir / "human_confirmations.json")
+    concerns_payload = read_json_file(out_dir / "peerassist_concerns.json")
+    agent_results_payload = read_json_file(out_dir / "agent_results.json")
+    invocations_payload = read_json_file(out_dir / "capability_invocations.json")
     actions = confirmations.get("actions") if isinstance(confirmations.get("actions"), list) else []
     items = queue.get("items") if isinstance(queue.get("items"), list) else []
     pending_count = sum(1 for item in items if str(item.get("status") or "").lower() == "pending_human_confirmation")
     if pending_count == 0 and items:
         pending_count = len(items)
+    agent_runs = _agent_runs(agent_results_payload)
+    capability_invocations = _capability_invocations(invocations_payload)
+    tool_trace = _tool_trace_summary(out_dir / "tool_trace.jsonl")
+    mode = str(
+        queue.get("mode")
+        or concerns_payload.get("mode")
+        or agent_results_payload.get("mode")
+        or invocations_payload.get("mode")
+        or ""
+    )
     return {
         "schema_version": "peerassist.confirmation_state.v1",
+        "runtime": {
+            "mode": mode,
+            "stage_dir": str(out_dir),
+            "queue_items": len(items),
+            "agent_count": len(agent_runs),
+            "tool_event_count": len(tool_trace["events"]),
+            "capability_invocation_count": len(capability_invocations),
+        },
         "queue": queue,
         "actions": actions,
         "actions_count": len(actions),
         "pending_count": pending_count,
+        "agent_runs": agent_runs,
+        "capability_invocations": capability_invocations,
+        "tool_trace": tool_trace,
         "paths": {
             "queue": str(out_dir / "confirmation_review_queue.json"),
             "confirmations": str(out_dir / "human_confirmations.json"),
+            "agent_results": str(out_dir / "agent_results.json"),
+            "capability_invocations": str(out_dir / "capability_invocations.json"),
+            "tool_trace": str(out_dir / "tool_trace.jsonl"),
         },
     }
 
@@ -63,7 +91,9 @@ def apply_confirmation_decision(
         reason=reason,
         metadata={"source": "peerassist_confirmation_workflow"},
     )
-    rows.append(confirmation_action.model_dump(mode="json"))
+    candidate_rows = [*rows, confirmation_action.model_dump(mode="json")]
+    _validate_confirmation_actions(out_dir=out_dir, paper_id=paper_id, rows=candidate_rows)
+    rows = candidate_rows
     write_json_file(
         confirmations_path,
         {"schema_version": "peerassist.human_confirmations.v1", "actions": rows},
@@ -76,6 +106,19 @@ def apply_confirmation_decision(
         "actions_count": len(rows),
         **report_paths,
     }
+
+
+def _validate_confirmation_actions(*, out_dir: Path, paper_id: str, rows: list[dict[str, Any]]) -> None:
+    concerns = _load_concerns(out_dir / "peerassist_concerns.json")
+    evidence_lookup = _evidence_lookup_from_bundle(out_dir / "confirmation_bundle.json")
+    actions = [HumanConfirmationAction.model_validate(row) for row in rows if isinstance(row, dict)]
+    confirmed_concerns = apply_confirmations(concerns, actions)
+    export_peerassist_report(
+        paper_id=paper_id,
+        concerns=confirmed_concerns,
+        evidence_lookup=evidence_lookup,
+        language="en",
+    )
 
 
 def refresh_confirmation_reports(*, run_dir: Path, paper_id: str) -> dict[str, str]:
@@ -129,6 +172,101 @@ def _load_actions(path: Path) -> list[HumanConfirmationAction]:
     payload = read_json_file(path)
     rows = payload.get("actions") if isinstance(payload.get("actions"), list) else []
     return [HumanConfirmationAction.model_validate(row) for row in rows if isinstance(row, dict)]
+
+
+def _agent_runs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = payload.get("results") if isinstance(payload.get("results"), list) else []
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        drafts = row.get("drafts") if isinstance(row.get("drafts"), list) else []
+        warnings = row.get("warnings") if isinstance(row.get("warnings"), list) else []
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        runs.append(
+            {
+                "agent_id": str(row.get("agent_id") or ""),
+                "status": str(row.get("status") or ""),
+                "draft_count": len(drafts),
+                "warning_count": len(warnings),
+                "warnings": [str(item) for item in warnings],
+                "metadata": metadata,
+            }
+        )
+    return runs
+
+
+def _capability_invocations(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = payload.get("results") if isinstance(payload.get("results"), list) else []
+    invocations: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        invocations.append(
+            {
+                "task_id": str(row.get("task_id") or ""),
+                "call_id": str(row.get("call_id") or ""),
+                "agent_id": str(row.get("agent_id") or ""),
+                "capability_name": str(row.get("capability_name") or ""),
+                "source": str(row.get("source") or ""),
+                "status": str(row.get("status") or ""),
+                "attempts": int(row.get("attempts") or 0),
+                "duration_ms": row.get("duration_ms"),
+                "artifact_ids": _string_list(row.get("artifact_ids")),
+                "evidence_ids": _string_list(row.get("evidence_ids")),
+                "error_code": str(row.get("error_code") or ""),
+                "error_message": str(row.get("error_message") or ""),
+            }
+        )
+    return invocations
+
+
+def _tool_trace_summary(path: Path) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    counts_by_status: dict[str, int] = {}
+    latest_status_by_call: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except FileNotFoundError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        event = {
+            "task_id": str(row.get("task_id") or ""),
+            "call_id": str(row.get("call_id") or ""),
+            "agent_id": str(row.get("agent_id") or ""),
+            "source": str(row.get("source") or ""),
+            "tool": str(row.get("tool") or ""),
+            "status": str(row.get("status") or ""),
+            "ts": str(row.get("ts") or ""),
+            "input_summary": str(row.get("input_summary") or ""),
+            "output_summary": str(row.get("output_summary") or ""),
+            "artifact_ids": _string_list(row.get("artifact_ids")),
+            "duration_ms": row.get("duration_ms"),
+            "error_code": str(row.get("error_code") or ""),
+            "evidence_ids": _string_list(row.get("evidence_ids")),
+        }
+        events.append(event)
+        status = event["status"]
+        call_id = event["call_id"]
+        if status:
+            counts_by_status[status] = counts_by_status.get(status, 0) + 1
+        if call_id:
+            latest_status_by_call[call_id] = status
+    return {
+        "events": events,
+        "counts_by_status": counts_by_status,
+        "latest_status_by_call": latest_status_by_call,
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) else []
 
 
 def _evidence_lookup_from_bundle(path: Path) -> dict[str, str]:

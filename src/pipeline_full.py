@@ -203,6 +203,16 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
                 paper_key=paper_key,
                 paper_pdf=paper_pdf,
                 mode=peerassist_mode,
+                mcp_manifest_path=(
+                    Path(str(args.peerassist_mcp_manifest).strip())
+                    if str(getattr(args, "peerassist_mcp_manifest", "") or "").strip()
+                    else None
+                ),
+                skill_roots=[
+                    Path(str(root).strip())
+                    for root in getattr(args, "peerassist_skill_root", [])
+                    if str(root).strip()
+                ],
             ),
             stats_module="peerassist",
         )
@@ -455,6 +465,18 @@ def parse_args() -> argparse.Namespace:
             "Run PeerAssist review-aid artifacts. off preserves FactReview behavior; "
             "fast builds the local evidence/check/concern/report backbone."
         ),
+    )
+    p.add_argument(
+        "--peerassist-mcp-manifest",
+        type=str,
+        default="",
+        help="Optional PeerAssist MCP server manifest JSON for traceable stdio tool capabilities.",
+    )
+    p.add_argument(
+        "--peerassist-skill-root",
+        action="append",
+        default=[],
+        help="Optional local Skill root directory. Repeat to register multiple PeerAssist skill catalogs.",
     )
     p.add_argument(
         "--run-execution",

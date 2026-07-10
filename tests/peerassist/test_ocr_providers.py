@@ -66,3 +66,26 @@ def test_baidu_providers_fail_closed_without_explicit_enablement(tmp_path: Path)
         assert provider.external_upload_required is True
         assert result.enabled is False
         assert "external_upload_requires_explicit_enablement" in result.warnings
+
+
+def test_baidu_provider_builds_human_approved_upload_plan_without_calling_network(tmp_path: Path) -> None:
+    paper_pdf = tmp_path / "paper.pdf"
+    paper_pdf.write_bytes(b"%PDF demo")
+    provider = BaiduDocumentParseProvider(
+        enabled=True,
+        credentials_available=True,
+        endpoint="https://ocr.baidu.example/document",
+    )
+
+    result = provider.resolve_parse_result(paper_pdf=paper_pdf)
+
+    assert result.enabled is True
+    plan = result.metadata["request_plan"]
+    assert plan["provider_name"] == "baidu_doc_parser"
+    assert plan["source_pdf"] == str(paper_pdf)
+    assert plan["endpoint"] == "https://ocr.baidu.example/document"
+    assert plan["external_upload_required"] is True
+    assert plan["approval_required"] is True
+    assert plan["request_mode"] == "baidu_document_parse"
+    assert plan["expected_artifacts"] == ["markdown", "structured_layout_json"]
+    assert "manuscript upload" in plan["risk_summary"]
