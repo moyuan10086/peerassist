@@ -36,6 +36,7 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     for key in (
         "evidence_ledger",
         "deterministic_checks",
+        "capability_invocations",
         "agent_results",
         "concerns",
         "confirmation_bundle",
@@ -51,14 +52,22 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     assert report_payload["parse_provider"]["provider_name"] == "mineru"
     assert report_payload["confirmation_bundle_path"] == result.outputs["confirmation_bundle"]
     assert report_payload["agent_results_path"] == result.outputs["agent_results"]
+    assert report_payload["capability_invocations_path"] == result.outputs["capability_invocations"]
     assert report_payload["concerns"][0]["source_agent_ids"] == [
         "statistics_agent",
         "integrator_agent",
     ]
+    invocations = json.loads(Path(result.outputs["capability_invocations"]).read_text(encoding="utf-8"))
+    assert [row["capability_name"] for row in invocations["results"]] == [
+        "percentage_consistency_check",
+        "peerassist_local_agents",
+    ]
+    assert all(row["status"] == "completed" for row in invocations["results"])
     bundle = json.loads(Path(result.outputs["confirmation_bundle"]).read_text(encoding="utf-8"))
     assert bundle["groups"]["pending_human_confirmation"][0]["evidence"][0]["locator"]
     trace_text = Path(result.outputs["tool_trace"]).read_text(encoding="utf-8")
     assert "resolve_parse_provider" in trace_text
+    assert "percentage_consistency_check" in trace_text
 
 
 def test_run_peerassist_stage_off_is_skipped(tmp_path: Path) -> None:

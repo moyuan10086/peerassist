@@ -19,8 +19,14 @@ from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
 from peerassist.ocr_providers import MinerUParseProvider
 from peerassist.report_export import export_peerassist_report
+from peerassist.tool_invocations import CapabilityInvocationRequest, CapabilityInvoker
 from peerassist.tool_trace import ToolTraceRecorder
-from schemas.peerassist import HumanConfirmationAction, ToolTraceStatus
+from schemas.peerassist import (
+    AgentReviewResult,
+    DeterministicCheck,
+    HumanConfirmationAction,
+    ToolTraceStatus,
+)
 from schemas.stage import StageResult
 
 
@@ -127,7 +133,42 @@ def run_peerassist_stage(
         artifact_ids=["evidence_ledger"],
     )
 
-    checks = run_deterministic_checks(ledger)
+    registry = default_capability_registry()
+    exposed = registry.expose(mode=normalized_mode)
+    capability_names = [capability.name for capability in exposed]
+    invocation_results = []
+    invoker = CapabilityInvoker(
+        registry=registry,
+        trace=trace,
+        handlers={
+            "percentage_consistency_check": lambda _payload: {
+                "checks": [
+                    check.model_dump(mode="json") for check in run_deterministic_checks(ledger)
+                ],
+                "artifact_ids": ["deterministic_checks"],
+            }
+        },
+    )
+
+    deterministic_invocation = invoker.invoke(
+        CapabilityInvocationRequest(
+            task_id=paper_key,
+            call_id="percentage_consistency_check",
+            agent_id="statistics_agent",
+            capability_name="percentage_consistency_check",
+            input_summary="run deterministic percentage consistency checks",
+            payload={"evidence_items": len(ledger.items)},
+            approved=True,
+        )
+    )
+    invocation_results.append(deterministic_invocation)
+    if deterministic_invocation.status is not ToolTraceStatus.COMPLETED:
+        return StageResult(status="failed", error=deterministic_invocation.error_message)
+    checks = [
+        DeterministicCheck.model_validate(row)
+        for row in deterministic_invocation.output.get("checks", [])
+        if isinstance(row, dict)
+    ]
     checks_path = out_dir / "deterministic_checks.json"
     write_json_file(
         checks_path,
@@ -138,14 +179,45 @@ def run_peerassist_stage(
         },
     )
 
-    registry = default_capability_registry()
-    exposed = registry.expose(mode=normalized_mode)
-    capability_names = [capability.name for capability in exposed]
-    agent_results = run_peerassist_agents(
-        mode=normalized_mode,
-        ledger=ledger,
-        checks=checks,
-        capability_names=capability_names,
+    invoker.handlers["peerassist_local_agents"] = lambda _payload: {
+        "results": [
+            result.model_dump(mode="json")
+            for result in run_peerassist_agents(
+                mode=normalized_mode,
+                ledger=ledger,
+                checks=checks,
+                capability_names=capability_names,
+            )
+        ],
+        "artifact_ids": ["agent_results"],
+    }
+    agents_invocation = invoker.invoke(
+        CapabilityInvocationRequest(
+            task_id=paper_key,
+            call_id="peerassist_local_agents",
+            agent_id="peerassist_stage",
+            capability_name="peerassist_local_agents",
+            input_summary=f"run local PeerAssist agents in {normalized_mode} mode",
+            payload={"check_count": len(checks), "capability_names": capability_names},
+            approved=True,
+        )
+    )
+    invocation_results.append(agents_invocation)
+    if agents_invocation.status is not ToolTraceStatus.COMPLETED:
+        return StageResult(status="failed", error=agents_invocation.error_message)
+    agent_results = [
+        AgentReviewResult.model_validate(row)
+        for row in agents_invocation.output.get("results", [])
+        if isinstance(row, dict)
+    ]
+    capability_invocations_path = out_dir / "capability_invocations.json"
+    write_json_file(
+        capability_invocations_path,
+        {
+            "schema_version": "peerassist.capability_invocations.v1",
+            "mode": normalized_mode,
+            "results": [result.model_dump(mode="json") for result in invocation_results],
+        },
     )
     agent_results_path = out_dir / "agent_results.json"
     write_json_file(
@@ -188,6 +260,7 @@ def run_peerassist_stage(
         evidence_lookup=evidence_lookup,
     )
     report_payload["agent_results_path"] = str(agent_results_path)
+    report_payload["capability_invocations_path"] = str(capability_invocations_path)
     report_payload["confirmation_bundle_path"] = str(confirmation_bundle_path)
     report_payload["parse_provider"] = {
         "provider_name": parse_result.provider_name,
@@ -219,6 +292,7 @@ def run_peerassist_stage(
         outputs={
             "evidence_ledger": str(ledger_path),
             "deterministic_checks": str(checks_path),
+            "capability_invocations": str(capability_invocations_path),
             "agent_results": str(agent_results_path),
             "concerns": str(concerns_path),
             "confirmation_bundle": str(confirmation_bundle_path),

@@ -16,6 +16,7 @@ def test_builtin_capabilities_are_visible_in_fast_mode() -> None:
 
     assert "build_evidence_ledger" in names
     assert "percentage_consistency_check" in names
+    assert "peerassist_local_agents" in names
     assert "mineru_parse_artifacts" in names
 
 

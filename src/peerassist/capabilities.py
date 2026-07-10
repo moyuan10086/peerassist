@@ -70,6 +70,12 @@ class CapabilityRegistry:
     def register(self, capability: CapabilitySpec) -> None:
         self._capabilities.append(capability)
 
+    def find(self, name: str) -> CapabilitySpec | None:
+        for capability in self._capabilities:
+            if capability.name == name:
+                return capability
+        return None
+
     def expose(
         self,
         *,
@@ -112,6 +118,14 @@ def default_capability_registry() -> CapabilityRegistry:
                 permissions=[PermissionClass.READ_ARTIFACT, PermissionClass.WRITE_ARTIFACT],
                 input_summary="evidence ledger text/table items",
                 output_summary="deterministic check leads",
+            ),
+            CapabilitySpec(
+                name="peerassist_local_agents",
+                description="Run the deterministic local PeerAssist review agent backbone.",
+                source=CapabilitySource.BUILTIN,
+                permissions=[PermissionClass.READ_ARTIFACT, PermissionClass.WRITE_ARTIFACT],
+                input_summary="evidence ledger, deterministic checks, exposed capability names",
+                output_summary="agent_results.json",
             ),
             CapabilitySpec(
                 name="mineru_parse_artifacts",
