@@ -5,20 +5,25 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
+from common.pipeline_context import peerassist_stage_dir
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 
 
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     state = load_confirmation_state(run_dir=run_dir)
+    source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
+    model_config = _resolve_model_config()
     items = state.get("queue", {}).get("items", [])
     rows = "\n".join(_render_item(item) for item in items if isinstance(item, dict))
     if not rows:
         rows = '<section class="empty">暂无需要人工确认的审稿关注点。</section>'
-    state_json = html.escape(json.dumps(state, ensure_ascii=False), quote=False)
     runtime = state.get("runtime") if isinstance(state.get("runtime"), dict) else {}
     mode = str(runtime.get("mode") or "unknown")
     pending_count = int(state.get("pending_count") or 0)
@@ -32,6 +37,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         else []
     )
     paths = state.get("paths") if isinstance(state.get("paths"), dict) else {}
+    if source_pdf_path is not None:
+        paths = {**paths, "source_pdf": str(source_pdf_path)}
+        state = {**state, "paths": paths}
+    state_json = html.escape(json.dumps(state, ensure_ascii=False), quote=False)
+    evidence_preview = (
+        state.get("evidence_preview") if isinstance(state.get("evidence_preview"), list) else []
+    )
     evidence_count = _evidence_count(items)
     completed_event_count = _event_status_count(events, "completed")
     failed_event_count = _event_status_count(events, "failed")
@@ -121,16 +133,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       gap: 8px;
     }}
     .ops-strip {{
-      width: min(1440px, calc(100% - 40px));
-      margin: 18px auto 0;
-      display: grid;
+      width: min(1560px, calc(100% - 40px));
+      margin: 10px auto 0;
+      display: none;
       grid-template-columns: 1.2fr repeat(4, minmax(120px, 1fr));
       gap: 10px;
       align-items: stretch;
     }}
     .workflow-band {{
-      width: min(1440px, calc(100% - 40px));
+      width: min(1560px, calc(100% - 40px));
       margin: 12px auto 0;
+      display: none;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: rgba(255, 255, 255, 0.9);
@@ -261,11 +274,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       box-shadow: 0 0 0 5px rgba(184, 161, 90, 0.14);
     }}
     .console-shell {{
-      width: min(1440px, 100%);
+      width: min(1760px, 100%);
       margin: 0 auto;
-      padding: 20px;
+      padding: 12px 18px 20px;
       display: grid;
-      grid-template-columns: 260px minmax(0, 1fr) 340px;
+      grid-template-columns: minmax(0, 1fr) 360px;
       gap: 16px;
       min-height: calc(100vh - 68px);
     }}
@@ -294,7 +307,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 12px;
     }}
     .rail {{
-      display: grid;
+      display: none;
       gap: 12px;
       align-content: start;
     }}
@@ -434,10 +447,139 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .paper-canvas {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 210px;
+      grid-template-columns: minmax(0, 1fr) 260px;
       gap: 14px;
       padding: 16px;
       background: #eef3f2;
+    }}
+    .source-pdf-shell {{
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: 720px;
+      border: 1px solid #d8dedc;
+      border-radius: 6px;
+      background: #dde4e1;
+      box-shadow: 0 16px 32px rgba(20, 35, 35, 0.12);
+      overflow: hidden;
+    }}
+    .pdf-reader-bar {{
+      display: grid;
+      grid-template-columns: auto minmax(120px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      border-bottom: 1px solid #c7d0cc;
+      background: rgba(249, 251, 250, 0.95);
+    }}
+    .pdf-control-group {{
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }}
+    .pdf-icon-button {{
+      width: 30px;
+      height: 30px;
+      border: 1px solid #cbd6d2;
+      border-radius: 8px;
+      background: #fff;
+      color: #27322f;
+      font-weight: 900;
+      line-height: 1;
+      cursor: pointer;
+    }}
+    .pdf-icon-button:hover {{
+      border-color: #9bc9bd;
+      color: var(--accent-strong);
+    }}
+    .pdf-icon-button:disabled {{
+      cursor: not-allowed;
+      opacity: 0.45;
+    }}
+    .pdf-page-status {{
+      color: #4e5d59;
+      font-size: 12px;
+      font-weight: 820;
+      text-align: center;
+      white-space: nowrap;
+    }}
+    .pdf-reader-stage {{
+      position: relative;
+      min-height: 780px;
+      height: calc(100vh - 235px);
+      overflow: auto;
+      padding: 22px;
+      background:
+        linear-gradient(90deg, rgba(23, 33, 31, 0.04) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(23, 33, 31, 0.04) 1px, transparent 1px),
+        #dfe7e4;
+      background-size: 30px 30px;
+    }}
+    .pdf-page-wrap {{
+      position: relative;
+      width: max-content;
+      max-width: 100%;
+      min-height: 360px;
+      margin: 0 auto;
+      border-radius: 4px;
+      background: #fff;
+      box-shadow: 0 20px 42px rgba(24, 32, 31, 0.24);
+      overflow: hidden;
+    }}
+    .pdf-page-canvas {{
+      display: block;
+      max-width: 100%;
+      height: auto;
+      background: #fff;
+    }}
+    .pdf-text-layer {{
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      overflow: hidden;
+      line-height: 1;
+      text-align: initial;
+      transform-origin: 0 0;
+      opacity: 1;
+    }}
+    .pdf-text-layer :is(span, br) {{
+      position: absolute;
+      color: transparent;
+      white-space: pre;
+      cursor: text;
+      transform-origin: 0% 0%;
+    }}
+    .pdf-text-layer span::selection {{
+      background: rgba(37, 99, 235, 0.32);
+    }}
+    .pdf-text-layer .markedContent {{
+      position: absolute;
+      inset: 0;
+    }}
+    .source-pdf-fallback {{
+      display: grid;
+      place-items: center;
+      min-height: 260px;
+      padding: 28px;
+      color: #34413e;
+      text-align: center;
+    }}
+    .source-pdf-fallback a {{
+      color: var(--accent-strong);
+      font-weight: 850;
+    }}
+    .pdf-loading {{
+      position: absolute;
+      inset: 22px;
+      display: grid;
+      place-items: center;
+      color: #52605d;
+      font-weight: 820;
+      background: rgba(239, 244, 242, 0.72);
+      border: 1px dashed #bbc8c4;
+      border-radius: 6px;
+    }}
+    .pdf-loading[hidden], .source-pdf-fallback[hidden] {{
+      display: none;
     }}
     .paper-sheet {{
       min-height: 520px;
@@ -610,6 +752,53 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       display: grid;
       gap: 12px;
       align-content: start;
+      max-height: calc(100vh - 96px);
+      overflow: auto;
+    }}
+    .model-entry {{
+      border-color: #b8d8cf;
+      background: linear-gradient(180deg, #ffffff, #f6fbfa);
+    }}
+    .model-config-list {{
+      display: grid;
+      gap: 8px;
+      padding: 12px 14px 0;
+    }}
+    .model-config-row {{
+      display: grid;
+      grid-template-columns: 84px minmax(0, 1fr);
+      gap: 8px;
+      align-items: baseline;
+      font-size: 12px;
+    }}
+    .model-config-row span:first-child {{
+      color: var(--muted);
+      font-weight: 820;
+    }}
+    .model-config-row code {{
+      overflow-wrap: anywhere;
+      color: #24302d;
+    }}
+    .agent-review-box {{
+      margin: 12px 14px 14px;
+      display: grid;
+      gap: 8px;
+    }}
+    .agent-primary-button {{
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }}
+    .agent-stream-box {{
+      min-height: 112px;
+      border: 1px solid #d4ddd9;
+      border-radius: 8px;
+      background: #132320;
+      color: #dcece8;
+      padding: 10px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      overflow: auto;
     }}
     .trace-list, .invocation-list {{
       padding: 12px 14px 16px;
@@ -780,6 +969,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .console-shell {{ grid-template-columns: 1fr; }}
       .paper-canvas {{ grid-template-columns: 1fr; }}
       .paper-comments {{ grid-template-columns: 1fr 1fr; }}
+      .source-pdf-shell {{ min-height: 620px; }}
+      .pdf-reader-stage {{ min-height: 580px; height: 70vh; }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
@@ -789,6 +980,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .console-shell {{ padding: 12px; }}
       .paper-canvas {{ padding: 12px; }}
       .paper-sheet {{ min-height: 420px; padding: 28px 28px 28px 38px; }}
+      .source-pdf-shell {{ min-height: 520px; }}
+      .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
+      .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
       .item {{ grid-template-columns: 1fr; }}
       .queue-toolbar {{ grid-template-columns: 1fr; }}
@@ -891,7 +1085,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       </section>
     </aside>
     <section class="paper-review-stage" data-panel="paper-review-stage">
-      {_render_paper_review_surface(items, paper_id=paper_id)}
+      {_render_paper_review_surface(items, paper_id=paper_id, evidence_preview=evidence_preview, has_source_pdf=source_pdf_path is not None)}
       <section class="panel queue" data-panel="review-queue" id="review-queue">
         <div class="panel-header">
           <p class="panel-title">证据审稿队列</p>
@@ -908,6 +1102,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       </section>
     </section>
     <aside class="right-stack">
+      {_render_model_entry(model_config)}
       <section class="panel" data-panel="evidence-focus">
         <div class="panel-header">
           <p class="panel-title">证据焦点</p>
@@ -1123,9 +1318,174 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         focusAnnotation(button.dataset.paperConcern || '', button.dataset.paperTarget || '', 'paper');
       }});
     }});
+    document.querySelectorAll('[data-agent-review-start]').forEach((button) => {{
+      button.addEventListener('click', async () => {{
+        const stream = document.querySelector('[data-agent-review-stream]');
+        const selectedText = String(window.getSelection()?.toString() || '').trim();
+        if (!stream) return;
+        button.disabled = true;
+        stream.textContent = '正在按方法论启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...';
+        try {{
+          const response = await fetch('/api/agent-review', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{selected_text: selectedText}})
+          }});
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || '智能审稿失败');
+          stream.textContent = `${{payload.suggestion}}\\n\\n草稿路径：${{payload.draft_path}}`;
+          showToast('全篇智能审稿草稿已生成');
+        }} catch (error) {{
+          stream.textContent = `智能审稿未完成：${{error.message}}`;
+          showToast('智能审稿未完成');
+        }} finally {{
+          button.disabled = false;
+        }}
+      }});
+    }});
     applyTraceFilter('all');
     connectEventStream();
     window.setInterval(() => refreshRuntime().catch(() => {{}}), 15000);
+  </script>
+  <script type="module">
+    import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs';
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+
+    const reader = document.querySelector('[data-pdf-reader]');
+    if (reader) {{
+      const stage = reader.querySelector('[data-pdf-stage]');
+      const canvas = reader.querySelector('[data-pdf-canvas]');
+      const textLayer = reader.querySelector('[data-pdf-text-layer]');
+      const status = reader.querySelector('[data-pdf-status]');
+      const loading = reader.querySelector('[data-pdf-loading]');
+      const fallback = reader.querySelector('[data-pdf-fallback]');
+      const context = canvas.getContext('2d');
+      let pdfDoc = null;
+      let pageNumber = 1;
+      let scale = 1.15;
+      let renderTask = null;
+      let textLayerTask = null;
+      let fitWidth = true;
+
+      function setStatus(copy) {{
+        if (status) status.textContent = copy;
+      }}
+
+      function setLoading(visible) {{
+        if (loading) loading.hidden = !visible;
+      }}
+
+      function updateButtons() {{
+        reader.querySelectorAll('[data-pdf-action]').forEach((button) => {{
+          const action = button.dataset.pdfAction;
+          button.disabled =
+            (action === 'prev' && pageNumber <= 1) ||
+            (action === 'next' && pdfDoc && pageNumber >= pdfDoc.numPages);
+        }});
+      }}
+
+      function stageWidth() {{
+        return Math.max(360, (stage?.clientWidth || 780) - 36);
+      }}
+
+      async function renderPage() {{
+        if (!pdfDoc || !canvas || !context) return;
+        setLoading(true);
+        if (renderTask) {{
+          renderTask.cancel();
+          renderTask = null;
+        }}
+        const page = await pdfDoc.getPage(pageNumber);
+        const naturalViewport = page.getViewport({{scale: 1}});
+        const targetScale = fitWidth
+          ? Math.min(2.2, Math.max(0.75, stageWidth() / naturalViewport.width))
+          : scale;
+        scale = targetScale;
+        const viewport = page.getViewport({{scale: targetScale}});
+        const outputScale = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${{Math.floor(viewport.width)}}px`;
+        canvas.style.height = `${{Math.floor(viewport.height)}}px`;
+        if (textLayer) {{
+          if (textLayerTask) {{
+            textLayerTask.cancel();
+            textLayerTask = null;
+          }}
+          textLayer.replaceChildren();
+          textLayer.style.width = `${{Math.floor(viewport.width)}}px`;
+          textLayer.style.height = `${{Math.floor(viewport.height)}}px`;
+        }}
+        context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+        renderTask = page.render({{canvasContext: context, viewport}});
+        const textContent = textLayer ? page.getTextContent() : Promise.resolve(null);
+        try {{
+          await renderTask.promise;
+          const resolvedTextContent = await textContent;
+          if (textLayer && resolvedTextContent) {{
+            textLayerTask = new pdfjsLib.TextLayer({{
+              textContentSource: resolvedTextContent,
+              container: textLayer,
+              viewport
+            }});
+            await textLayerTask.render();
+          }}
+        }} catch (error) {{
+          if (error?.name !== 'RenderingCancelledException') throw error;
+        }} finally {{
+          renderTask = null;
+          textLayerTask = null;
+          setLoading(false);
+        }}
+        setStatus(`第 ${{pageNumber}} / ${{pdfDoc.numPages}} 页 · ${{Math.round(scale * 100)}}%`);
+        updateButtons();
+      }}
+
+      pdfjsLib.getDocument('/paper.pdf').promise
+        .then((document) => {{
+          pdfDoc = document;
+          updateButtons();
+          return renderPage();
+        }})
+        .catch((error) => {{
+          setLoading(false);
+          if (fallback) fallback.hidden = false;
+          setStatus(`PDF 渲染失败：${{error.message || '未知错误'}}`);
+        }});
+
+      reader.querySelectorAll('[data-pdf-action]').forEach((button) => {{
+        button.addEventListener('click', () => {{
+          const action = button.dataset.pdfAction;
+          if (!pdfDoc) return;
+          if (action === 'prev') pageNumber = Math.max(1, pageNumber - 1);
+          if (action === 'next') pageNumber = Math.min(pdfDoc.numPages, pageNumber + 1);
+          if (action === 'zoom-out') {{
+            fitWidth = false;
+            scale = Math.max(0.6, scale - 0.15);
+          }}
+          if (action === 'zoom-in') {{
+            fitWidth = false;
+            scale = Math.min(2.4, scale + 0.15);
+          }}
+          if (action === 'fit') fitWidth = true;
+          renderPage().catch((error) => {{
+            setLoading(false);
+            if (fallback) fallback.hidden = false;
+            setStatus(`PDF 渲染失败：${{error.message || '未知错误'}}`);
+          }});
+        }});
+      }});
+
+      let resizeTimer = null;
+      window.addEventListener('resize', () => {{
+        if (!fitWidth || !pdfDoc) return;
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {{
+          renderPage().catch(() => {{}});
+        }}, 180);
+      }});
+    }}
   </script>
 </body>
 </html>
@@ -1137,6 +1497,334 @@ def create_confirmation_server(
 ) -> ThreadingHTTPServer:
     handler = _handler_factory(run_dir=Path(run_dir), paper_id=paper_id)
     return ThreadingHTTPServer((host, port), handler)
+
+
+def _discover_source_pdf(*, run_dir: Path, paper_id: str) -> Path | None:
+    aliases = _paper_pdf_aliases(paper_id)
+    candidates: list[Path] = []
+    direct_names = [
+        "paper.pdf",
+        "source.pdf",
+        "manuscript.pdf",
+        "input.pdf",
+        f"{paper_id}.pdf",
+    ]
+    for name in direct_names:
+        candidates.append(run_dir / name)
+
+    search_roots = [run_dir, *list(run_dir.parents[:5])]
+    for source_root in _evidence_source_roots(run_dir):
+        search_roots.extend([source_root, *list(source_root.parents[:3])])
+    seen_roots: set[Path] = set()
+    for root in search_roots:
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        for folder_name in ("pdfs", "pdf", "inputs", "input", "source", ""):
+            folder = root / folder_name if folder_name else root
+            if not folder.is_dir():
+                continue
+            candidates.extend(sorted(folder.glob("*.pdf")))
+
+    seen_candidates: set[Path] = set()
+    existing: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
+        if candidate.is_file():
+            existing.append(candidate)
+    if not existing:
+        return None
+
+    for candidate in existing:
+        normalized_name = _normalize_pdf_key(candidate.stem)
+        if normalized_name in aliases:
+            return candidate
+    if len(existing) == 1:
+        return existing[0]
+    return None
+
+
+def _evidence_source_roots(run_dir: Path) -> list[Path]:
+    ledger_path = run_dir / "stages" / "peerassist" / "evidence_ledger.json"
+    try:
+        payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    rows = payload.get("items") if isinstance(payload.get("items"), list) else []
+    roots: list[Path] = []
+    for row in rows[:12]:
+        if not isinstance(row, dict):
+            continue
+        source_path = row.get("source_path")
+        if not source_path:
+            continue
+        roots.append(Path(str(source_path)).parent)
+    return roots
+
+
+def _paper_pdf_aliases(paper_id: str) -> set[str]:
+    raw = paper_id.strip()
+    aliases = {
+        _normalize_pdf_key(raw),
+        _normalize_pdf_key(raw.replace("arxiv_", "")),
+        _normalize_pdf_key(raw.replace("_v", "v")),
+        _normalize_pdf_key(raw.replace("arxiv_", "").replace("_v", "v")),
+        _normalize_pdf_key(raw.replace("arxiv_", "").replace("_", ".")),
+        _normalize_pdf_key(raw.replace("arxiv_", "").replace("_v", "v").replace("_", ".")),
+    }
+    return {alias for alias in aliases if alias}
+
+
+def _normalize_pdf_key(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _run_agent_review(
+    *, run_dir: Path, selected_text: str, paper_id: str, state: dict[str, Any]
+) -> dict[str, Any]:
+    selected_text = selected_text.strip()
+    config = _resolve_model_config()
+    api_key = _resolve_model_api_key()
+    if not api_key:
+        raise ValueError("模型 API Key 未配置。请在服务环境变量中设置 PEERASSIST_OPENAI_API_KEY。")
+    context = _build_full_paper_review_context(
+        run_dir=run_dir,
+        paper_id=paper_id,
+        selected_text=selected_text,
+        state=state,
+    )
+    response = _chat_completion(
+        api_key=api_key,
+        base_url=config["base_url"],
+        model=config["model"],
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是 PeerAssist 的证据忠实论文审稿辅助智能体。你不能替代审稿人作录用决定，"
+                    "不能使用造假、实锤、定罪式语言。所有主要意见必须绑定原文证据位置，"
+                    "包含影响、可能的善意解释和作者可执行修改建议。证据不足时只能写待人工核查。"
+                ),
+            },
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ],
+    )
+    draft_path = peerassist_stage_dir(run_dir) / "agent_review_draft.md"
+    draft_path.write_text(response + "\n", encoding="utf-8")
+    return {
+        "schema_version": "peerassist.agent_review_result.v1",
+        "model": config["model"],
+        "base_url": config["base_url"],
+        "selected_text_chars": len(selected_text),
+        "context": context["context_summary"],
+        "draft_path": str(draft_path),
+        "suggestion": response,
+    }
+
+
+def _build_full_paper_review_context(
+    *, run_dir: Path, paper_id: str, selected_text: str, state: dict[str, Any]
+) -> dict[str, Any]:
+    out_dir = peerassist_stage_dir(run_dir)
+    ledger_payload = read_json_safely(out_dir / "evidence_ledger.json")
+    checks_payload = read_json_safely(out_dir / "deterministic_checks.json")
+    agent_payload = read_json_safely(out_dir / "agent_results.json")
+    queue_payload = read_json_safely(out_dir / "confirmation_review_queue.json")
+    ledger_items = ledger_payload.get("items") if isinstance(ledger_payload.get("items"), list) else []
+    checks = checks_payload.get("checks") if isinstance(checks_payload.get("checks"), list) else []
+    agent_results = agent_payload.get("results") if isinstance(agent_payload.get("results"), list) else []
+    queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), list) else []
+    return {
+        "schema_version": "peerassist.full_paper_review_prompt.v1",
+        "paper_id": paper_id,
+        "methodology": {
+            "pipeline": [
+                "解析层",
+                "证据台账",
+                "确定性检查",
+                "多代理审核",
+                "反方解释",
+                "意见整合",
+                "人工确认",
+                "报告导出",
+            ],
+            "review_dimensions": ["结构", "方法", "统计", "图表", "引用", "伦理与复现"],
+            "language_rules": [
+                "只输出审稿线索，不自动给出录用或拒稿决定",
+                "避免造假、实锤、定罪式表达",
+                "每条主要意见必须有证据位置、影响、善意解释、作者行动建议",
+                "证据不足时标记为待人工核查",
+            ],
+        },
+        "context_summary": {
+            "evidence_items": len(ledger_items),
+            "deterministic_checks": len(checks),
+            "agent_results": len(agent_results),
+            "queue_items": len(queue_items),
+            "selected_text_chars": len(selected_text),
+        },
+        "paper_outline_and_evidence": _summarize_evidence_for_review(ledger_items),
+        "deterministic_checks": _summarize_checks_for_review(checks),
+        "local_agent_results": _summarize_agent_results_for_review(agent_results),
+        "existing_confirmation_queue": queue_items[:8],
+        "reviewer_focus_text": selected_text[:2000],
+        "task": (
+            "请基于整篇论文证据台账和已有确定性/本地代理结果，生成中文审稿辅助草稿。"
+            "输出结构必须包含：一、论文概要；二、重点阅读路线；三、主要意见；四、次要意见；"
+            "五、需要编辑关注的问题；六、系统局限。主要意见每条包含位置、证据、影响、可能的善意解释、建议作者如何修改。"
+        ),
+    }
+
+
+def read_json_safely(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _summarize_evidence_for_review(rows: list[Any]) -> list[dict[str, str]]:
+    summaries: list[dict[str, str]] = []
+    preferred_types = {
+        "section",
+        "text_span",
+        "figure_caption",
+        "table",
+        "table_cell",
+        "citation",
+        "reference",
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item_type = str(row.get("type") or "")
+        text = str(row.get("text") or "").strip()
+        if item_type not in preferred_types or not text:
+            continue
+        summaries.append(
+            {
+                "id": str(row.get("id") or ""),
+                "type": item_type,
+                "locator": str(row.get("locator") or ""),
+                "section": str(row.get("section") or ""),
+                "text": text[:500],
+            }
+        )
+        if len(summaries) >= 80:
+            break
+    return summaries
+
+
+def _summarize_checks_for_review(rows: list[Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for row in rows[:40]:
+        if not isinstance(row, dict):
+            continue
+        summaries.append(
+            {
+                "id": str(row.get("id") or ""),
+                "kind": str(row.get("kind") or ""),
+                "applicability": str(row.get("applicability") or ""),
+                "status": str(row.get("status") or ""),
+                "evidence_ids": row.get("evidence_ids") if isinstance(row.get("evidence_ids"), list) else [],
+                "message": str(row.get("message") or "")[:400],
+                "benign_explanations": row.get("benign_explanations")
+                if isinstance(row.get("benign_explanations"), list)
+                else [],
+            }
+        )
+    return summaries
+
+
+def _summarize_agent_results_for_review(rows: list[Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for row in rows[:12]:
+        if not isinstance(row, dict):
+            continue
+        drafts = row.get("drafts") if isinstance(row.get("drafts"), list) else []
+        summaries.append(
+            {
+                "agent_id": str(row.get("agent_id") or ""),
+                "status": str(row.get("status") or ""),
+                "draft_count": len(drafts),
+                "warnings": row.get("warnings") if isinstance(row.get("warnings"), list) else [],
+                "drafts": drafts[:5],
+            }
+        )
+    return summaries
+
+
+def _chat_completion(
+    *, api_key: str, base_url: str, model: str, messages: list[dict[str, str]]
+) -> str:
+    endpoint = base_url.rstrip("/") + "/chat/completions"
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": 900,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")[:500]
+        raise RuntimeError(f"模型服务返回 {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"模型服务连接失败: {exc.reason}") from exc
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices else {}
+    message = first.get("message") if isinstance(first, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    if not content:
+        raise RuntimeError("模型服务未返回可用审稿建议。")
+    return str(content)
+
+
+def _resolve_model_api_key() -> str:
+    return (
+        os.getenv("PEERASSIST_OPENAI_API_KEY")
+        or os.getenv("EXECUTION_OPENAI_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    ).strip()
+
+
+def _resolve_model_config() -> dict[str, str]:
+    api_key = _resolve_model_api_key()
+    base_url = (
+        os.getenv("PEERASSIST_OPENAI_BASE_URL")
+        or os.getenv("EXECUTION_OPENAI_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "https://deepkey.top/v1"
+    ).strip()
+    model = (
+        os.getenv("PEERASSIST_OPENAI_MODEL")
+        or os.getenv("EXECUTION_OPENAI_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-5.4"
+    ).strip()
+    return {
+        "provider": "openai-compatible",
+        "model": model,
+        "base_url": base_url,
+        "api_key_configured": "true" if api_key else "false",
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1167,18 +1855,58 @@ def main(argv: list[str] | None = None) -> int:
 def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHandler]:
     class ConfirmationHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if self.path == "/" or self.path.startswith("/?"):
+            path = self.path.split("?", 1)[0]
+            if path == "/" or self.path.startswith("/?"):
                 self._send_html(render_confirmation_page(run_dir=run_dir, paper_id=paper_id))
                 return
-            if self.path == "/api/state":
+            if path == "/paper.pdf":
+                source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
+                if source_pdf_path is None:
+                    self.send_error(404, "source PDF not found")
+                    return
+                self._send_pdf(source_pdf_path)
+                return
+            if path == "/api/state":
                 self._send_json(load_confirmation_state(run_dir=run_dir))
                 return
-            if self.path == "/api/events":
+            if path == "/api/events":
                 self._send_sse_state(load_confirmation_state(run_dir=run_dir))
                 return
             self.send_error(404, "not found")
 
+        def do_HEAD(self) -> None:
+            path = self.path.split("?", 1)[0]
+            if path == "/paper.pdf":
+                source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
+                if source_pdf_path is None:
+                    self.send_error(404, "source PDF not found")
+                    return
+                self._send_pdf(source_pdf_path, head_only=True)
+                return
+            if path == "/" or self.path.startswith("/?"):
+                self._send_html(
+                    render_confirmation_page(run_dir=run_dir, paper_id=paper_id),
+                    head_only=True,
+                )
+                return
+            self.send_error(404, "not found")
+
         def do_POST(self) -> None:
+            if self.path == "/api/agent-review":
+                try:
+                    payload = self._read_json()
+                    state = load_confirmation_state(run_dir=run_dir)
+                    result = _run_agent_review(
+                        run_dir=run_dir,
+                        selected_text=str(payload.get("selected_text") or ""),
+                        paper_id=paper_id,
+                        state=state,
+                    )
+                except Exception as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                    return
+                self._send_json(result)
+                return
             if self.path != "/api/decision":
                 self.send_error(404, "not found")
                 return
@@ -1217,12 +1945,29 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_html(self, text: str, *, status: int = 200) -> None:
+        def _send_html(self, text: str, *, status: int = 200, head_only: bool = False) -> None:
             body = text.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            if head_only:
+                return
+            self.wfile.write(body)
+
+        def _send_pdf(self, path: Path, *, head_only: bool = False) -> None:
+            try:
+                body = path.read_bytes()
+            except FileNotFoundError:
+                self.send_error(404, "source PDF not found")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", f'inline; filename="{path.name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if head_only:
+                return
             self.wfile.write(body)
 
         def _send_sse_state(self, payload: dict[str, Any]) -> None:
@@ -1371,52 +2116,77 @@ def _render_evidence_focus(items: list[Any]) -> str:
     return f'<div class="evidence-focus">{"".join(rows)}</div>'
 
 
-def _render_paper_review_surface(items: list[Any], *, paper_id: str) -> str:
+def _render_model_entry(model_config: dict[str, str]) -> str:
+    key_state = "已配置" if model_config["api_key_configured"] == "true" else "未配置"
+    return f"""
+      <section class="panel model-entry" data-panel="model-entry">
+        <div class="panel-header">
+          <p class="panel-title">智能体审稿入口</p>
+          <div class="panel-subtitle">按方法论通读整篇论文：证据台账、确定性核查、多代理维度与人工确认</div>
+        </div>
+        <div class="model-config-list">
+          <div class="model-config-row"><span>模型</span><code>{html.escape(model_config["model"])}</code></div>
+          <div class="model-config-row"><span>Base URL</span><code>{html.escape(model_config["base_url"])}</code></div>
+          <div class="model-config-row"><span>API Key</span><code>{html.escape(key_state)}</code></div>
+        </div>
+        <div class="agent-review-box">
+          <button class="agent-primary-button" type="button" data-agent-review-start>开始全篇智能审稿</button>
+          <div class="agent-stream-box" data-agent-review-stream>系统将读取整篇论文证据台账、确定性核查和代理结果，生成可追溯审稿草稿；选中的 PDF 文字只作为额外关注点。</div>
+        </div>
+      </section>
+"""
+
+
+def _render_paper_review_surface(
+    items: list[Any], *, paper_id: str, evidence_preview: list[Any], has_source_pdf: bool
+) -> str:
     concerns = [item for item in items if isinstance(item, dict)]
     first_concern = concerns[0] if concerns else {}
-    first_concern_id = str(first_concern.get("id") or "")
-    first_title = _localized_copy(str(first_concern.get("title") or "待核查关注点"))
-    first_impact = _localized_copy(str(first_concern.get("impact") or "当前关注点需要审稿人结合证据确认。"))
+    preview_rows = [row for row in evidence_preview if isinstance(row, dict)]
+    first_preview = preview_rows[0] if preview_rows else {}
+    first_title = _localized_copy(
+        str(first_concern.get("title") or first_preview.get("text") or "待核查关注点")
+    )
+    first_impact = _localized_copy(
+        str(first_concern.get("impact") or "当前真实论文片段已进入证据预览，等待进一步结构化核查。")
+    )
     evidence = first_concern.get("evidence") if isinstance(first_concern.get("evidence"), list) else []
     first_evidence = evidence[0] if evidence and isinstance(evidence[0], dict) else {}
-    evidence_id = str(first_evidence.get("id") or "P01-L001")
-    locator = str(first_evidence.get("locator") or "p.1 line 1")
-    comments = _render_margin_comments(concerns)
+    evidence_id = str(first_evidence.get("id") or first_preview.get("id") or "P01-L001")
+    locator = str(first_evidence.get("locator") or first_preview.get("locator") or "p.1 line 1")
+    paper_lines = _render_paper_preview_lines(preview_rows, fallback_title=first_title)
+    pdf_link = (
+        '<a class="paper-chip" href="/paper.pdf" target="_blank" rel="noreferrer">打开 PDF</a>'
+        if has_source_pdf
+        else '<span class="paper-chip">未发现源 PDF</span>'
+    )
+    source_document = (
+        _render_source_pdf_viewer()
+        if has_source_pdf
+        else _render_extracted_text_preview(
+            paper_id=paper_id,
+            paper_lines=paper_lines,
+            locator=locator,
+            first_impact=first_impact,
+        )
+    )
+    comments = _render_margin_comments(concerns, evidence_preview=preview_rows)
+    source_label = "原始 PDF 已导入" if has_source_pdf else "抽取文本预览"
     return f"""
 <section class="panel paper-viewer" data-panel="paper-viewer" id="paper-viewer">
   <div class="panel-header">
-    <p class="panel-title">论文原文预览</p>
-    <div class="panel-subtitle">PDF/Word 批注式阅读面：证据高亮、页边批注与人工确认队列联动</div>
+    <p class="panel-title">论文原文 PDF</p>
+    <div class="panel-subtitle">真实 PDF 阅读面优先；旁栏保留证据锚点、页边批注与人工确认队列联动</div>
   </div>
   <div class="paper-toolbar">
-    <span class="paper-chip">页面 1</span>
+    <span class="paper-chip">{source_label}</span>
     <span class="paper-chip">批注 {len(concerns)}</span>
     <span class="paper-chip">证据锚点 {html.escape(evidence_id)}</span>
+    {pdf_link}
     <a class="paper-chip" href="#review-queue">跳转队列</a>
   </div>
   <div class="paper-canvas">
-    <article class="paper-sheet" aria-label="论文页面预览">
-      <h2 class="paper-title">PeerAssist Manuscript Preview · {html.escape(paper_id)}</h2>
-      <div class="paper-authors">Anonymous submission · evidence-grounded review copy</div>
-      <div class="paper-section-title">Results</div>
-      <p class="paper-line" data-line="1">
-        We report the primary outcome and associated percentage summary for the evaluated cohort.
-        <span class="paper-highlight" data-evidence-anchor="{html.escape(evidence_id, quote=True)}" data-paper-concern="{html.escape(first_concern_id, quote=True)}">
-          {html.escape(first_title)}
-        </span>
-      </p>
-      <p class="paper-line" data-line="2">
-        The reported result should remain tied to a reproducible denominator, filtering rule, and table transcription path.
-      </p>
-      <p class="paper-line" data-line="3">
-        PeerAssist marks this passage for reviewer confirmation because {html.escape(first_impact[:160])}
-      </p>
-      <div class="paper-section-title">Reviewer Evidence Anchor</div>
-      <p class="paper-line" data-line="4">
-        Evidence locator: <span class="paper-highlight">{html.escape(locator)}</span>. The margin note records the concern,
-        benign explanation, and suggested author action without adding unevidenced facts.
-      </p>
-    </article>
+    {source_document}
     <aside class="paper-comments" aria-label="页边批注">
       {comments}
     </aside>
@@ -1425,7 +2195,77 @@ def _render_paper_review_surface(items: list[Any], *, paper_id: str) -> str:
 """
 
 
-def _render_margin_comments(items: list[dict[str, Any]]) -> str:
+def _render_source_pdf_viewer() -> str:
+    return """
+    <div class="source-pdf-shell" data-source-pdf-viewer data-pdf-reader>
+      <div class="pdf-reader-bar" aria-label="PDF 阅读控制">
+        <div class="pdf-control-group">
+          <button class="pdf-icon-button" type="button" title="上一页" aria-label="上一页" data-pdf-action="prev">‹</button>
+          <button class="pdf-icon-button" type="button" title="下一页" aria-label="下一页" data-pdf-action="next">›</button>
+        </div>
+        <div class="pdf-page-status" data-pdf-status>正在载入 PDF</div>
+        <div class="pdf-control-group">
+          <button class="pdf-icon-button" type="button" title="缩小" aria-label="缩小" data-pdf-action="zoom-out">−</button>
+          <button class="pdf-icon-button" type="button" title="放大" aria-label="放大" data-pdf-action="zoom-in">＋</button>
+          <button class="pdf-icon-button" type="button" title="适应宽度" aria-label="适应宽度" data-pdf-action="fit">⤢</button>
+        </div>
+      </div>
+      <div class="pdf-reader-stage" data-pdf-stage>
+        <div class="pdf-loading" data-pdf-loading>正在渲染论文页面</div>
+        <div class="pdf-page-wrap" data-pdf-page-wrap>
+          <canvas class="pdf-page-canvas" data-pdf-canvas aria-label="论文 PDF 当前页"></canvas>
+          <div class="pdf-text-layer" data-pdf-text-layer aria-label="可选择文字层"></div>
+        </div>
+        <div class="source-pdf-fallback" data-pdf-fallback hidden>
+          <p>PDF.js 未能完成渲染，请<a href="/paper.pdf" target="_blank" rel="noreferrer">打开原始 PDF</a>。</p>
+        </div>
+      </div>
+    </div>
+"""
+
+
+def _render_extracted_text_preview(
+    *, paper_id: str, paper_lines: str, locator: str, first_impact: str
+) -> str:
+    return f"""
+    <article class="paper-sheet" aria-label="论文抽取文本预览">
+      <h2 class="paper-title">PeerAssist Manuscript Preview · {html.escape(paper_id)}</h2>
+      <div class="paper-authors">Anonymous submission · evidence-grounded review copy</div>
+      <div class="paper-section-title">Evidence Preview</div>
+      {paper_lines}
+      <div class="paper-section-title">Reviewer Evidence Anchor</div>
+      <p class="paper-line" data-line="4">
+        Evidence locator: <span class="paper-highlight">{html.escape(locator)}</span>. The margin note records the concern,
+        benign explanation, and suggested author action without adding unevidenced facts. {html.escape(first_impact[:120])}
+      </p>
+    </article>
+"""
+
+
+def _render_paper_preview_lines(rows: list[dict[str, Any]], *, fallback_title: str) -> str:
+    if not rows:
+        rows = [{"id": "P01-L001", "text": fallback_title, "locator": "p.1 line 1"}]
+    rendered: list[str] = []
+    for idx, row in enumerate(rows[:5], start=1):
+        evidence_id = str(row.get("id") or f"P01-L{idx:03d}")
+        text = str(row.get("text") or "").strip()
+        if len(text) > 260:
+            text = text[:257].rstrip() + "..."
+        rendered.append(
+            f"""
+      <p class="paper-line" data-line="{idx}">
+        <span class="paper-highlight" data-evidence-anchor="{html.escape(evidence_id, quote=True)}">
+          {html.escape(text or fallback_title)}
+        </span>
+      </p>
+"""
+        )
+    return "".join(rendered)
+
+
+def _render_margin_comments(
+    items: list[dict[str, Any]], *, evidence_preview: list[dict[str, Any]]
+) -> str:
     rows: list[str] = []
     for position, item in enumerate(items[:4], start=1):
         evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
@@ -1448,12 +2288,43 @@ def _render_margin_comments(items: list[dict[str, Any]]) -> str:
 """
         )
     if not rows:
-        rows.append('<div class="comment-copy">暂无可映射到论文页面的批注。</div>')
+        preview_text = _render_margin_evidence_preview(evidence_preview)
+        rows.append(
+            f"""
+<div class="paper-comment">
+  <div class="comment-anchor">证据预览</div>
+  <div class="comment-title">暂无待人工确认批注</div>
+  <div class="comment-copy">当前真实论文已完成证据预览；如需生成可确认批注，需要更强的表格/参考文献结构解析或新的确定性 lead。</div>
+  {preview_text}
+</div>
+"""
+        )
     return "".join(rows)
+
+
+def _render_margin_evidence_preview(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    snippets: list[str] = []
+    for row in rows[:3]:
+        evidence_id = str(row.get("id") or "")
+        text = str(row.get("text") or "").strip()
+        if len(text) > 90:
+            text = text[:87].rstrip() + "..."
+        snippets.append(
+            f"""
+  <div class="comment-copy">
+    <strong>{html.escape(evidence_id)}</strong> · {html.escape(text)}
+  </div>
+"""
+        )
+    return "".join(snippets)
 
 
 def _render_artifact_workspace(paths: dict[str, Any]) -> str:
     labels = {
+        "source_pdf": "原始 PDF",
+        "evidence_ledger": "证据账本",
         "queue": "审稿队列",
         "confirmations": "人工确认",
         "agent_results": "代理结果",

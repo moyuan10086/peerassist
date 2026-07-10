@@ -20,6 +20,7 @@ def load_confirmation_state(*, run_dir: Path) -> dict[str, Any]:
     queue = read_json_file(out_dir / "confirmation_review_queue.json")
     confirmations = read_json_file(out_dir / "human_confirmations.json")
     concerns_payload = read_json_file(out_dir / "peerassist_concerns.json")
+    evidence_ledger_payload = read_json_file(out_dir / "evidence_ledger.json")
     agent_results_payload = read_json_file(out_dir / "agent_results.json")
     invocations_payload = read_json_file(out_dir / "capability_invocations.json")
     actions = confirmations.get("actions") if isinstance(confirmations.get("actions"), list) else []
@@ -54,7 +55,9 @@ def load_confirmation_state(*, run_dir: Path) -> dict[str, Any]:
         "agent_runs": agent_runs,
         "capability_invocations": capability_invocations,
         "tool_trace": tool_trace,
+        "evidence_preview": _evidence_preview(evidence_ledger_payload),
         "paths": {
+            "evidence_ledger": str(out_dir / "evidence_ledger.json"),
             "queue": str(out_dir / "confirmation_review_queue.json"),
             "confirmations": str(out_dir / "human_confirmations.json"),
             "agent_results": str(out_dir / "agent_results.json"),
@@ -219,6 +222,32 @@ def _capability_invocations(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return invocations
+
+
+def _evidence_preview(payload: dict[str, Any]) -> list[dict[str, str]]:
+    rows = payload.get("items") if isinstance(payload.get("items"), list) else []
+    preview: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        item_type = str(row.get("type") or "")
+        if item_type not in {"section", "text_span", "figure_caption", "table"}:
+            continue
+        preview.append(
+            {
+                "id": str(row.get("id") or ""),
+                "type": item_type,
+                "locator": str(row.get("locator") or ""),
+                "text": text,
+                "section": str(row.get("section") or ""),
+            }
+        )
+        if len(preview) >= 8:
+            break
+    return preview
 
 
 def _tool_trace_summary(path: Path) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import tomllib
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -173,16 +174,27 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "实时事件" in html
     assert "证据焦点" in html
     assert "产物工作区" in html
+    assert "智能体审稿入口" in html
+    assert "开始全篇智能审稿" in html
+    assert "证据台账、确定性核查和代理结果" in html
+    assert "gpt-5.4" in html
+    assert "https://deepkey.top/v1" in html
     assert "下一步动作" in html
     assert "data-agent-workflow" in html
     assert "data-stream-log" in html
     assert "data-review-progress" in html
+    assert "Evidence Preview" in html
+    assert "证据账本" in html
     assert "data-trace-filter" in html
     assert "data-copy-path" in html
     assert "agent-toast" in html
     assert "复制路径" in html
     assert "applyTraceFilter('all')" in html
     assert "产物路径已复制" in html
+    assert "data-agent-review-start" in html
+    assert "data-agent-review-stream" in html
+    assert "fetch('/api/agent-review'" in html
+    assert "请先在 PDF 正文中选中一段文字" not in html
     assert 'data-panel="artifact-workspace"' in html
     assert 'data-panel="next-actions"' in html
     assert "confirmation_review_queue.json" in html
@@ -197,8 +209,10 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "确认" in html
     assert "改写" in html
     assert "证据审稿队列" in html
-    assert "论文原文预览" in html
-    assert "PDF/Word 批注式阅读面" in html
+    assert "论文原文 PDF" in html
+    assert "真实 PDF 阅读面" in html
+    assert "抽取文本预览" in html
+    assert "未发现源 PDF" in html
     assert "paper-highlight" in html
     assert "data-margin-comment" in html
     assert "data-paper-concern" in html
@@ -208,6 +222,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "已定位到论文高亮" in html
     assert "已定位到审稿队列" in html
     assert "页边批注" in html
+    assert "暂无待人工确认批注" not in html
     assert "p.1 line 1" in html
     assert "data-action=\"confirm\"" in html
     assert "data-action=\"rewrite\"" in html
@@ -266,6 +281,63 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
         assert result["actions_count"] == 1
         report = json.loads((out_dir / "peerassist_report.json").read_text(encoding="utf-8"))
         assert report["confirmed_count"] == 1
+
+        request = urllib.request.Request(
+            f"{base_url}/api/agent-review",
+            data=json.dumps({"selected_text": ""}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=5)
+        except urllib.error.HTTPError as exc:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+        else:  # pragma: no cover
+            raise AssertionError("agent review should require a configured model key")
+        assert "模型 API Key 未配置" in error_payload["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _seed_peerassist_stage(run_dir)
+    (run_dir / "paper.pdf").write_bytes(b"%PDF-1.4\n% PeerAssist test PDF\n%%EOF\n")
+
+    html = render_confirmation_page(run_dir=run_dir, paper_id="demo")
+
+    assert "原始 PDF 已导入" in html
+    assert 'data-source-pdf-viewer' in html
+    assert 'data-pdf-reader' in html
+    assert 'data-pdf-canvas' in html
+    assert 'data-pdf-text-layer' in html
+    assert 'data-pdf-action="next"' in html
+    assert 'data-pdf-action="fit"' in html
+    assert "pdf.min.mjs" in html
+    assert "pdf.worker.min.mjs" in html
+    assert "new pdfjsLib.TextLayer" in html
+    assert "pdfjsLib.getDocument('/paper.pdf')" in html
+    assert "打开 PDF" in html
+    assert "原始 PDF" in html
+    assert "paper.pdf" in html
+
+    server = create_confirmation_server(
+        run_dir=run_dir,
+        paper_id="demo",
+        host="127.0.0.1",
+        port=0,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    try:
+        with urllib.request.urlopen(f"{base_url}/paper.pdf", timeout=5) as response:
+            body = response.read()
+            content_type = response.headers["Content-Type"]
+        assert content_type == "application/pdf"
+        assert body.startswith(b"%PDF-1.4")
     finally:
         server.shutdown()
         server.server_close()
