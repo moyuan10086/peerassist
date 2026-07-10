@@ -100,3 +100,51 @@ def test_analyze_reviewer_crossover_records_missing_condition_warnings(tmp_path:
 
     assert result["records"] == []
     assert result["warnings"] == ["paper-001 missing baseline condition"]
+
+
+def test_analyze_reviewer_crossover_flags_paired_core_recall_regressions(tmp_path: Path) -> None:
+    input_path = tmp_path / "crossover.json"
+    write_json_file(
+        input_path,
+        {
+            "schema_version": "peerassist.reviewer_crossover.v1",
+            "trials": [
+                {
+                    "sample_id": "paper-001",
+                    "reviewer_id": "r1",
+                    "condition": "baseline",
+                    "mechanical_minutes": 20,
+                    "evidence_location_minutes": 10,
+                    "gold_core_concerns": ["c1", "c2"],
+                    "core_concerns_found": ["c1", "c2"],
+                },
+                {
+                    "sample_id": "paper-001",
+                    "reviewer_id": "r1",
+                    "condition": "assisted",
+                    "mechanical_minutes": 10,
+                    "evidence_location_minutes": 5,
+                    "gold_core_concerns": ["c1", "c2"],
+                    "core_concerns_found": ["c1"],
+                    "review_items_proposed": 3,
+                    "review_items_retained": 2,
+                },
+            ],
+        },
+    )
+
+    result = analyze_reviewer_crossover(input_path)
+
+    assert result["paired_reviewer_records"] == [
+        {
+            "sample_id": "paper-001",
+            "reviewer_id": "r1",
+            "baseline_core_recall": 1.0,
+            "assisted_core_recall": 0.5,
+            "core_problem_recall_delta": -0.5,
+            "core_recall_regressed": True,
+        }
+    ]
+    assert result["recall_regression_warnings"] == [
+        "paper-001/r1 assisted core recall lower than baseline: 0.500 < 1.000"
+    ]

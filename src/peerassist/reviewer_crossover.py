@@ -18,6 +18,8 @@ def analyze_reviewer_crossover(path: Path) -> dict[str, Any]:
 
     records: list[dict[str, float | str]] = []
     warnings: list[str] = []
+    paired_reviewer_records: list[dict[str, Any]] = []
+    recall_regression_warnings: list[str] = []
     for sample_id in sorted(by_sample):
         sample_trials = by_sample[sample_id]
         baseline = [row for row in sample_trials if _condition(row) == "baseline"]
@@ -39,6 +41,15 @@ def analyze_reviewer_crossover(path: Path) -> dict[str, Any]:
             "assisted_core_recall": _mean(_core_recall(row) for row in assisted),
         }
         records.append(record)
+        paired_reviewer_records.extend(_paired_reviewer_records(sample_id, sample_trials))
+
+    for row in paired_reviewer_records:
+        if not bool(row.get("core_recall_regressed")):
+            continue
+        recall_regression_warnings.append(
+            f"{row['sample_id']}/{row['reviewer_id']} assisted core recall lower than baseline: "
+            f"{float(row['assisted_core_recall']):.3f} < {float(row['baseline_core_recall']):.3f}"
+        )
 
     aggregate = {
         "mechanical_time_reduction": 1.0
@@ -58,8 +69,10 @@ def analyze_reviewer_crossover(path: Path) -> dict[str, Any]:
     return {
         "schema_version": "peerassist.reviewer_crossover_report.v1",
         "records": records,
+        "paired_reviewer_records": paired_reviewer_records,
         "aggregate": aggregate,
         "warnings": warnings,
+        "recall_regression_warnings": recall_regression_warnings,
     }
 
 
@@ -107,6 +120,38 @@ def _core_recall(row: dict[str, Any]) -> float:
         if str(item).strip()
     }
     return len(gold & found) / len(gold)
+
+
+def _paired_reviewer_records(
+    sample_id: str, sample_trials: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_reviewer: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in sample_trials:
+        reviewer_id = str(row.get("reviewer_id") or "").strip()
+        if reviewer_id:
+            by_reviewer[reviewer_id].append(row)
+
+    records: list[dict[str, Any]] = []
+    for reviewer_id in sorted(by_reviewer):
+        reviewer_trials = by_reviewer[reviewer_id]
+        baseline = [row for row in reviewer_trials if _condition(row) == "baseline"]
+        assisted = [row for row in reviewer_trials if _condition(row) == "assisted"]
+        if not baseline or not assisted:
+            continue
+        baseline_recall = _mean(_core_recall(row) for row in baseline)
+        assisted_recall = _mean(_core_recall(row) for row in assisted)
+        delta = round(assisted_recall - baseline_recall, 12)
+        records.append(
+            {
+                "sample_id": sample_id,
+                "reviewer_id": reviewer_id,
+                "baseline_core_recall": baseline_recall,
+                "assisted_core_recall": assisted_recall,
+                "core_problem_recall_delta": delta,
+                "core_recall_regressed": delta < 0,
+            }
+        )
+    return records
 
 
 def _mean(values: Any) -> float:
