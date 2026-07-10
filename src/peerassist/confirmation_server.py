@@ -402,6 +402,120 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       min-height: 100%;
       overflow: hidden;
     }}
+    .paper-review-stage {{
+      display: grid;
+      gap: 16px;
+      align-content: start;
+      min-width: 0;
+    }}
+    .paper-viewer {{
+      overflow: hidden;
+    }}
+    .paper-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(90deg, #f6fbfa, #f8f8ff);
+    }}
+    .paper-chip {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 9px;
+      color: #394340;
+      background: #fff;
+      font-size: 11px;
+      font-weight: 780;
+    }}
+    .paper-canvas {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 210px;
+      gap: 14px;
+      padding: 16px;
+      background: #eef3f2;
+    }}
+    .paper-sheet {{
+      min-height: 520px;
+      border: 1px solid #d8dedc;
+      border-radius: 6px;
+      background: #fffefb;
+      box-shadow: 0 16px 32px rgba(20, 35, 35, 0.10);
+      padding: 34px 42px;
+    }}
+    .paper-title {{
+      margin: 0;
+      color: #17211f;
+      font-size: 20px;
+      line-height: 1.25;
+      font-weight: 850;
+    }}
+    .paper-authors {{
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .paper-section-title {{
+      margin: 28px 0 8px;
+      font-size: 13px;
+      font-weight: 850;
+      color: #27322f;
+    }}
+    .paper-line {{
+      position: relative;
+      margin: 10px 0;
+      color: #303a37;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 14px;
+      line-height: 1.72;
+    }}
+    .paper-line::before {{
+      content: attr(data-line);
+      position: absolute;
+      left: -31px;
+      top: 1px;
+      color: #9aa5a2;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+    }}
+    .paper-highlight {{
+      border-radius: 4px;
+      background: linear-gradient(180deg, rgba(255, 232, 117, 0.52), rgba(255, 232, 117, 0.24));
+      box-shadow: inset 0 -2px rgba(15, 118, 110, 0.26);
+    }}
+    .paper-comments {{
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }}
+    .paper-comment {{
+      border: 1px solid #c8e1d9;
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: #f4fbf8;
+      padding: 10px;
+    }}
+    .comment-anchor {{
+      color: var(--accent-strong);
+      font-size: 11px;
+      font-weight: 850;
+    }}
+    .comment-title {{
+      margin-top: 4px;
+      color: #24302d;
+      font-size: 12px;
+      font-weight: 820;
+    }}
+    .comment-copy {{
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }}
     .queue-toolbar {{
       display: grid;
       grid-template-columns: minmax(0, 1fr) 180px;
@@ -514,6 +628,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: var(--panel-soft);
       padding: 10px;
     }}
+    .artifact-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+    }}
     .artifact-name, .next-action-title {{ font-size: 12px; font-weight: 800; }}
     .artifact-path, .next-action-copy {{
       margin-top: 5px;
@@ -521,6 +641,41 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 11px;
       overflow-wrap: anywhere;
     }}
+    .inline-button, .trace-filter {{
+      width: auto;
+      min-height: 28px;
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 11px;
+      white-space: nowrap;
+      background: #fff;
+    }}
+    .inline-button {{
+      color: var(--accent-strong);
+      border-color: #b8d8cf;
+    }}
+    .trace-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 14px 0;
+    }}
+    .trace-filter[aria-pressed="true"] {{
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }}
+    .trace-empty {{
+      display: none;
+      margin: 0 14px 14px;
+      padding: 10px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      background: #fff;
+    }}
+    .trace-empty[data-visible="true"] {{ display: block; }}
     .trace-event {{
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -580,12 +735,36 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .stream-console div + div {{ margin-top: 5px; }}
     .stream-key {{ color: #9ad0c4; }}
+    .agent-toast {{
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 5;
+      max-width: min(360px, calc(100vw - 36px));
+      border: 1px solid #b8d8cf;
+      border-radius: 8px;
+      background: #132320;
+      color: #eef8f4;
+      padding: 10px 12px;
+      box-shadow: 0 18px 42px rgba(20, 35, 35, 0.24);
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: opacity 160ms ease, transform 160ms ease;
+    }}
+    .agent-toast[data-visible="true"] {{
+      opacity: 1;
+      transform: translateY(0);
+    }}
     .empty {{ padding: 40px 0; color: var(--muted); }}
     @media (max-width: 1100px) {{
       .ops-strip {{ grid-template-columns: 1fr 1fr; }}
       .workflow-head {{ grid-template-columns: 1fr; }}
       .workflow-steps {{ grid-template-columns: 1fr; }}
       .console-shell {{ grid-template-columns: 1fr; }}
+      .paper-canvas {{ grid-template-columns: 1fr; }}
+      .paper-comments {{ grid-template-columns: 1fr 1fr; }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
@@ -593,6 +772,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .ops-strip {{ width: calc(100% - 24px); grid-template-columns: 1fr; }}
       .workflow-band {{ width: calc(100% - 24px); }}
       .console-shell {{ padding: 12px; }}
+      .paper-canvas {{ padding: 12px; }}
+      .paper-sheet {{ min-height: 420px; padding: 28px 28px 28px 38px; }}
+      .paper-comments {{ grid-template-columns: 1fr; }}
       .item {{ grid-template-columns: 1fr; }}
       .queue-toolbar {{ grid-template-columns: 1fr; }}
       .right-stack {{ grid-template-columns: 1fr; }}
@@ -693,19 +875,22 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         {_render_agent_timeline(agent_runs)}
       </section>
     </aside>
-    <section class="panel queue" data-panel="review-queue" id="review-queue">
-      <div class="panel-header">
-        <p class="panel-title">证据审稿队列</p>
-        <div class="panel-subtitle">逐条确认、改写、降级、删除或暂挂关注点</div>
-      </div>
-      <div class="queue-toolbar" data-review-progress>
-        <div>
-          <span class="label">审核进度</span>
-          <div class="queue-progress-line">已记录 {actions_count} 个动作，当前仍有 {pending_count} 条待审稿人处理。</div>
+    <section class="paper-review-stage" data-panel="paper-review-stage">
+      {_render_paper_review_surface(items, paper_id=paper_id)}
+      <section class="panel queue" data-panel="review-queue" id="review-queue">
+        <div class="panel-header">
+          <p class="panel-title">证据审稿队列</p>
+          <div class="panel-subtitle">逐条确认、改写、降级、删除或暂挂关注点</div>
         </div>
-        <div class="compact-meter" aria-label="人工确认完成度"><span style="width: {review_progress}%"></span></div>
-      </div>
-      <div class="queue-body">{rows}</div>
+        <div class="queue-toolbar" data-review-progress>
+          <div>
+            <span class="label">审核进度</span>
+            <div class="queue-progress-line">已记录 {actions_count} 个动作，当前仍有 {pending_count} 条待审稿人处理。</div>
+          </div>
+          <div class="compact-meter" aria-label="人工确认完成度"><span style="width: {review_progress}%"></span></div>
+        </div>
+        <div class="queue-body">{rows}</div>
+      </section>
     </section>
     <aside class="right-stack">
       <section class="panel" data-panel="evidence-focus">
@@ -727,7 +912,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           <p class="panel-title">工具追踪</p>
           <div class="panel-subtitle">MCP、Skills 与内置能力调用生命周期</div>
         </div>
+        {_render_trace_filters(events)}
         {_render_trace_events(events)}
+        <div class="trace-empty" data-trace-empty>当前过滤条件下暂无工具事件。</div>
       </section>
       <section class="panel" data-panel="human-confirmation" id="human-confirmation">
         <div class="panel-header">
@@ -742,6 +929,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       </section>
     </aside>
   </main>
+  <div class="agent-toast" id="agent-toast" role="status" aria-live="polite"></div>
   <script type="application/json" id="peerassist-state">{state_json}</script>
   <script>
     async function submitDecision(button) {{
@@ -790,6 +978,46 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         consoleEl.removeChild(consoleEl.lastElementChild);
       }}
     }}
+    let toastTimer = null;
+    function showToast(message) {{
+      const toast = document.getElementById('agent-toast');
+      if (!toast) return;
+      toast.textContent = message;
+      toast.dataset.visible = 'true';
+      window.clearTimeout(toastTimer);
+      toastTimer = window.setTimeout(() => {{
+        toast.dataset.visible = 'false';
+      }}, 2200);
+    }}
+    async function copyText(value) {{
+      if (navigator.clipboard && window.isSecureContext) {{
+        await navigator.clipboard.writeText(value);
+        return;
+      }}
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }}
+    function applyTraceFilter(status) {{
+      const events = Array.from(document.querySelectorAll('.trace-list .trace-event'));
+      let visibleCount = 0;
+      events.forEach((event) => {{
+        const shown = status === 'all' || event.dataset.status === status;
+        event.hidden = !shown;
+        if (shown) visibleCount += 1;
+      }});
+      document.querySelectorAll('[data-trace-filter]').forEach((button) => {{
+        button.setAttribute('aria-pressed', String(button.dataset.traceFilter === status));
+      }});
+      const empty = document.querySelector('[data-trace-empty]');
+      if (empty) empty.dataset.visible = String(visibleCount === 0);
+    }}
     function updateRuntime(state, source) {{
       const runtime = state.runtime || {{}};
       const status = document.getElementById('runtime-status');
@@ -835,6 +1063,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('button[data-action]').forEach((button) => {{
       button.addEventListener('click', () => submitDecision(button).catch((error) => alert(error.message)));
     }});
+    document.querySelectorAll('[data-copy-path]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        copyText(button.dataset.copyPath || '')
+          .then(() => showToast('产物路径已复制'))
+          .catch((error) => showToast(`复制失败：${{error.message}}`));
+      }});
+    }});
+    document.querySelectorAll('[data-trace-filter]').forEach((button) => {{
+      button.addEventListener('click', () => applyTraceFilter(button.dataset.traceFilter || 'all'));
+    }});
+    applyTraceFilter('all');
     connectEventStream();
     window.setInterval(() => refreshRuntime().catch(() => {{}}), 15000);
   </script>
@@ -1074,6 +1313,82 @@ def _render_evidence_focus(items: list[Any]) -> str:
     return f'<div class="evidence-focus">{"".join(rows)}</div>'
 
 
+def _render_paper_review_surface(items: list[Any], *, paper_id: str) -> str:
+    concerns = [item for item in items if isinstance(item, dict)]
+    first_concern = concerns[0] if concerns else {}
+    first_title = _localized_copy(str(first_concern.get("title") or "待核查关注点"))
+    first_impact = _localized_copy(str(first_concern.get("impact") or "当前关注点需要审稿人结合证据确认。"))
+    evidence = first_concern.get("evidence") if isinstance(first_concern.get("evidence"), list) else []
+    first_evidence = evidence[0] if evidence and isinstance(evidence[0], dict) else {}
+    evidence_id = str(first_evidence.get("id") or "P01-L001")
+    locator = str(first_evidence.get("locator") or "p.1 line 1")
+    comments = _render_margin_comments(concerns)
+    return f"""
+<section class="panel paper-viewer" data-panel="paper-viewer" id="paper-viewer">
+  <div class="panel-header">
+    <p class="panel-title">论文原文预览</p>
+    <div class="panel-subtitle">PDF/Word 批注式阅读面：证据高亮、页边批注与人工确认队列联动</div>
+  </div>
+  <div class="paper-toolbar">
+    <span class="paper-chip">页面 1</span>
+    <span class="paper-chip">批注 {len(concerns)}</span>
+    <span class="paper-chip">证据锚点 {html.escape(evidence_id)}</span>
+    <a class="paper-chip" href="#review-queue">跳转队列</a>
+  </div>
+  <div class="paper-canvas">
+    <article class="paper-sheet" aria-label="论文页面预览">
+      <h2 class="paper-title">PeerAssist Manuscript Preview · {html.escape(paper_id)}</h2>
+      <div class="paper-authors">Anonymous submission · evidence-grounded review copy</div>
+      <div class="paper-section-title">Results</div>
+      <p class="paper-line" data-line="1">
+        We report the primary outcome and associated percentage summary for the evaluated cohort.
+        <span class="paper-highlight" data-evidence-anchor="{html.escape(evidence_id, quote=True)}">
+          {html.escape(first_title)}
+        </span>
+      </p>
+      <p class="paper-line" data-line="2">
+        The reported result should remain tied to a reproducible denominator, filtering rule, and table transcription path.
+      </p>
+      <p class="paper-line" data-line="3">
+        PeerAssist marks this passage for reviewer confirmation because {html.escape(first_impact[:160])}
+      </p>
+      <div class="paper-section-title">Reviewer Evidence Anchor</div>
+      <p class="paper-line" data-line="4">
+        Evidence locator: <span class="paper-highlight">{html.escape(locator)}</span>. The margin note records the concern,
+        benign explanation, and suggested author action without adding unevidenced facts.
+      </p>
+    </article>
+    <aside class="paper-comments" aria-label="页边批注">
+      {comments}
+    </aside>
+  </div>
+</section>
+"""
+
+
+def _render_margin_comments(items: list[dict[str, Any]]) -> str:
+    rows: list[str] = []
+    for position, item in enumerate(items[:4], start=1):
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        first_evidence = evidence[0] if evidence and isinstance(evidence[0], dict) else {}
+        evidence_id = str(first_evidence.get("id") or f"C{position:02d}")
+        locator = str(first_evidence.get("locator") or "未标注位置")
+        title = _localized_copy(str(item.get("title") or "待核查关注点"))
+        action = _localized_copy(str(item.get("author_action") or "请审稿人确认该关注点。"))
+        rows.append(
+            f"""
+<div class="paper-comment" data-margin-comment="{html.escape(evidence_id, quote=True)}">
+  <div class="comment-anchor">批注 {position} · {html.escape(evidence_id)} · {html.escape(locator)}</div>
+  <div class="comment-title">{html.escape(title)}</div>
+  <div class="comment-copy">{html.escape(action)}</div>
+</div>
+"""
+        )
+    if not rows:
+        rows.append('<div class="comment-copy">暂无可映射到论文页面的批注。</div>')
+    return "".join(rows)
+
+
 def _render_artifact_workspace(paths: dict[str, Any]) -> str:
     labels = {
         "queue": "审稿队列",
@@ -1090,8 +1405,11 @@ def _render_artifact_workspace(paths: dict[str, Any]) -> str:
         rows.append(
             f"""
 <div class="artifact-row">
-  <div class="artifact-name">{html.escape(label)}</div>
-  <div class="artifact-path">{html.escape(value)}</div>
+  <div>
+    <div class="artifact-name">{html.escape(label)}</div>
+    <div class="artifact-path">{html.escape(value)}</div>
+  </div>
+  <button class="inline-button" type="button" data-copy-path="{html.escape(value, quote=True)}">复制路径</button>
 </div>
 """
         )
@@ -1205,6 +1523,29 @@ def _render_trace_events(events: list[Any]) -> str:
     if not rows:
         rows.append('<div class="trace-summary">暂无工具追踪事件。</div>')
     return f'<div class="trace-list">{"".join(rows)}</div>'
+
+
+def _render_trace_filters(events: list[Any]) -> str:
+    counts = {
+        "all": sum(1 for row in events if isinstance(row, dict)),
+        "queued": _event_status_count(events, "queued"),
+        "completed": _event_status_count(events, "completed"),
+        "failed": _event_status_count(events, "failed"),
+    }
+    labels = {
+        "all": "全部",
+        "queued": "排队",
+        "completed": "完成",
+        "failed": "失败",
+    }
+    buttons = "".join(
+        (
+            f'<button class="trace-filter" type="button" data-trace-filter="{html.escape(key, quote=True)}" '
+            f'aria-pressed="{str(key == "all").lower()}">{html.escape(label)} {counts[key]}</button>'
+        )
+        for key, label in labels.items()
+    )
+    return f'<div class="trace-toolbar" data-trace-toolbar>{buttons}</div>'
 
 
 def _render_invocations(invocations: list[Any]) -> str:

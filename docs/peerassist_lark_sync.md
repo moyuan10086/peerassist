@@ -120,3 +120,23 @@ model keys, paper secrets, or reviewer-private material here.
 - Browser verification: Playwright screenshots for desktop 1440x1000 and mobile 390x844 reported overflow=0 and no missing key selectors.
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
 - Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.
+
+## 2026-07-11 02:28 CST - PeerAssist trace filters and artifact copy controls
+
+- The tool trace panel now includes segmented filters for all, queued, completed, and failed events.
+- Artifact workspace rows now include "复制路径" controls with clipboard fallback and a lightweight in-page toast.
+- The interactions stay inside the existing confirmation console and preserve /api/state, /api/events, and /api/decision contracts.
+- Public URL verified: http://101.47.158.17:8766/ returns data-trace-filter, data-copy-path, and agent-toast.
+- Browser verification: Playwright clicked the completed trace filter, copied an artifact path, observed "产物路径已复制", and reported overflow=0.
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+- Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.
+
+## 2026-07-11 02:42 CST - PeerAssist paper annotation surface
+
+- Added a central "论文原文预览" panel to make the review flow resemble PDF/Word annotation.
+- The paper surface renders an A4-like manuscript page, line numbers, evidence-highlighted text, and margin comments mapped to queue concerns.
+- The existing evidence review queue remains below the paper surface, so reviewers can move from page context to human confirmation without losing workflow state.
+- Public URL verified: http://101.47.158.17:8766/ returns "论文原文预览", "PDF/Word 批注式阅读面", paper-highlight, and data-margin-comment.
+- Browser verification: Playwright desktop 1440x1100 and mobile 390x900 checks found the paper viewer, highlight, margin comment, trace filter, and artifact copy controls with overflow=0.
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+- Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.

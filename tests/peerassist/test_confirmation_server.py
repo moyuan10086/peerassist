@@ -158,6 +158,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "PeerAssist 论文审核辅助台" in html
     assert "data-peerassist-agent-console" in html
     assert 'data-panel="review-queue"' in html
+    assert 'data-panel="paper-viewer"' in html
+    assert 'data-panel="paper-review-stage"' in html
     assert 'data-panel="tool-trace"' in html
     assert 'data-panel="human-confirmation"' in html
     assert 'data-panel="stream-console"' in html
@@ -175,6 +177,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-agent-workflow" in html
     assert "data-stream-log" in html
     assert "data-review-progress" in html
+    assert "data-trace-filter" in html
+    assert "data-copy-path" in html
+    assert "agent-toast" in html
+    assert "复制路径" in html
+    assert "applyTraceFilter('all')" in html
+    assert "产物路径已复制" in html
     assert 'data-panel="artifact-workspace"' in html
     assert 'data-panel="next-actions"' in html
     assert "confirmation_review_queue.json" in html
@@ -189,6 +197,11 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "确认" in html
     assert "改写" in html
     assert "证据审稿队列" in html
+    assert "论文原文预览" in html
+    assert "PDF/Word 批注式阅读面" in html
+    assert "paper-highlight" in html
+    assert "data-margin-comment" in html
+    assert "页边批注" in html
     assert "p.1 line 1" in html
     assert "data-action=\"confirm\"" in html
     assert "data-action=\"rewrite\"" in html
