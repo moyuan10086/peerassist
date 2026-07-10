@@ -45,6 +45,7 @@ class CapabilitySpec(BaseModel):
     permissions: list[PermissionClass] = Field(default_factory=list)
     input_summary: str = ""
     output_summary: str = ""
+    metadata: dict[str, object] = Field(default_factory=dict)
 
     @property
     def approval_required(self) -> bool:
@@ -60,6 +61,7 @@ class CapabilitySpec(BaseModel):
             "approval_required": self.approval_required,
             "input_summary": self.input_summary,
             "output_summary": self.output_summary,
+            "metadata": dict(self.metadata),
         }
 
 
