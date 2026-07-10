@@ -151,13 +151,16 @@ def build_evidence_ledger(
     source_pdf: Path,
     mineru_markdown_path: Path | None,
     mineru_content_list_path: Path | None = None,
+    provider_name: str = "mineru",
+    provider_metadata: dict[str, Any] | None = None,
+    provider_warnings: list[str] | None = None,
 ) -> EvidenceLedger:
     """Build a best-effort evidence ledger from parser outputs.
 
     The builder is deliberately conservative: missing parser structures are
     represented as coverage zeros and warnings instead of inferred facts.
     """
-    warnings: list[str] = []
+    warnings: list[str] = list(provider_warnings or [])
     items: list[EvidenceItem] = []
     if mineru_markdown_path is None or not mineru_markdown_path.exists():
         warnings.append("mineru_markdown_missing")
@@ -168,11 +171,13 @@ def build_evidence_ledger(
 
     source_sha256 = _sha256(source_pdf) if source_pdf.exists() else ""
     metadata = {
-        "provider": "mineru",
+        "provider": provider_name,
         "warnings": warnings,
         "mineru_markdown_path": str(mineru_markdown_path or ""),
         "mineru_content_list_path": str(mineru_content_list_path or ""),
     }
+    if provider_metadata:
+        metadata["provider_metadata"] = dict(provider_metadata)
     return EvidenceLedger(
         paper_id=paper_id,
         source_sha256=source_sha256,
