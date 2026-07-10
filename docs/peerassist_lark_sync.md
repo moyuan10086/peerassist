@@ -109,3 +109,14 @@ model keys, paper secrets, or reviewer-private material here.
 - Public URL verified: http://101.47.158.17:8766/ returns the new panels and artifact paths.
 - Feishu document revision 43 adds section "十五、2026-07-11 PeerAssist 产物工作区与下一步动作".
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+
+## 2026-07-11 02:05 CST - PeerAssist workflow ribbon and live stream log
+
+- The confirmation console replaces the left directory-like navigator with a horizontal "审稿流程" workflow ribbon.
+- The workflow ribbon shows evidence queue, call trace, and human gate stages plus a human confirmation progress meter.
+- The human confirmation panel now renders a "实时事件" stream log for state, heartbeat, done, and error lifecycle updates.
+- The review queue includes an inline progress strip derived from recorded actions and pending concerns.
+- Public URL verified: http://101.47.158.17:8766/ returns "审稿流程", "人工确认完成度", "实时事件", data-agent-workflow, data-stream-log, and data-review-progress.
+- Browser verification: Playwright screenshots for desktop 1440x1000 and mobile 390x844 reported overflow=0 and no missing key selectors.
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+- Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.

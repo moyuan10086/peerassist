@@ -35,6 +35,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     evidence_count = _evidence_count(items)
     completed_event_count = _event_status_count(events, "completed")
     failed_event_count = _event_status_count(events, "failed")
+    review_progress = _review_progress(pending_count=pending_count, actions_count=actions_count)
+    runtime_health = _runtime_health_label(failed_event_count=failed_event_count)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -47,7 +49,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       --ink: #18201f;
       --muted: #6b7472;
       --line: #d9dfdc;
-      --paper: #f6f6f1;
+      --paper: #f4f7f7;
       --panel: #ffffff;
       --panel-soft: #f9faf6;
       --panel-tint: #eef6ff;
@@ -57,7 +59,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       --amber: #9a6500;
       --danger: #a33a3a;
       --violet: #5f4b8b;
-      --shadow: 0 18px 46px rgba(24, 32, 31, 0.10);
+      --shadow: 0 18px 42px rgba(20, 35, 35, 0.09);
       --mono-panel: #202724;
     }}
     * {{ box-sizing: border-box; }}
@@ -66,8 +68,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", ui-sans-serif, sans-serif;
       color: var(--ink);
       background:
-        linear-gradient(90deg, rgba(15, 118, 110, 0.04) 1px, transparent 1px),
-        linear-gradient(180deg, rgba(36, 88, 166, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 118, 110, 0.035) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(36, 88, 166, 0.03) 1px, transparent 1px),
         var(--paper);
       background-size: 42px 42px;
     }}
@@ -84,9 +86,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       gap: 20px;
       align-items: center;
       padding: 16px 24px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(246, 246, 241, 0.96);
+      border-bottom: 1px solid rgba(198, 220, 215, 0.24);
+      background: rgba(18, 30, 29, 0.96);
       backdrop-filter: blur(16px);
+      color: #f4fbf8;
     }}
     .topbar[data-stream-state="live"] .stream-dot {{ background: #14a076; box-shadow: 0 0 0 5px rgba(20, 160, 118, 0.15); }}
     .topbar[data-stream-state="polling"] .stream-dot {{ background: #c38b22; box-shadow: 0 0 0 5px rgba(195, 139, 34, 0.16); }}
@@ -102,13 +105,14 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-radius: 8px;
       display: grid;
       place-items: center;
-      color: var(--accent-strong);
-      background: #eef8f4;
+      color: #d8fff5;
+      background: #163f3b;
       font-weight: 800;
     }}
     h1 {{ margin: 0; font-size: 19px; line-height: 1.15; font-weight: 760; letter-spacing: 0; }}
-    .subtitle {{ margin-top: 3px; color: var(--muted); font-size: 12px; }}
-    .meta {{ color: var(--muted); font-size: 13px; }}
+    .subtitle {{ margin-top: 3px; color: #a9bbb7; font-size: 12px; }}
+    .subtitle code {{ color: #eef8f4; }}
+    .meta {{ color: #a9bbb7; font-size: 13px; }}
     .runtime-strip {{
       display: flex;
       flex-wrap: wrap;
@@ -124,6 +128,89 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       gap: 10px;
       align-items: stretch;
     }}
+    .workflow-band {{
+      width: min(1440px, calc(100% - 40px));
+      margin: 12px auto 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 12px 30px rgba(20, 35, 35, 0.06);
+      padding: 14px;
+    }}
+    .workflow-head {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 12px;
+    }}
+    .workflow-kicker {{
+      margin: 0;
+      font-size: 12px;
+      font-weight: 850;
+      color: #394340;
+    }}
+    .workflow-copy {{
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .workflow-meter {{
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+    }}
+    .workflow-meter strong {{
+      color: var(--ink);
+      font-size: 18px;
+      line-height: 1;
+    }}
+    .workflow-track, .compact-meter {{
+      height: 8px;
+      border-radius: 999px;
+      background: #e7ecea;
+      overflow: hidden;
+    }}
+    .workflow-track span, .compact-meter span {{
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--blue), var(--violet));
+    }}
+    .workflow-steps {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .workflow-step {{
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      min-height: 64px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: inherit;
+      text-decoration: none;
+      background: linear-gradient(180deg, #ffffff, #f8fbfa);
+    }}
+    .workflow-step:hover {{ border-color: #b8d8cf; transform: translateY(-1px); }}
+    .workflow-index {{
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: #132320;
+      color: #d8fff5;
+      font-size: 12px;
+      font-weight: 900;
+    }}
+    .workflow-title {{ font-weight: 820; font-size: 13px; }}
+    .workflow-detail {{ color: var(--muted); font-size: 12px; margin-top: 2px; }}
     .ops-card {{
       min-height: 76px;
       border: 1px solid var(--line);
@@ -315,6 +402,20 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       min-height: 100%;
       overflow: hidden;
     }}
+    .queue-toolbar {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 180px;
+      gap: 14px;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(90deg, #f6fbfa, #f8f8ff);
+    }}
+    .queue-progress-line {{
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
     .queue-body {{
       padding: 6px 16px 18px;
     }}
@@ -474,20 +575,26 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       padding: 12px;
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
       font-size: 12px;
+      max-height: 190px;
+      overflow: auto;
     }}
     .stream-console div + div {{ margin-top: 5px; }}
     .stream-key {{ color: #9ad0c4; }}
     .empty {{ padding: 40px 0; color: var(--muted); }}
     @media (max-width: 1100px) {{
       .ops-strip {{ grid-template-columns: 1fr 1fr; }}
+      .workflow-head {{ grid-template-columns: 1fr; }}
+      .workflow-steps {{ grid-template-columns: 1fr; }}
       .console-shell {{ grid-template-columns: 1fr; }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
       .topbar {{ grid-template-columns: 1fr; }}
       .ops-strip {{ width: calc(100% - 24px); grid-template-columns: 1fr; }}
+      .workflow-band {{ width: calc(100% - 24px); }}
       .console-shell {{ padding: 12px; }}
       .item {{ grid-template-columns: 1fr; }}
+      .queue-toolbar {{ grid-template-columns: 1fr; }}
       .right-stack {{ grid-template-columns: 1fr; }}
     }}
   </style>
@@ -498,7 +605,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <div class="mark">PA</div>
       <div>
         <h1>PeerAssist 论文审核辅助台</h1>
-        <div class="subtitle">面向 <code>{html.escape(paper_id)}</code> 的证据审稿与人工确认队列</div>
+        <div class="subtitle">面向 <code>{html.escape(paper_id)}</code> 的智能体证据流、人工确认与可追溯审稿工作台</div>
       </div>
     </div>
     <div class="meta runtime-strip">
@@ -511,7 +618,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     <div class="ops-card primary">
       <div class="ops-kicker">运行态指挥条</div>
       <div class="ops-value">{html.escape(_localized_mode(mode))}审稿</div>
-      <div class="ops-label">事件流、证据队列与人工闸门同步展示</div>
+      <div class="ops-label">事件流、证据队列与人工闸门同步展示 · {html.escape(runtime_health)}</div>
     </div>
     <div class="ops-card">
       <div class="ops-kicker">待人工确认</div>
@@ -534,6 +641,24 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <div class="ops-label">需要复核</div>
     </div>
   </section>
+  <section class="workflow-band" data-panel="session-navigator" data-agent-workflow>
+    <div class="workflow-head">
+      <div>
+        <p class="workflow-kicker">审稿流程</p>
+        <div class="workflow-copy">从证据队列进入，沿工具追踪核对来源，最后由审稿人逐条确认或改写。</div>
+      </div>
+      <div class="workflow-meter" data-review-progress>
+        <span>人工确认完成度</span>
+        <strong>{review_progress}%</strong>
+        <div class="workflow-track"><span style="width: {review_progress}%"></span></div>
+      </div>
+    </div>
+    <nav class="workflow-steps" aria-label="PeerAssist 审稿流程">
+      <a class="workflow-step" href="#review-queue"><span class="workflow-index">01</span><span><span class="workflow-title">证据队列</span><span class="workflow-detail">定位关注点、证据与良性解释</span></span></a>
+      <a class="workflow-step" href="#tool-trace"><span class="workflow-index">02</span><span><span class="workflow-title">调用追踪</span><span class="workflow-detail">核对 MCP、Skills 与内置能力生命周期</span></span></a>
+      <a class="workflow-step" href="#human-confirmation"><span class="workflow-index">03</span><span><span class="workflow-title">人工闸门</span><span class="workflow-detail">确认、改写、降级、删除或暂挂</span></span></a>
+    </nav>
+  </section>
   <main class="console-shell">
     <aside class="rail">
       <section class="panel" data-panel="run-summary">
@@ -552,17 +677,6 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           <div class="run-map-row"><span>代理层</span><span class="run-map-bar" style="width: {min(100, max(18, len(agent_runs) * 18))}%"></span></div>
           <div class="run-map-row"><span>人工队列</span><span class="run-map-bar" style="width: {min(100, max(18, pending_count * 24))}%"></span></div>
         </div>
-      </section>
-      <section class="panel" data-panel="session-navigator">
-        <div class="panel-header">
-          <p class="panel-title">会话导览</p>
-          <div class="panel-subtitle">按审稿流转顺序定位当前任务</div>
-        </div>
-        <nav class="session-nav" aria-label="PeerAssist 会话导览">
-          <a class="nav-step" href="#review-queue"><span class="step-index">1</span><span><span class="step-title">证据队列</span><span class="step-copy">先看关注点与证据定位</span></span></a>
-          <a class="nav-step" href="#tool-trace"><span class="step-index">2</span><span><span class="step-title">工具追踪</span><span class="step-copy">核对 MCP/Skills 调用过程</span></span></a>
-          <a class="nav-step" href="#human-confirmation"><span class="step-index">3</span><span><span class="step-title">人工闸门</span><span class="step-copy">确认、改写、降级或删除</span></span></a>
-        </nav>
       </section>
       <section class="panel" data-panel="next-actions">
         <div class="panel-header">
@@ -583,6 +697,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <div class="panel-header">
         <p class="panel-title">证据审稿队列</p>
         <div class="panel-subtitle">逐条确认、改写、降级、删除或暂挂关注点</div>
+      </div>
+      <div class="queue-toolbar" data-review-progress>
+        <div>
+          <span class="label">审核进度</span>
+          <div class="queue-progress-line">已记录 {actions_count} 个动作，当前仍有 {pending_count} 条待审稿人处理。</div>
+        </div>
+        <div class="compact-meter" aria-label="人工确认完成度"><span style="width: {review_progress}%"></span></div>
       </div>
       <div class="queue-body">{rows}</div>
     </section>
@@ -616,11 +737,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         <div class="confirmation-note">
           审稿人的每次编辑都会写入 <code>human_confirmations.json</code>，随后重新生成中文与英文报告。刷新页面时会从磁盘恢复队列、动作、路径和工具追踪状态。
         </div>
-        <div class="stream-console" data-panel="stream-console">
-          <div><span class="stream-key">事件：</span> state</div>
-          <div><span class="stream-key">通道：</span> /api/events + /api/state 兜底</div>
-          <div><span class="stream-key">约束：</span> 证据绑定的人工决策日志</div>
-        </div>
+        {_render_stream_console(events_count=len(events), actions_count=actions_count)}
         {_render_invocations(invocations)}
       </section>
     </aside>
@@ -654,6 +771,25 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const state = await response.json();
       updateRuntime(state, 'poll');
     }}
+    function escapeHtml(value) {{
+      return String(value).replace(/[&<>"']/g, (char) => ({{
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }}[char]));
+    }}
+    function appendStreamLine(kind, copy) {{
+      const consoleEl = document.querySelector('[data-stream-log]');
+      if (!consoleEl) return;
+      const row = document.createElement('div');
+      row.innerHTML = `<span class="stream-key">${{escapeHtml(kind)}}：</span>${{escapeHtml(copy)}}`;
+      consoleEl.prepend(row);
+      while (consoleEl.children.length > 6) {{
+        consoleEl.removeChild(consoleEl.lastElementChild);
+      }}
+    }}
     function updateRuntime(state, source) {{
       const runtime = state.runtime || {{}};
       const status = document.getElementById('runtime-status');
@@ -668,6 +804,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (topbar) {{
         topbar.dataset.streamState = source === 'stream' ? 'live' : 'polling';
       }}
+      if (source === 'stream') {{
+        appendStreamLine('state', `${{runtime.tool_event_count || 0}} 条追踪事件 · ${{state.pending_count || 0}} 条待确认`);
+      }}
     }}
     function connectEventStream() {{
       if (!window.EventSource) {{
@@ -681,11 +820,14 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       events.addEventListener('heartbeat', (event) => {{
         const streamStatus = document.getElementById('stream-status');
         if (streamStatus) streamStatus.textContent = '事件流心跳正常';
+        appendStreamLine('heartbeat', '通道存活，继续监听 PeerAssist 运行态');
       }});
       events.addEventListener('done', () => {{
+        appendStreamLine('done', '本次快照已发送完成，进入轮询兜底');
         events.close();
       }});
       events.onerror = () => {{
+        appendStreamLine('error', '事件流中断，切换到 /api/state 轮询');
         events.close();
         refreshRuntime().catch(() => {{}});
       }};
@@ -735,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHandler]:
     class ConfirmationHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             if self.path == "/" or self.path.startswith("/?"):
                 self._send_html(render_confirmation_page(run_dir=run_dir, paper_id=paper_id))
                 return
@@ -747,7 +889,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 return
             self.send_error(404, "not found")
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path != "/api/decision":
                 self.send_error(404, "not found")
                 return
@@ -830,7 +972,7 @@ def _sse_stream(payload: dict[str, Any]) -> bytes:
         f"event: state\ndata: {state_data}\n\n"
         f"event: heartbeat\ndata: {heartbeat}\n\n"
         f"event: done\ndata: {done}\n\n"
-    ).encode("utf-8")
+    ).encode()
 
 
 def _render_item(item: dict[str, Any]) -> str:
@@ -985,6 +1127,29 @@ def _render_next_actions(
         for title, copy in rows
     )
     return f'<div class="next-action-list">{rendered}</div>'
+
+
+def _render_stream_console(*, events_count: int, actions_count: int) -> str:
+    return f"""
+<div class="stream-console" data-panel="stream-console" data-stream-log>
+  <div><span class="stream-key">实时事件：</span> 等待 /api/events 首帧</div>
+  <div><span class="stream-key">当前快照：</span> {events_count} 条追踪事件 · {actions_count} 个动作</div>
+  <div><span class="stream-key">兜底通道：</span> /api/state 每 15 秒轮询</div>
+</div>
+"""
+
+
+def _review_progress(*, pending_count: int, actions_count: int) -> int:
+    total = max(0, pending_count) + max(0, actions_count)
+    if total == 0:
+        return 100
+    return round(max(0, actions_count) / total * 100)
+
+
+def _runtime_health_label(*, failed_event_count: int) -> str:
+    if failed_event_count > 0:
+        return f"{failed_event_count} 个调用需复核"
+    return "调用链健康"
 
 
 def _render_agent_timeline(agent_runs: list[Any]) -> str:

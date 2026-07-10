@@ -166,10 +166,15 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert 'data-panel="session-navigator"' in html
     assert "stream-chip" in html
     assert "运行态指挥条" in html
-    assert "会话导览" in html
+    assert "审稿流程" in html
+    assert "人工确认完成度" in html
+    assert "实时事件" in html
     assert "证据焦点" in html
     assert "产物工作区" in html
     assert "下一步动作" in html
+    assert "data-agent-workflow" in html
+    assert "data-stream-log" in html
+    assert "data-review-progress" in html
     assert 'data-panel="artifact-workspace"' in html
     assert 'data-panel="next-actions"' in html
     assert "confirmation_review_queue.json" in html
