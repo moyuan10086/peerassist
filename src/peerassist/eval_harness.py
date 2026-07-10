@@ -99,6 +99,31 @@ def evaluate_peerassist_records(
     missing_sample_ids = sorted(manifest_sample_ids - record_sample_ids)
     record_coverage_ok = not missing_sample_ids and not unknown_sample_ids and not duplicate_sample_ids
 
+    metrics = _compute_metrics(records)
+    targets = _target_results(
+        metrics,
+        freeze_policy_ok=bool(manifest["freeze_policy_ok"]),
+        manifest_integrity_ok=bool(manifest["integrity_ok"]),
+        record_coverage_ok=record_coverage_ok,
+    )
+    return {
+        "schema_version": "peerassist.eval_report.v1",
+        "dataset": DATASET_NAME,
+        "manifest_path": str(manifest_path),
+        "sample_count": len(records),
+        "manifest_sample_count": manifest["sample_count"],
+        "manifest_duplicate_sample_ids": manifest["duplicate_sample_ids"],
+        "manifest_missing_sha256_sample_ids": manifest["missing_sha256_sample_ids"],
+        "missing_record_sample_ids": missing_sample_ids,
+        "unknown_record_sample_ids": unknown_sample_ids,
+        "duplicate_record_sample_ids": duplicate_sample_ids,
+        "metrics": metrics,
+        "stratified_metrics": _stratified_metrics(records=records, manifest_samples=manifest["samples"]),
+        "targets": targets,
+    }
+
+
+def _compute_metrics(records: list[dict[str, Any]]) -> dict[str, float]:
     parse_success_rate = _rate(
         sum(1 for row in records if bool(row.get("parse_success"))),
         len(records),
@@ -138,8 +163,7 @@ def evaluate_peerassist_records(
         after="assisted_core_recall",
         before="baseline_core_recall",
     )
-
-    metrics = {
+    return {
         "document_parse_success_rate": parse_success_rate,
         "evidence_faithfulness_rate": evidence_faithfulness_rate,
         "deterministic_precision": pr["precision"],
@@ -151,26 +175,51 @@ def evaluate_peerassist_records(
         "review_retention_rate": review_retention_rate,
         "core_problem_recall_delta": core_problem_recall_delta,
     }
-    targets = _target_results(
-        metrics,
-        freeze_policy_ok=bool(manifest["freeze_policy_ok"]),
-        manifest_integrity_ok=bool(manifest["integrity_ok"]),
-        record_coverage_ok=record_coverage_ok,
-    )
-    return {
-        "schema_version": "peerassist.eval_report.v1",
-        "dataset": DATASET_NAME,
-        "manifest_path": str(manifest_path),
-        "sample_count": len(records),
-        "manifest_sample_count": manifest["sample_count"],
-        "manifest_duplicate_sample_ids": manifest["duplicate_sample_ids"],
-        "manifest_missing_sha256_sample_ids": manifest["missing_sha256_sample_ids"],
-        "missing_record_sample_ids": missing_sample_ids,
-        "unknown_record_sample_ids": unknown_sample_ids,
-        "duplicate_record_sample_ids": duplicate_sample_ids,
-        "metrics": metrics,
-        "targets": targets,
+
+
+def _stratified_metrics(
+    *, records: list[dict[str, Any]], manifest_samples: list[Any]
+) -> dict[str, dict[str, dict[str, Any]]]:
+    sample_lookup = {
+        str(row.get("sample_id")): row
+        for row in manifest_samples
+        if isinstance(row, dict) and row.get("sample_id")
     }
+    dimensions: dict[str, dict[str, list[dict[str, Any]]]] = {
+        "domain": {},
+        "pdf_type": {},
+        "problem_category": {},
+    }
+    sample_ids_by_group: dict[str, dict[str, list[str]]] = {
+        "domain": {},
+        "pdf_type": {},
+        "problem_category": {},
+    }
+
+    for record in records:
+        sample_id = str(record.get("sample_id") or "")
+        sample = sample_lookup.get(sample_id, {})
+        assignments = {
+            "domain": [_clean_group_value(sample.get("domain"), default="unknown_domain")],
+            "pdf_type": [_clean_group_value(sample.get("pdf_type"), default="unknown_pdf_type")],
+            "problem_category": _problem_categories(sample),
+        }
+        for dimension, values in assignments.items():
+            for value in values:
+                dimensions[dimension].setdefault(value, []).append(record)
+                sample_ids_by_group[dimension].setdefault(value, []).append(sample_id)
+
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for dimension, groups in dimensions.items():
+        result[dimension] = {}
+        for value in sorted(groups):
+            group_records = groups[value]
+            result[dimension][value] = {
+                "sample_count": len(group_records),
+                "sample_ids": sample_ids_by_group[dimension].get(value, []),
+                "metrics": _compute_metrics(group_records),
+            }
+    return result
 
 
 def _target_results(
@@ -211,6 +260,24 @@ def _rate(numerator: float, denominator: float) -> float:
     if denominator == 0:
         return 0.0
     return numerator / denominator
+
+
+def _clean_group_value(value: Any, *, default: str) -> str:
+    token = str(value or "").strip()
+    return token if token else default
+
+
+def _problem_categories(sample: dict[str, Any]) -> list[str]:
+    raw = sample.get("problem_categories")
+    if isinstance(raw, list):
+        values = [
+            _clean_group_value(item, default="")
+            for item in raw
+            if _clean_group_value(item, default="")
+        ]
+        return values or ["unknown_problem_category"]
+    value = _clean_group_value(sample.get("problem_category"), default="")
+    return [value] if value else ["unknown_problem_category"]
 
 
 def _number(row: dict[str, Any], key: str) -> float:
