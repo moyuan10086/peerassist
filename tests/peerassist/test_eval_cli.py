@@ -158,6 +158,60 @@ def test_eval_cli_record_command_writes_record_from_artifacts(tmp_path: Path) ->
     assert record["deterministic_tp"] == 1
 
 
+def test_eval_cli_batch_records_command_uses_manifest_run_and_gold_paths(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _seed_stage(run_dir)
+    gold_path = tmp_path / "gold.json"
+    records_path = tmp_path / "records.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    write_json_file(
+        gold_path,
+        {
+            "sample_id": "paper-001",
+            "gold_concerns": [{"id": "gold-1", "covered_by": ["concern_check_percentage_consistency_001"]}],
+            "deterministic_errors": [{"check_id": "check_percentage_consistency_001"}],
+            "evidence_checks": [{"concern_id": "concern_check_percentage_consistency_001", "faithful": True}],
+        },
+    )
+    write_json_file(
+        manifest_path,
+        {
+            "schema_version": "peerassist.eval_manifest.v1",
+            "dataset": "PeerAssist-Eval-v1",
+            "policy": {
+                "frozen_samples_must_not_enter_prompts": True,
+                "frozen_samples_must_not_enter_indexes": True,
+                "frozen_samples_must_not_enter_finetuning": True,
+            },
+            "samples": [
+                {
+                    "sample_id": "paper-001",
+                    "split": "frozen",
+                    "sha256": "abc",
+                    "run_dir": str(run_dir),
+                    "gold_path": str(gold_path),
+                }
+            ],
+        },
+    )
+
+    exit_code = eval_cli_main(
+        [
+            "batch-records",
+            "--manifest",
+            str(manifest_path),
+            "--out",
+            str(records_path),
+        ]
+    )
+
+    assert exit_code == 0
+    rows = load_eval_records(records_path)
+    assert len(rows) == 1
+    assert rows[0]["sample_id"] == "paper-001"
+    assert rows[0]["gold_concerns_covered"] == 1
+
+
 def test_peerassist_eval_console_script_is_registered() -> None:
     payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 

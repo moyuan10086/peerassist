@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from common.pipeline_context import write_json_file
-from peerassist.eval_harness import evaluate_peerassist_records
+from peerassist.eval_harness import evaluate_peerassist_records, load_eval_manifest
 from peerassist.eval_record_builder import build_eval_record_from_artifacts
 
 
@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--gold", required=True)
     record.add_argument("--out", required=True)
 
+    batch = subparsers.add_parser("batch-records", help="Build eval records for manifest samples.")
+    batch.add_argument("--manifest", required=True)
+    batch.add_argument("--out", required=True)
+
     parser.add_argument("--manifest", help=argparse.SUPPRESS)
     parser.add_argument("--records", help=argparse.SUPPRESS)
     parser.add_argument("--out", help=argparse.SUPPRESS)
@@ -75,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "batch-records":
+        result = build_records_from_manifest(manifest_path=Path(args.manifest), out_path=Path(args.out))
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if not result["skipped_sample_ids"] else 1
+
     if not args.command and args.manifest and args.records and args.out:
         # Backward-compatible aggregate mode for the original CLI shape.
         pass
@@ -99,6 +108,41 @@ def main(argv: list[str] | None = None) -> int:
     }
     print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["all_targets_passed"] else 1
+
+
+def build_records_from_manifest(*, manifest_path: Path, out_path: Path) -> dict[str, Any]:
+    manifest = load_eval_manifest(manifest_path)
+    records: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for sample in manifest["samples"]:
+        if not isinstance(sample, dict):
+            continue
+        sample_id = str(sample.get("sample_id") or "")
+        run_dir = str(sample.get("run_dir") or "")
+        gold_path = str(sample.get("gold_path") or "")
+        if not sample_id or not run_dir or not gold_path:
+            if sample_id:
+                skipped.append(sample_id)
+            continue
+        records.append(
+            build_eval_record_from_artifacts(
+                sample_id=sample_id,
+                run_dir=Path(run_dir),
+                gold_path=Path(gold_path),
+            )
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    return {
+        "schema_version": "peerassist.eval_batch_records_result.v1",
+        "records_path": str(out_path),
+        "records_count": len(records),
+        "skipped_sample_ids": skipped,
+    }
 
 
 if __name__ == "__main__":  # pragma: no cover
