@@ -132,3 +132,10 @@ def test_peerassist_confirm_server_console_script_is_registered() -> None:
         payload["project"]["scripts"]["peerassist-confirm-server"]
         == "peerassist.confirmation_server:main"
     )
+
+
+def test_confirmation_server_module_has_python_m_entrypoint() -> None:
+    source = Path("src/peerassist/confirmation_server.py").read_text(encoding="utf-8")
+
+    assert 'if __name__ == "__main__"' in source
+    assert "raise SystemExit(main())" in source

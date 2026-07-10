@@ -251,3 +251,7 @@ def _render_item(item: dict[str, Any]) -> str:
   <div class="actions">{buttons}</div>
 </section>
 """
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
