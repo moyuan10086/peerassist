@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from argparse import Namespace
 
 from common.config import Settings
-from pipeline_full import _apply_cli_env_overrides
+from pipeline_full import _apply_cli_env_overrides, parse_args
 
 
 def _args(*, disable_semantic_scholar: bool) -> Namespace:
@@ -43,3 +44,19 @@ def test_paper_search_is_enabled_by_default(monkeypatch) -> None:
     assert settings.paper_search_enabled is True
     assert settings.paper_search_provider == "arxiv"
     assert settings.paper_search_base_url is None
+
+
+def test_peerassist_mode_defaults_to_off(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["pipeline", "paper.pdf"])
+
+    args = parse_args()
+
+    assert args.peerassist_mode == "off"
+
+
+def test_peerassist_mode_accepts_fast(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["pipeline", "paper.pdf", "--peerassist-mode", "fast"])
+
+    args = parse_args()
+
+    assert args.peerassist_mode == "fast"

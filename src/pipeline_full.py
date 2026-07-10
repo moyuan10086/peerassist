@@ -17,6 +17,7 @@ from fact_generation.execution.stage_runner import run_execution_stage
 from fact_generation.positioning.stage_runner import run_positioning_stage
 from fact_generation.refcheck.stage_runner import run_refcheck_stage
 from llm.provider_capabilities import is_codex_provider
+from peerassist.stage_runner import run_peerassist_stage
 from preprocessing.parse.stage_runner import run_parse_stage
 from review.report.stage_runner import run_report_stage
 from review.teaser.stage_runner import run_teaser_stage
@@ -32,7 +33,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-_TOTAL_STAGES = 6
+_TOTAL_STAGES = 7
 
 
 def _log(msg: str) -> None:
@@ -187,9 +188,27 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         # explicit in the summary table.
         parse_status = "reused" if str(args.reuse_job_id or "").strip() else "ok"
         run_stats.record_module_status("parse", parse_status)
+    peerassist_mode = str(getattr(args, "peerassist_mode", "off") or "off").strip().lower()
+    if peerassist_mode == "off":
+        _log(f"[2/{_TOTAL_STAGES}] peerassist: skipped (use --peerassist-mode fast|standard|deep)")
+        run_stats.record_module_status("peerassist", "skipped")
+        peerassist_result = StageResult(status="skipped")
+    else:
+        peerassist_result = _run_stage(
+            2,
+            "peerassist",
+            lambda: run_peerassist_stage(
+                repo_root=repo_root,
+                run_dir=run_dir,
+                paper_key=paper_key,
+                paper_pdf=paper_pdf,
+                mode=peerassist_mode,
+            ),
+            stats_module="peerassist",
+        )
     enable_refcheck = bool(getattr(args, "enable_refcheck", False) or settings.reference_check_enabled)
     refcheck_result = _run_stage(
-        2,
+        3,
         "refcheck",
         lambda: run_refcheck_stage(
             repo_root=repo_root,
@@ -201,7 +220,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         stats_module="reference_check",
     )
     positioning_result = _run_stage(
-        3,
+        4,
         "positioning",
         lambda: run_positioning_stage(
             repo_root=repo_root,
@@ -210,7 +229,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         stats_module="analysis",
     )
     if not run_execution:
-        _log(f"[4/{_TOTAL_STAGES}] execution: skipped (use --run-execution to enable)")
+        _log(f"[5/{_TOTAL_STAGES}] execution: skipped (use --run-execution to enable)")
         run_stats.record_module_status("execution", "skipped")
         skipped_payload = ExecutionPayload(
             paper_key=paper_key,
@@ -227,7 +246,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         )
     else:
         execution_result = _run_stage(
-            4,
+            5,
             "execution",
             lambda: run_execution_stage(
                 run_dir=run_dir,
@@ -250,7 +269,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             stats_module="execution",
         )
     report_result = _run_stage(
-        5,
+        6,
         "report",
         lambda: run_report_stage(
             repo_root=repo_root,
@@ -259,12 +278,12 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         stats_module="report_generation",
     )
     if report_result.status == "failed":
-        _log(f"[6/{_TOTAL_STAGES}] teaser: skipped — report stage failed")
+        _log(f"[7/{_TOTAL_STAGES}] teaser: skipped — report stage failed")
         run_stats.record_module_status("teaser_figure", "skipped", warning="report stage failed")
         teaser_result = StageResult(status="skipped", error="report stage failed")
     else:
         teaser_result = _run_stage(
-            6,
+            7,
             "teaser",
             lambda: run_teaser_stage(run_dir=run_dir),
             stats_module="teaser_figure",
@@ -276,6 +295,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     results: dict[str, StageResult] = {
         "parse": parse_result,
+        "peerassist": peerassist_result,
         "refcheck": refcheck_result,
         "positioning": positioning_result,
         "execution": execution_result,
@@ -297,7 +317,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         stage_errors["report_pdf"] = report_pdf_error
 
     outputs: dict[str, str] = {}
-    for name in ("parse", "refcheck", "positioning", "execution"):
+    for name in ("parse", "peerassist", "refcheck", "positioning", "execution"):
         main = results[name].outputs.get("main")
         if main:
             outputs[name] = main
@@ -309,6 +329,13 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         ("report_pdf", report_result.outputs.get("pdf")),
         ("teaser_figure_prompt", teaser_result.outputs.get("prompt")),
         ("teaser_figure_image", teaser_result.outputs.get("image")),
+        ("peerassist_evidence_ledger", peerassist_result.outputs.get("evidence_ledger")),
+        ("peerassist_deterministic_checks", peerassist_result.outputs.get("deterministic_checks")),
+        ("peerassist_concerns", peerassist_result.outputs.get("concerns")),
+        ("peerassist_human_confirmations", peerassist_result.outputs.get("human_confirmations")),
+        ("peerassist_tool_trace", peerassist_result.outputs.get("tool_trace")),
+        ("peerassist_report_md", peerassist_result.outputs.get("report_md")),
+        ("peerassist_report_json", peerassist_result.outputs.get("report_json")),
     )
     for key, value in granular:
         if value:
@@ -336,6 +363,7 @@ def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "reference_check": refcheck_result.extra.get("reference_check") or {"enabled": enable_refcheck},
         "teaser_figure": teaser_result.extra.get("teaser_figure") or {},
         "paper_cutoff_date": cutoff.to_metadata() if cutoff is not None else None,
+        "peerassist": peerassist_result.extra or {"mode": peerassist_mode},
     }
 
     summary_path = run_dir / "full_pipeline_summary.json"
@@ -418,6 +446,15 @@ def parse_args() -> argparse.Namespace:
         "--enable-refcheck",
         action="store_true",
         help="Run RefCopilot reference-accuracy validation and append fabricated-reference findings to the final report.",
+    )
+    p.add_argument(
+        "--peerassist-mode",
+        choices=("off", "fast", "standard", "deep"),
+        default="off",
+        help=(
+            "Run PeerAssist review-aid artifacts. off preserves FactReview behavior; "
+            "fast builds the local evidence/check/concern/report backbone."
+        ),
     )
     p.add_argument(
         "--run-execution",

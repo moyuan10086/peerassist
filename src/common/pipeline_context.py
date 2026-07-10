@@ -42,6 +42,7 @@ _POSITIONING_STAGE_PATH: tuple[str, ...] = ("fact_generation", "positioning")
 _EXECUTION_STAGE_PATH: tuple[str, ...] = ("fact_generation", "execution")
 _REPORT_STAGE_PATH: tuple[str, ...] = ("review", "report")
 _TEASER_STAGE_PATH: tuple[str, ...] = ("review", "teaser")
+_PEERASSIST_STAGE_PATH: tuple[str, ...] = ("peerassist",)
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,11 @@ def report_stage_dir(run_dir: Path) -> Path:
 def teaser_stage_dir(run_dir: Path) -> Path:
     """Return ``run_dir/stages/review/teaser``."""
     return run_dir.joinpath("stages", *_TEASER_STAGE_PATH)
+
+
+def peerassist_stage_dir(run_dir: Path) -> Path:
+    """Return ``run_dir/stages/peerassist``."""
+    return run_dir.joinpath("stages", *_PEERASSIST_STAGE_PATH)
 
 
 # ── Snapshot paths ───────────────────────────────────────────────────────────
