@@ -268,6 +268,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistRunAgentReview" in html
     assert "peerassistCancelAgentReview" in html
     assert "peerassistRetryAgentReview" in html
+    assert "peerassistUpdatePdfAgentContext" in html
     assert "AbortController" in html
     assert "signal: controller.signal" in html
     assert "智能审稿已取消" in html
@@ -447,6 +448,19 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert 'data-pdf-agent-action="agent-review"' in html
     assert 'data-pdf-agent-action="selection-review"' in html
     assert 'data-pdf-agent-action="current-page"' in html
+    assert "data-pdf-agent-context-manifest" in html
+    assert 'data-pdf-agent-context-item="pdf"' in html
+    assert 'data-pdf-agent-context-item="evidence"' in html
+    assert 'data-pdf-agent-context-item="checks"' in html
+    assert 'data-pdf-agent-context-item="tools"' in html
+    assert 'data-pdf-agent-context-item="selection"' in html
+    assert 'data-pdf-agent-context-item="human"' in html
+    assert "智能审稿上下文装载清单" in html
+    assert "审稿上下文装载" in html
+    assert "已导入，可浏览与选区" in html
+    assert "数值/统计/引用线索" in html
+    assert "可追溯调用" in html
+    assert "逐条确认" in html
     assert "data-pdf-agent-run-controls" in html
     assert "data-pdf-agent-run-state" in html
     assert "data-pdf-agent-cancel" in html

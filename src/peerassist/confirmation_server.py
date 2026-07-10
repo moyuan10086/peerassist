@@ -860,6 +860,82 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 900;
       overflow-wrap: anywhere;
     }}
+    .pdf-agent-context-manifest {{
+      grid-column: 1 / -1;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background:
+        linear-gradient(90deg, rgba(18, 48, 43, 0.035), transparent 42%),
+        #fff;
+      padding: 9px 10px;
+    }}
+    .pdf-agent-context-head {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      color: #182723;
+      font-size: 11px;
+      font-weight: 920;
+    }}
+    .pdf-agent-context-subtitle {{
+      color: #66736f;
+      font-size: 10px;
+      font-weight: 800;
+      text-align: right;
+    }}
+    .pdf-agent-context-list {{
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }}
+    .pdf-agent-context-row {{
+      min-width: 0;
+      min-height: 58px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 7px;
+    }}
+    .pdf-agent-context-row[data-context-state="ready"] {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-agent-context-row[data-context-state="active"] {{
+      border-color: #0f766e;
+      background: #12302b;
+      color: #fff;
+    }}
+    .pdf-agent-context-row[data-context-state="waiting"] {{
+      border-color: #e4c783;
+      background: #fff8e6;
+    }}
+    .pdf-agent-context-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 920;
+    }}
+    .pdf-agent-context-row[data-context-state="active"] .pdf-agent-context-label {{
+      color: #9df2de;
+    }}
+    .pdf-agent-context-value {{
+      margin-top: 3px;
+      color: inherit;
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-agent-context-status {{
+      margin-top: 3px;
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 850;
+    }}
+    .pdf-agent-context-row[data-context-state="active"] .pdf-agent-context-status {{
+      color: #d8fff5;
+    }}
     .pdf-agent-phase-rail {{
       grid-column: 1 / -1;
       display: grid;
@@ -2150,6 +2226,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-reader-stage {{ min-height: 580px; height: 70vh; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-card:first-child {{ grid-column: 1 / -1; }}
+      .pdf-agent-context-list {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
@@ -2168,6 +2245,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-command-actions {{ justify-content: flex-start; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
       .pdf-agent-phase-rail {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-agent-context-list {{ grid-template-columns: 1fr 1fr; }}
       .pdf-tool-trace-list {{ grid-template-columns: 1fr; }}
       .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
@@ -2494,6 +2572,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           popover.dataset.visible = 'false';
           popover.removeAttribute('style');
         }}
+        updatePdfAgentContext();
         return;
       }}
       const clippedTrayText = text.length > 260 ? `${{text.slice(0, 260)}}...` : text;
@@ -2526,6 +2605,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           popover.style.top = `${{Math.round(top)}}px`;
         }}
       }}
+      updatePdfAgentContext();
     }}
     window.peerassistSetPdfSelection = setPdfSelectionEvidence;
     function setReviewFocusMode(enabled) {{
@@ -2588,6 +2668,68 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       latest.forEach((event) => list.appendChild(renderPdfToolTraceCard(event)));
     }}
     window.peerassistUpdatePdfToolTrace = updatePdfToolTrace;
+    function setPdfAgentContextItem(key, value, status, state) {{
+      const row = document.querySelector(`[data-pdf-agent-context-item="${{CSS.escape(key)}}"]`);
+      const valueEl = document.querySelector(`[data-pdf-agent-context-value="${{CSS.escape(key)}}"]`);
+      const statusEl = document.querySelector(`[data-pdf-agent-context-status="${{CSS.escape(key)}}"]`);
+      if (row && state) row.dataset.contextState = state;
+      if (valueEl && value) valueEl.textContent = value;
+      if (statusEl && status) statusEl.textContent = status;
+    }}
+    function isHumanResolvedQueueStatus(status) {{
+      return ['confirmed', 'rewritten', 'downgraded', 'deleted'].includes(String(status || '').toLowerCase());
+    }}
+    function updatePdfAgentContext(state = null) {{
+      const queueItems = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      const queueCount = queueItems.length;
+      const pendingFromDom = queueItems.filter((item) => !isHumanResolvedQueueStatus(item.dataset.concernStatus)).length;
+      const pendingCount = Number(state?.pending_count ?? pendingFromDom);
+      const evidenceAnchors = document.querySelectorAll('[data-evidence-anchor]').length;
+      const runtime = state?.runtime || {{}};
+      const traceEvents = Array.isArray(state?.tool_trace?.events) ? state.tool_trace.events.length : 0;
+      const toolEventCount = Number(runtime.tool_event_count ?? traceEvents);
+      const selected = window.peerassistSelectedEvidence || {{}};
+      const selectedText = String(selected.text || '');
+      const selectedPage = selected.page ? `第 ${{selected.page}} 页` : 'PDF 选区';
+      const currentPage = Number(window.peerassistCurrentPdfPage || 0);
+      setPdfAgentContextItem(
+        'pdf',
+        currentPage > 0 ? `正在核对第 ${{currentPage}} 页` : '已导入，可浏览与选区',
+        '主阅读面',
+        'ready'
+      );
+      setPdfAgentContextItem(
+        'evidence',
+        `${{evidenceAnchors || queueCount}} 个证据锚点 · ${{queueCount}} 条关注`,
+        '进入模型前绑定位置',
+        queueCount > 0 || evidenceAnchors > 0 ? 'ready' : 'waiting'
+      );
+      setPdfAgentContextItem(
+        'checks',
+        '数值/统计/引用线索',
+        '先规则后模型',
+        'ready'
+      );
+      setPdfAgentContextItem(
+        'tools',
+        `${{toolEventCount || 0}} 条可追溯事件`,
+        toolEventCount > 0 ? 'MCP/Skills 审计可展开' : '等待工具调用',
+        toolEventCount > 0 ? 'ready' : 'waiting'
+      );
+      setPdfAgentContextItem(
+        'selection',
+        selectedText ? `${{selectedPage}} · ${{selectedText.length}} 字` : '未选择 PDF 文本',
+        selectedText ? '选区将作为额外关注点' : '可选关注点',
+        selectedText ? 'active' : 'waiting'
+      );
+      setPdfAgentContextItem(
+        'human',
+        `${{pendingCount}} 条待确认 · ${{queueCount}} 条队列`,
+        pendingCount > 0 ? '等待审稿人逐条处理' : '当前无待确认项',
+        pendingCount > 0 ? 'active' : 'ready'
+      );
+    }}
+    window.peerassistUpdatePdfAgentContext = updatePdfAgentContext;
     function updatePdfRuntimePulse(state, source) {{
       const pulse = document.querySelector('[data-pdf-runtime-pulse]');
       if (!pulse) return;
@@ -2599,6 +2741,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (stateEl) stateEl.textContent = source === 'stream' ? '事件流已连接' : '轮询兜底中';
       if (pendingEl) pendingEl.textContent = `${{state.pending_count || 0}} 条`;
       if (eventsEl) eventsEl.textContent = `${{runtime.tool_event_count || 0}} 条`;
+      updatePdfAgentContext(state);
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3052,6 +3195,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       }});
     }});
     setAgentReviewRunState('idle');
+    updatePdfAgentContext();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -3277,6 +3421,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         updatePdfPageContext();
         syncPdfPageAnnotations();
         syncPdfRuntimePagePulse();
+        window.peerassistUpdatePdfAgentContext?.();
       }}
 
       function concernCountForPage(page) {{
@@ -4905,6 +5050,44 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
             <div class="pdf-agent-status-chip">
               <div class="pdf-agent-status-label">输出</div>
               <div class="pdf-agent-status-value">中文草稿</div>
+            </div>
+          </div>
+        </div>
+        <div class="pdf-agent-context-manifest" data-pdf-agent-context-manifest aria-label="智能审稿上下文装载清单">
+          <div class="pdf-agent-context-head">
+            <span>审稿上下文装载</span>
+            <span class="pdf-agent-context-subtitle">模型只读取可追溯来源；无证据内容进入待人工核查</span>
+          </div>
+          <div class="pdf-agent-context-list">
+            <div class="pdf-agent-context-row" data-pdf-agent-context-item="pdf" data-context-state="ready">
+              <div class="pdf-agent-context-label">PDF 原文</div>
+              <div class="pdf-agent-context-value" data-pdf-agent-context-value="pdf">已导入，可浏览与选区</div>
+              <div class="pdf-agent-context-status" data-pdf-agent-context-status="pdf">主阅读面</div>
+            </div>
+            <div class="pdf-agent-context-row" data-pdf-agent-context-item="evidence" data-context-state="ready">
+              <div class="pdf-agent-context-label">证据台账</div>
+              <div class="pdf-agent-context-value" data-pdf-agent-context-value="evidence">等待队列同步</div>
+              <div class="pdf-agent-context-status" data-pdf-agent-context-status="evidence">必绑定</div>
+            </div>
+            <div class="pdf-agent-context-row" data-pdf-agent-context-item="checks" data-context-state="ready">
+              <div class="pdf-agent-context-label">确定性核查</div>
+              <div class="pdf-agent-context-value" data-pdf-agent-context-value="checks">数值/统计/引用线索</div>
+              <div class="pdf-agent-context-status" data-pdf-agent-context-status="checks">先规则后模型</div>
+            </div>
+            <div class="pdf-agent-context-row" data-pdf-agent-context-item="tools" data-context-state="waiting">
+              <div class="pdf-agent-context-label">MCP/Skills</div>
+              <div class="pdf-agent-context-value" data-pdf-agent-context-value="tools">等待事件流同步</div>
+              <div class="pdf-agent-context-status" data-pdf-agent-context-status="tools">可追溯调用</div>
+            </div>
+            <div class="pdf-agent-context-row" data-pdf-agent-context-item="selection" data-context-state="waiting">
+              <div class="pdf-agent-context-label">当前选区</div>
+              <div class="pdf-agent-context-value" data-pdf-agent-context-value="selection">未选择 PDF 文本</div>
+              <div class="pdf-agent-context-status" data-pdf-agent-context-status="selection">可选关注点</div>
+            </div>
+            <div class="pdf-agent-context-row" data-pdf-agent-context-item="human" data-context-state="waiting">
+              <div class="pdf-agent-context-label">人工确认</div>
+              <div class="pdf-agent-context-value" data-pdf-agent-context-value="human">等待队列同步</div>
+              <div class="pdf-agent-context-status" data-pdf-agent-context-status="human">逐条确认</div>
             </div>
           </div>
         </div>
