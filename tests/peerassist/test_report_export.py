@@ -64,6 +64,25 @@ def test_export_includes_confirmed_rewritten_concerns_and_pending_appendix() -> 
     assert "## Pending Manual Checks" in markdown
     assert payload["confirmed_count"] == 1
     assert payload["pending_count"] == 1
+    assert payload["language"] == "en"
+
+
+def test_export_supports_chinese_report_template_without_rewriting_evidence() -> None:
+    concerns = concerns_from_checks([_lead_check()])
+
+    markdown, payload = export_peerassist_report(
+        paper_id="demo",
+        concerns=concerns,
+        evidence_lookup={"P01-L001": "第 1 页，第 1 行"},
+        language="zh",
+    )
+
+    assert "# PeerAssist 论文审核辅助报告" in markdown
+    assert "## 待人工确认的检查项" in markdown
+    assert "证据：" in markdown
+    assert "第 1 页，第 1 行" in markdown
+    assert "Reported percentage needs clarification" in markdown
+    assert payload["language"] == "zh"
 
 
 def test_export_omits_deleted_concerns() -> None:

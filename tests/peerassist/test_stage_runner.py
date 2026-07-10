@@ -43,12 +43,24 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
         "human_confirmations",
         "tool_trace",
         "report_md",
+        "report_en_md",
+        "report_zh_md",
         "report_json",
     ):
         assert key in result.outputs
         assert Path(result.outputs[key]).exists()
 
     report_payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
+    assert Path(result.outputs["report_en_md"]).read_text(encoding="utf-8").startswith(
+        "# PeerAssist Review Aid Report"
+    )
+    assert Path(result.outputs["report_zh_md"]).read_text(encoding="utf-8").startswith(
+        "# PeerAssist 论文审核辅助报告"
+    )
+    assert report_payload["localized_report_paths"] == {
+        "en": result.outputs["report_en_md"],
+        "zh": result.outputs["report_zh_md"],
+    }
     assert report_payload["parse_provider"]["provider_name"] == "mineru"
     assert report_payload["confirmation_bundle_path"] == result.outputs["confirmation_bundle"]
     assert report_payload["agent_results_path"] == result.outputs["agent_results"]

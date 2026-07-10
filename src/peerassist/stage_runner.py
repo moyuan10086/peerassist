@@ -258,6 +258,13 @@ def run_peerassist_stage(
         paper_id=paper_key,
         concerns=confirmed_concerns,
         evidence_lookup=evidence_lookup,
+        language="en",
+    )
+    report_zh_md, _report_zh_payload = export_peerassist_report(
+        paper_id=paper_key,
+        concerns=confirmed_concerns,
+        evidence_lookup=evidence_lookup,
+        language="zh",
     )
     report_payload["agent_results_path"] = str(agent_results_path)
     report_payload["capability_invocations_path"] = str(capability_invocations_path)
@@ -276,8 +283,16 @@ def run_peerassist_stage(
             "External OCR capabilities are not enabled; using local FactReview/MinerU parse artifacts."
         )
     report_md_path = out_dir / "peerassist_report.md"
+    report_en_md_path = out_dir / "peerassist_report.en.md"
+    report_zh_md_path = out_dir / "peerassist_report.zh.md"
     report_json_path = out_dir / "peerassist_report.json"
     _write_text(report_md_path, report_md)
+    _write_text(report_en_md_path, report_md)
+    _write_text(report_zh_md_path, report_zh_md)
+    report_payload["localized_report_paths"] = {
+        "en": str(report_en_md_path),
+        "zh": str(report_zh_md_path),
+    }
     write_json_file(report_json_path, report_payload)
 
     if normalized_mode in {"standard", "deep"}:
@@ -299,6 +314,8 @@ def run_peerassist_stage(
             "human_confirmations": str(confirmations_path),
             "tool_trace": str(out_dir / "tool_trace.jsonl"),
             "report_md": str(report_md_path),
+            "report_en_md": str(report_en_md_path),
+            "report_zh_md": str(report_zh_md_path),
             "report_json": str(report_json_path),
         },
         extra={"mode": normalized_mode, "evidence_items": len(ledger.items), "checks": len(checks)},
