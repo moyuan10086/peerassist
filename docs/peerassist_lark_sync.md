@@ -38,3 +38,11 @@ model keys, paper secrets, or reviewer-private material here.
 - Eval record building now counts active concerns with bound evidence IDs but unsupported audited facts as unevidenced_new_facts.
 - This prevents the no-evidence-new-fact rate from being under-reported when a concern cites evidence but introduces unsupported numeric content.
 - Verification: .venv/bin/python -m pytest -q -> 367 passed, 1 skipped, 3 deselected.
+
+## 2026-07-10 23:53 CST - Paired crossover recall regression diagnostics
+
+- GitHub branch: https://github.com/moyuan10086/peerassist/tree/peerassist-mvp
+- Commit: 4ed68ef feat: flag paired crossover recall regressions
+- Reviewer crossover analysis now emits paired_reviewer_records by sample_id and reviewer_id with baseline_core_recall, assisted_core_recall, delta, and regression flag.
+- Added recall_regression_warnings so the real reviewer experiment can catch reviewer/sample-level core recall drops instead of relying only on aggregate mean delta.
+- Verification: .venv/bin/python -m pytest -q -> 368 passed, 1 skipped, 3 deselected.
