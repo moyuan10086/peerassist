@@ -116,6 +116,9 @@ all = [
 [project.urls]
 Homepage = "https://github.com/DEFENSE-SEU/FactReview"
 
+[project.scripts]
+peerassist-confirm = "peerassist.confirmation_cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = [
   "src/agent_runtime",
