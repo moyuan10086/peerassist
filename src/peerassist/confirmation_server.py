@@ -519,6 +519,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 11px;
       font-weight: 780;
     }}
+    .paper-chip.focus-review-button {{
+      cursor: pointer;
+      color: #ffffff;
+      border-color: #22302d;
+      background: #22302d;
+    }}
+    .paper-chip.focus-review-button[aria-pressed="true"] {{
+      border-color: #b8d8cf;
+      color: var(--accent-strong);
+      background: #eef8f4;
+    }}
     .paper-canvas {{
       display: grid;
       grid-template-columns: minmax(0, 1fr);
@@ -1007,6 +1018,26 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       max-height: calc(100vh - 96px);
       overflow: auto;
     }}
+    body[data-review-focus="true"] .ops-strip,
+    body[data-review-focus="true"] .workflow-band,
+    body[data-review-focus="true"] .right-stack {{
+      display: none;
+    }}
+    body[data-review-focus="true"] .console-shell {{
+      width: min(1920px, 100%);
+      grid-template-columns: minmax(0, 1fr);
+      padding-top: 8px;
+    }}
+    body[data-review-focus="true"] .paper-review-stage {{
+      gap: 12px;
+    }}
+    body[data-review-focus="true"] .pdf-reader-stage {{
+      min-height: 820px;
+      height: calc(100vh - 176px);
+    }}
+    body[data-review-focus="true"] .source-pdf-shell {{
+      min-height: 820px;
+    }}
     .review-inspector {{
       border-color: #b8d8cf;
       background: linear-gradient(180deg, #ffffff, #f8fcfb);
@@ -1353,7 +1384,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
   </style>
 </head>
-<body data-peerassist-agent-console>
+<body data-peerassist-agent-console data-review-focus="false">
   <header class="topbar" data-stream-state="connecting">
     <div class="brand">
       <div class="mark">PA</div>
@@ -1619,6 +1650,19 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       meta.textContent = page > 0 ? `PDF 第 ${{page}} 页选区 · ${{text.length}} 字` : `PDF 选区 · ${{text.length}} 字`;
     }}
     window.peerassistSetPdfSelection = setPdfSelectionEvidence;
+    function setReviewFocusMode(enabled) {{
+      const isEnabled = Boolean(enabled);
+      document.body.dataset.reviewFocus = String(isEnabled);
+      document.querySelectorAll('[data-focus-review-toggle]').forEach((button) => {{
+        button.setAttribute('aria-pressed', String(isEnabled));
+        button.textContent = isEnabled ? '退出专注' : '专注审稿';
+      }});
+      window.setTimeout(() => {{
+        window.peerassistPdfRenderCurrentPage?.();
+      }}, 180);
+      showToast(isEnabled ? '已进入专注审稿模式' : '已退出专注审稿模式');
+    }}
+    window.peerassistSetReviewFocusMode = setReviewFocusMode;
     function applyTraceFilter(status) {{
       const events = Array.from(document.querySelectorAll('.trace-list .trace-event'));
       let visibleCount = 0;
@@ -1785,6 +1829,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }});
     document.querySelectorAll('[data-queue-search]').forEach((input) => {{
       input.addEventListener('input', () => applyQueueFilter());
+    }});
+    document.querySelectorAll('[data-focus-review-toggle]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        setReviewFocusMode(document.body.dataset.reviewFocus !== 'true');
+      }});
     }});
     document.querySelectorAll('[data-pdf-page-filter-current]').forEach((button) => {{
       button.addEventListener('click', () => {{
@@ -2099,6 +2148,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         setStatus(`第 ${{pageNumber}} / ${{pdfDoc.numPages}} 页 · ${{Math.round(scale * 100)}}%`);
         updateButtons();
       }}
+      window.peerassistPdfRenderCurrentPage = () => {{
+        if (!pdfDoc) return Promise.resolve();
+        fitWidth = true;
+        return renderPage().catch(() => {{}});
+      }};
 
       pdfjsLib.getDocument('/paper.pdf').promise
         .then((document) => {{
@@ -3076,6 +3130,7 @@ def _render_paper_review_surface(
     <span class="paper-chip">证据锚点 {html.escape(evidence_id)}</span>
     {pdf_link}
     <a class="paper-chip" href="#review-queue">跳转队列</a>
+    <button class="paper-chip focus-review-button" type="button" data-focus-review-toggle aria-pressed="false">专注审稿</button>
   </div>
   <div class="paper-canvas">
     {source_document}
@@ -3097,6 +3152,7 @@ def _render_source_pdf_viewer() -> str:
           <button class="pdf-icon-button" type="button" title="缩小" aria-label="缩小" data-pdf-action="zoom-out">−</button>
           <button class="pdf-icon-button" type="button" title="放大" aria-label="放大" data-pdf-action="zoom-in">＋</button>
           <button class="pdf-icon-button" type="button" title="适应宽度" aria-label="适应宽度" data-pdf-action="fit">⤢</button>
+          <button class="inline-button" type="button" data-focus-review-toggle aria-pressed="false">专注审稿</button>
         </div>
       </div>
       <div class="pdf-page-rail" data-pdf-page-rail aria-label="PDF 页码导航">

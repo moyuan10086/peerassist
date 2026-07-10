@@ -300,6 +300,14 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-pdf-page-jump" in html
     assert "data-pdf-concern-count" in html
     assert "data-has-concern" in html
+    assert "data-focus-review-toggle" in html
+    assert "data-review-focus" in html
+    assert "setReviewFocusMode" in html
+    assert "peerassistPdfRenderCurrentPage" in html
+    assert "专注审稿" in html
+    assert "退出专注" in html
+    assert "已进入专注审稿模式" in html
+    assert "已退出专注审稿模式" in html
     assert "pdf-page-badge" in html
     assert "本页 ${count} 条审稿关注" in html
     assert "data-pdf-selection-tray" in html
@@ -331,6 +339,8 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-page-next-concern" in html
     assert "只看本页队列" in html
     assert "下一关注页" in html
+    assert "data-focus-review-toggle" in html
+    assert "专注审稿" in html
     assert "data-pdf-selection-review" in html
     assert "data-pdf-selection-use" in html
     assert "基于选区审稿" in html
