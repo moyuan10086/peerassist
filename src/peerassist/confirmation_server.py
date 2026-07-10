@@ -1292,6 +1292,60 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       gap: 6px;
       align-items: center;
     }}
+    .pdf-selection-popover {{
+      position: absolute;
+      z-index: 8;
+      display: none;
+      width: min(340px, calc(100% - 28px));
+      border: 1px solid rgba(15, 118, 110, 0.38);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow: 0 18px 36px rgba(20, 35, 35, 0.22);
+      padding: 10px;
+    }}
+    .pdf-selection-popover[data-visible="true"] {{
+      display: grid;
+      gap: 8px;
+    }}
+    .pdf-selection-popover::before {{
+      content: "";
+      position: absolute;
+      left: 18px;
+      top: -7px;
+      width: 12px;
+      height: 12px;
+      border-left: 1px solid rgba(15, 118, 110, 0.38);
+      border-top: 1px solid rgba(15, 118, 110, 0.38);
+      background: rgba(255, 255, 255, 0.98);
+      transform: rotate(45deg);
+    }}
+    .pdf-selection-popover-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #0f766e;
+      font-size: 10px;
+      font-weight: 920;
+    }}
+    .pdf-selection-popover-meta {{
+      color: #7a4a0b;
+      font-size: 10px;
+      font-weight: 900;
+      white-space: nowrap;
+    }}
+    .pdf-selection-popover-quote {{
+      color: #25322f;
+      font-size: 12px;
+      line-height: 1.35;
+      max-height: 52px;
+      overflow: hidden;
+    }}
+    .pdf-selection-popover-actions {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px;
+    }}
     .pdf-reader-stage {{
       position: relative;
       min-height: 780px;
@@ -2394,20 +2448,55 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     function setPdfSelectionEvidence(payload) {{
       const text = String(payload?.text || '').replace(/\\s+/g, ' ').trim();
       const page = Number(payload?.page || 0);
+      const rect = payload?.rect || null;
       const tray = document.querySelector('[data-pdf-selection-tray]');
       const quote = document.querySelector('[data-pdf-selection-quote]');
       const meta = document.querySelector('[data-pdf-selection-meta]');
+      const stage = document.querySelector('[data-pdf-stage]');
+      const popover = document.querySelector('[data-pdf-selection-popover]');
+      const popoverQuote = document.querySelector('[data-pdf-selection-popover-quote]');
+      const popoverMeta = document.querySelector('[data-pdf-selection-popover-meta]');
       window.peerassistSelectedEvidence = {{text, page: page > 0 ? page : null}};
-      if (!tray || !quote || !meta) return;
       if (!text) {{
-        tray.hidden = true;
-        quote.textContent = '';
-        meta.textContent = '尚未选择 PDF 文字';
+        if (tray) tray.hidden = true;
+        if (quote) quote.textContent = '';
+        if (meta) meta.textContent = '尚未选择 PDF 文字';
+        if (popover) {{
+          popover.dataset.visible = 'false';
+          popover.removeAttribute('style');
+        }}
         return;
       }}
-      tray.hidden = false;
-      quote.textContent = text.length > 260 ? `${{text.slice(0, 260)}}...` : text;
-      meta.textContent = page > 0 ? `PDF 第 ${{page}} 页选区 · ${{text.length}} 字` : `PDF 选区 · ${{text.length}} 字`;
+      const clippedTrayText = text.length > 260 ? `${{text.slice(0, 260)}}...` : text;
+      const clippedPopoverText = text.length > 180 ? `${{text.slice(0, 180)}}...` : text;
+      const metaCopy = page > 0 ? `PDF 第 ${{page}} 页选区 · ${{text.length}} 字` : `PDF 选区 · ${{text.length}} 字`;
+      if (tray && quote && meta) {{
+        tray.hidden = false;
+        quote.textContent = clippedTrayText;
+        meta.textContent = metaCopy;
+      }}
+      if (popover && popoverQuote && popoverMeta) {{
+        popoverQuote.textContent = clippedPopoverText;
+        popoverMeta.textContent = metaCopy;
+        popover.dataset.visible = 'true';
+        if (stage && rect) {{
+          const stageRect = stage.getBoundingClientRect();
+          const popoverWidth = 340;
+          const left = Math.max(
+            12,
+            Math.min(
+              stage.clientWidth - Math.min(popoverWidth, stage.clientWidth - 28) - 12,
+              Number(rect.left || 0) - stageRect.left + stage.scrollLeft
+            )
+          );
+          const top = Math.max(
+            12,
+            Number(rect.bottom || 0) - stageRect.top + stage.scrollTop + 10
+          );
+          popover.style.left = `${{Math.round(left)}}px`;
+          popover.style.top = `${{Math.round(top)}}px`;
+        }}
+      }}
     }}
     window.peerassistSetPdfSelection = setPdfSelectionEvidence;
     function setReviewFocusMode(enabled) {{
@@ -3264,7 +3353,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           (anchorNode && textLayer?.contains(anchorNode)) ||
           (focusNode && textLayer?.contains(focusNode));
         if (!isPdfSelection) return;
-        window.peerassistSetPdfSelection?.({{text, page: pageNumber}});
+        const selectionRect = selection.getRangeAt(0).getBoundingClientRect();
+        window.peerassistSetPdfSelection?.({{
+          text,
+          page: pageNumber,
+          rect: {{
+            left: selectionRect.left,
+            top: selectionRect.top,
+            right: selectionRect.right,
+            bottom: selectionRect.bottom
+          }}
+        }});
       }}
 
       reader.addEventListener('mouseup', () => {{
@@ -4795,6 +4894,18 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
         </div>
       </div>
       <div class="pdf-reader-stage" data-pdf-stage>
+        <div class="pdf-selection-popover" data-pdf-selection-popover data-visible="false" aria-label="PDF 选区审稿浮层">
+          <div class="pdf-selection-popover-head">
+            <span>选区证据</span>
+            <span class="pdf-selection-popover-meta" data-pdf-selection-popover-meta>PDF 选区</span>
+          </div>
+          <div class="pdf-selection-popover-quote" data-pdf-selection-popover-quote></div>
+          <div class="pdf-selection-popover-actions">
+            <button class="inline-button primary" type="button" data-pdf-selection-use>基于选区审稿</button>
+            <button class="inline-button" type="button" data-pdf-selection-copy>复制</button>
+            <button class="inline-button" type="button" data-pdf-selection-clear>清空</button>
+          </div>
+        </div>
         <div class="pdf-loading" data-pdf-loading>正在渲染论文页面</div>
         <div class="pdf-page-wrap" data-pdf-page-wrap>
           <canvas class="pdf-page-canvas" data-pdf-canvas aria-label="论文 PDF 当前页"></canvas>
