@@ -681,6 +681,53 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-color: #e4c783;
       background: #fff8e6;
     }}
+    .pdf-activity-feed {{
+      display: grid;
+      gap: 6px;
+      padding: 9px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #fbfdfc;
+    }}
+    .pdf-activity-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 900;
+    }}
+    .pdf-activity-list {{
+      display: grid;
+      gap: 5px;
+      max-height: 86px;
+      overflow: auto;
+    }}
+    .pdf-activity-row {{
+      display: grid;
+      grid-template-columns: 74px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      border: 1px solid #e0e7e4;
+      border-radius: 8px;
+      background: #fff;
+      padding: 6px 8px;
+      font-size: 11px;
+    }}
+    .pdf-activity-kind {{
+      color: var(--accent-strong);
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-activity-copy {{
+      color: #3c4946;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-activity-empty {{
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    .pdf-activity-empty[hidden] {{ display: none; }}
     .pdf-page-button {{
       position: relative;
       width: auto;
@@ -1738,14 +1785,29 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         "'": '&#39;'
       }}[char]));
     }}
+    function appendPdfActivityLine(kind, copy) {{
+      const feed = document.querySelector('[data-pdf-activity-list]');
+      const empty = document.querySelector('[data-pdf-activity-empty]');
+      if (!feed) return;
+      const row = document.createElement('div');
+      row.className = 'pdf-activity-row';
+      row.innerHTML = `<span class="pdf-activity-kind">${{escapeHtml(kind)}}</span><span class="pdf-activity-copy">${{escapeHtml(copy)}}</span>`;
+      feed.prepend(row);
+      if (empty) empty.hidden = true;
+      while (feed.children.length > 4) {{
+        feed.removeChild(feed.lastElementChild);
+      }}
+    }}
     function appendStreamLine(kind, copy) {{
       const consoleEl = document.querySelector('[data-stream-log]');
-      if (!consoleEl) return;
-      const row = document.createElement('div');
-      row.innerHTML = `<span class="stream-key">${{escapeHtml(kind)}}：</span>${{escapeHtml(copy)}}`;
-      consoleEl.prepend(row);
-      while (consoleEl.children.length > 6) {{
-        consoleEl.removeChild(consoleEl.lastElementChild);
+      appendPdfActivityLine(kind, copy);
+      if (consoleEl) {{
+        const row = document.createElement('div');
+        row.innerHTML = `<span class="stream-key">${{escapeHtml(kind)}}：</span>${{escapeHtml(copy)}}`;
+        consoleEl.prepend(row);
+        while (consoleEl.children.length > 6) {{
+          consoleEl.removeChild(consoleEl.lastElementChild);
+        }}
       }}
     }}
     let toastTimer = null;
@@ -3433,6 +3495,14 @@ def _render_source_pdf_viewer() -> str:
           <div class="pdf-runtime-value" data-pdf-runtime-page>等待 PDF</div>
         </div>
       </div>
+      <section class="pdf-activity-feed" data-pdf-activity-feed aria-label="PDF 审稿近期事件">
+        <div class="pdf-activity-head">
+          <span>PDF 审稿近期事件</span>
+          <span>最近</span>
+        </div>
+        <div class="pdf-activity-list" data-pdf-activity-list></div>
+        <div class="pdf-activity-empty" data-pdf-activity-empty>等待审稿事件流。</div>
+      </section>
       <div class="pdf-page-context" data-pdf-page-context>
         <div>
           <div class="pdf-page-context-title" data-pdf-page-context-title>正在统计本页审稿关注</div>

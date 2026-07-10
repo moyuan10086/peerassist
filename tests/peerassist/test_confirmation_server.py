@@ -299,6 +299,7 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "handlePdfReviewCommand" in html
     assert "updatePdfRuntimePulse" in html
     assert "syncPdfRuntimePagePulse" in html
+    assert "appendPdfActivityLine" in html
     assert "data-pdf-runtime-pulse" in html
     assert "data-pdf-runtime-state" in html
     assert "data-pdf-runtime-pending" in html
@@ -366,6 +367,9 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-runtime-events" in html
     assert "data-pdf-runtime-page" in html
     assert "任务流连接中" in html
+    assert "data-pdf-activity-feed" in html
+    assert "data-pdf-activity-empty" in html
+    assert "等待审稿事件流" in html
     assert "data-pdf-page-annotations" in html
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
