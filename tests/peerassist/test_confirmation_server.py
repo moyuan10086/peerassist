@@ -242,9 +242,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "paper-highlight" in html
     assert "data-margin-comment" in html
     assert "data-paper-concern" in html
+    assert "data-pdf-page" in html
     assert "查看原文高亮" in html
     assert "定位队列" in html
     assert "focusAnnotation" in html
+    assert "peerassistPdfGoToPage" in html
+    assert "已跳转到 PDF 第" in html
     assert "已定位到论文高亮" in html
     assert "已定位到审稿队列" in html
     assert "页边批注" in html

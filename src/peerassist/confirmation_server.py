@@ -6,6 +6,7 @@ import argparse
 import html
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -1278,7 +1279,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         delete node.dataset.active;
       }});
     }}
-    function focusAnnotation(concernId, evidenceId, target) {{
+    function focusAnnotation(concernId, evidenceId, target, pdfPage) {{
       clearAnnotationActiveState();
       const item = concernId ? document.querySelector(`[data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
       const highlight = evidenceId ? document.querySelector(`[data-evidence-anchor="${{CSS.escape(evidenceId)}}"]`) : null;
@@ -1289,6 +1290,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const scrollTarget = target === 'queue' ? item : highlight || comment;
       if (scrollTarget) {{
         scrollTarget.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+      }}
+      const targetPage = Number(pdfPage || item?.dataset.pdfPage || comment?.dataset.pdfPage || 0);
+      if (targetPage > 0 && window.peerassistPdfGoToPage) {{
+        window.peerassistPdfGoToPage(targetPage)
+          .then(() => showToast(`已跳转到 PDF 第 ${{targetPage}} 页`))
+          .catch(() => showToast('PDF 跳页未完成'));
+        return;
       }}
       showToast(target === 'queue' ? '已定位到审稿队列' : '已定位到论文高亮');
     }}
@@ -1349,18 +1357,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }});
     document.querySelectorAll('[data-jump-concern]').forEach((button) => {{
       button.addEventListener('click', () => {{
-        focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue');
+        focusAnnotation(button.dataset.jumpConcern || '', button.dataset.paperTarget || '', 'queue', button.dataset.pdfPage || '');
       }});
     }});
     document.querySelectorAll('.paper-comment').forEach((comment) => {{
       comment.addEventListener('click', (event) => {{
         if (event.target.closest('button')) return;
-        focusAnnotation(comment.dataset.paperConcern || '', comment.dataset.marginComment || '', 'queue');
+        focusAnnotation(comment.dataset.paperConcern || '', comment.dataset.marginComment || '', 'queue', comment.dataset.pdfPage || '');
       }});
     }});
     document.querySelectorAll('[data-paper-target]:not([data-jump-concern])').forEach((button) => {{
       button.addEventListener('click', () => {{
-        focusAnnotation(button.dataset.paperConcern || '', button.dataset.paperTarget || '', 'paper');
+        focusAnnotation(button.dataset.paperConcern || '', button.dataset.paperTarget || '', 'paper', button.dataset.pdfPage || '');
       }});
     }});
     document.querySelectorAll('[data-agent-review-start]').forEach((button) => {{
@@ -1434,6 +1442,14 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
             (action === 'next' && pdfDoc && pageNumber >= pdfDoc.numPages);
         }});
       }}
+
+      window.peerassistPdfGoToPage = async (page) => {{
+        if (!pdfDoc) throw new Error('PDF 尚未载入');
+        const nextPage = Math.max(1, Math.min(pdfDoc.numPages, Number(page) || 1));
+        pageNumber = nextPage;
+        await renderPage();
+        stage?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+      }};
 
       function stageWidth() {{
         return Math.max(360, (stage?.clientWidth || 780) - 36);
@@ -2245,9 +2261,11 @@ def _render_item(item: dict[str, Any]) -> str:
     first_evidence = next((row for row in evidence if isinstance(row, dict)), {})
     concern_id = str(item.get("id") or "")
     evidence_anchor = str(first_evidence.get("id") or concern_id)
+    pdf_page = _evidence_pdf_page(first_evidence)
+    pdf_page_attr = f' data-pdf-page="{pdf_page}"' if pdf_page is not None else ""
     evidence_rows = "".join(
         (
-            '<div class="evidence-row">'
+            f'<div class="evidence-row"{_evidence_pdf_page_attr(row)}>'
             f"<code>{html.escape(str(row.get('id', '')))}</code>"
             f"<span>{html.escape(str(row.get('locator', '')))}</span>"
             "</div>"
@@ -2264,7 +2282,7 @@ def _render_item(item: dict[str, Any]) -> str:
     )
     buttons = (
         f'<button type="button" data-paper-target="{html.escape(evidence_anchor, quote=True)}" '
-        f'data-paper-concern="{html.escape(concern_id, quote=True)}">查看原文高亮</button>'
+        f'data-paper-concern="{html.escape(concern_id, quote=True)}"{pdf_page_attr}>查看原文高亮</button>'
         + buttons
     )
     source_agents = item.get("source_agent_ids") if isinstance(item.get("source_agent_ids"), list) else []
@@ -2274,7 +2292,7 @@ def _render_item(item: dict[str, Any]) -> str:
     )
     previous_text = html.escape(str(item.get("author_action") or ""), quote=True)
     return f"""
-<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-previous-text="{previous_text}">
+<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-previous-text="{previous_text}"{pdf_page_attr}>
   <div>
     <div class="tags">
       <span class="tag">{html.escape(_localized_status(str(item.get('status', ''))))}</span>
@@ -2291,6 +2309,30 @@ def _render_item(item: dict[str, Any]) -> str:
   <div class="actions">{buttons}</div>
 </section>
 """
+
+
+def _evidence_pdf_page_attr(row: dict[str, Any]) -> str:
+    page = _evidence_pdf_page(row)
+    return f' data-pdf-page="{page}"' if page is not None else ""
+
+
+def _evidence_pdf_page(row: dict[str, Any]) -> int | None:
+    raw_page = row.get("page")
+    if isinstance(raw_page, int) and raw_page > 0:
+        return raw_page
+    if isinstance(raw_page, str) and raw_page.strip().isdigit():
+        parsed = int(raw_page.strip())
+        return parsed if parsed > 0 else None
+    locator = str(row.get("locator") or "")
+    match = re.search(r"(?:page|p\.?|第)\s*(\d+)", locator, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    evidence_id = str(row.get("id") or "")
+    match = re.match(r"P(\d+)-", evidence_id, flags=re.IGNORECASE)
+    if match:
+        parsed = int(match.group(1))
+        return parsed if parsed > 0 else None
+    return None
 
 
 def _evidence_count(items: list[Any]) -> int:
@@ -2506,16 +2548,17 @@ def _render_margin_comments(
         evidence_id = str(first_evidence.get("id") or f"C{position:02d}")
         concern_id = str(item.get("id") or "")
         locator = str(first_evidence.get("locator") or "未标注位置")
+        pdf_page_attr = _evidence_pdf_page_attr(first_evidence)
         title = _localized_copy(str(item.get("title") or "待核查关注点"))
         action = _localized_copy(str(item.get("author_action") or "请审稿人确认该关注点。"))
         rows.append(
             f"""
-<div class="paper-comment" data-margin-comment="{html.escape(evidence_id, quote=True)}" data-paper-concern="{html.escape(concern_id, quote=True)}">
+<div class="paper-comment" data-margin-comment="{html.escape(evidence_id, quote=True)}" data-paper-concern="{html.escape(concern_id, quote=True)}"{pdf_page_attr}>
   <div class="comment-anchor">批注 {position} · {html.escape(evidence_id)} · {html.escape(locator)}</div>
   <div class="comment-title">{html.escape(title)}</div>
   <div class="comment-copy">{html.escape(action)}</div>
   <div class="comment-actions">
-    <button class="inline-button" type="button" data-jump-concern="{html.escape(concern_id, quote=True)}" data-paper-target="{html.escape(evidence_id, quote=True)}">定位队列</button>
+    <button class="inline-button" type="button" data-jump-concern="{html.escape(concern_id, quote=True)}" data-paper-target="{html.escape(evidence_id, quote=True)}"{pdf_page_attr}>定位队列</button>
   </div>
 </div>
 """
