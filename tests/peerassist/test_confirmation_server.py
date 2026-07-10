@@ -316,6 +316,10 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
     assert "syncPdfPageAnnotations" in html
+    assert "syncPdfAnnotationProgress" in html
+    assert "setPdfAnnotationDensity" in html
+    assert "peerassistSetPdfAnnotationDensity" in html
+    assert "isResolvedConcernStatus" in html
     assert "data-pdf-annotation-card" in html
     assert "pdf-annotation-actions" in html
     assert "dataset.action = 'confirm'" in html
@@ -388,6 +392,14 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-page-annotations" in html
     assert "data-pdf-annotation-list" in html
     assert "data-pdf-annotation-empty" in html
+    assert "data-pdf-annotation-progress" in html
+    assert "data-pdf-annotation-pending" in html
+    assert "data-pdf-annotation-done" in html
+    assert "data-pdf-annotation-total" in html
+    assert "data-pdf-annotation-meter" in html
+    assert "data-pdf-annotation-density-toggle" in html
+    assert "PDF 本页批注处理进度" in html
+    assert "本页总计" in html
     assert "PDF 本页审稿批注" in html
     assert "data-focus-review-toggle" in html
     assert "专注审稿" in html

@@ -820,10 +820,57 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-weight: 820;
       white-space: nowrap;
     }}
+    .pdf-annotation-head-actions {{
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }}
+    .pdf-annotation-progress {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      align-items: stretch;
+    }}
+    .pdf-annotation-progress-chip {{
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      padding: 7px 8px;
+      background: #fff;
+    }}
+    .pdf-annotation-progress-label {{
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 850;
+    }}
+    .pdf-annotation-progress-value {{
+      margin-top: 2px;
+      color: #24312e;
+      font-size: 12px;
+      font-weight: 900;
+    }}
+    .pdf-annotation-meter {{
+      grid-column: 1 / -1;
+      height: 5px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #e4ece8;
+    }}
+    .pdf-annotation-meter span {{
+      display: block;
+      height: 100%;
+      width: 0%;
+      border-radius: inherit;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }}
     .pdf-annotation-list {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
       gap: 8px;
+    }}
+    .pdf-annotation-list[data-density="compact"] {{
+      grid-template-columns: 1fr;
+      gap: 5px;
     }}
     .pdf-annotation-card {{
       min-width: 0;
@@ -837,6 +884,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-color: #d39c3d;
       background: #fff8ea;
     }}
+    .pdf-annotation-list[data-density="compact"] .pdf-annotation-card {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 8px;
+    }}
     .pdf-annotation-title {{
       color: #25322f;
       font-size: 12px;
@@ -849,11 +903,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 11px;
       overflow-wrap: anywhere;
     }}
+    .pdf-annotation-list[data-density="compact"] .pdf-annotation-meta {{
+      margin-top: 2px;
+    }}
     .pdf-annotation-actions {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 5px;
       margin-top: 8px;
+    }}
+    .pdf-annotation-list[data-density="compact"] .pdf-annotation-actions {{
+      grid-template-columns: repeat(4, 54px);
+      margin-top: 0;
     }}
     .pdf-annotation-action {{
       min-height: 28px;
@@ -2350,6 +2411,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const annotationList = reader.querySelector('[data-pdf-annotation-list]');
       const annotationCount = reader.querySelector('[data-pdf-annotation-count]');
       const annotationEmpty = reader.querySelector('[data-pdf-annotation-empty]');
+      const annotationPending = reader.querySelector('[data-pdf-annotation-pending]');
+      const annotationDone = reader.querySelector('[data-pdf-annotation-done]');
+      const annotationTotal = reader.querySelector('[data-pdf-annotation-total]');
+      const annotationMeter = reader.querySelector('[data-pdf-annotation-meter]');
+      const annotationDensityToggle = reader.querySelector('[data-pdf-annotation-density-toggle]');
       const runtimePage = reader.querySelector('[data-pdf-runtime-page]');
       const context = canvas.getContext('2d');
       let pdfDoc = null;
@@ -2358,6 +2424,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       let renderTask = null;
       let textLayerTask = null;
       let fitWidth = true;
+      let annotationDensity = 'comfortable';
 
       function setStatus(copy) {{
         if (status) status.textContent = copy;
@@ -2421,12 +2488,41 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }});
       }}
 
+      function isResolvedConcernStatus(status) {{
+        return ['confirmed', 'rewritten', 'downgraded', 'deleted'].includes(String(status || '').toLowerCase());
+      }}
+
+      function syncPdfAnnotationProgress(items) {{
+        const total = items.length;
+        const done = items.filter((item) => isResolvedConcernStatus(item.dataset.concernStatus)).length;
+        const pending = Math.max(0, total - done);
+        if (annotationPending) annotationPending.textContent = `${{pending}} 条`;
+        if (annotationDone) annotationDone.textContent = `${{done}} 条`;
+        if (annotationTotal) annotationTotal.textContent = `${{total}} 条`;
+        if (annotationMeter) {{
+          annotationMeter.style.width = total > 0 ? `${{Math.round(done / total * 100)}}%` : '0%';
+        }}
+      }}
+
+      function setPdfAnnotationDensity(nextDensity) {{
+        annotationDensity = nextDensity === 'compact' ? 'compact' : 'comfortable';
+        if (annotationList) annotationList.dataset.density = annotationDensity;
+        if (annotationDensityToggle) {{
+          const isCompact = annotationDensity === 'compact';
+          annotationDensityToggle.setAttribute('aria-pressed', String(isCompact));
+          annotationDensityToggle.textContent = isCompact ? '展开' : '紧凑';
+        }}
+      }}
+      window.peerassistSetPdfAnnotationDensity = setPdfAnnotationDensity;
+
       function syncPdfPageAnnotations() {{
         if (!annotationList || !annotationCount || !annotationEmpty) return;
         const items = queueItemsForPdfPage(pageNumber);
         annotationList.replaceChildren();
+        annotationList.dataset.density = annotationDensity;
         annotationCount.textContent = `${{items.length}} 条`;
         annotationEmpty.hidden = items.length > 0;
+        syncPdfAnnotationProgress(items);
         items.slice(0, 6).forEach((item) => {{
           const concernId = item.dataset.concernId || '';
           const title = item.dataset.concernTitle || '未命名关注点';
@@ -2437,6 +2533,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           card.className = 'pdf-annotation-card';
           card.setAttribute('data-pdf-annotation-card', concernId);
           card.dataset.pdfPage = String(pageNumber);
+          card.dataset.concernStatus = status;
           const titleEl = document.createElement('div');
           titleEl.className = 'pdf-annotation-title';
           titleEl.textContent = title;
@@ -2477,6 +2574,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }});
       }}
       window.peerassistSyncPdfPageAnnotations = syncPdfPageAnnotations;
+
+      if (annotationDensityToggle) {{
+        annotationDensityToggle.addEventListener('click', () => {{
+          setPdfAnnotationDensity(annotationDensity === 'compact' ? 'comfortable' : 'compact');
+        }});
+      }}
+      setPdfAnnotationDensity(annotationDensity);
 
       function updateButtons() {{
         reader.querySelectorAll('[data-pdf-action]').forEach((button) => {{
@@ -3841,9 +3945,27 @@ def _render_source_pdf_viewer() -> str:
       <section class="pdf-page-annotations" data-pdf-page-annotations aria-label="PDF 本页审稿批注">
         <div class="pdf-annotation-head">
           <span>PDF 本页审稿批注</span>
-          <span class="pdf-annotation-count" data-pdf-annotation-count>0 条</span>
+          <span class="pdf-annotation-head-actions">
+            <button class="inline-button" type="button" data-pdf-annotation-density-toggle aria-pressed="false">紧凑</button>
+            <span class="pdf-annotation-count" data-pdf-annotation-count>0 条</span>
+          </span>
         </div>
-        <div class="pdf-annotation-list" data-pdf-annotation-list></div>
+        <div class="pdf-annotation-progress" data-pdf-annotation-progress aria-label="PDF 本页批注处理进度">
+          <div class="pdf-annotation-progress-chip">
+            <div class="pdf-annotation-progress-label">待处理</div>
+            <div class="pdf-annotation-progress-value" data-pdf-annotation-pending>0 条</div>
+          </div>
+          <div class="pdf-annotation-progress-chip">
+            <div class="pdf-annotation-progress-label">已处理</div>
+            <div class="pdf-annotation-progress-value" data-pdf-annotation-done>0 条</div>
+          </div>
+          <div class="pdf-annotation-progress-chip">
+            <div class="pdf-annotation-progress-label">本页总计</div>
+            <div class="pdf-annotation-progress-value" data-pdf-annotation-total>0 条</div>
+          </div>
+          <div class="pdf-annotation-meter" aria-hidden="true"><span data-pdf-annotation-meter></span></div>
+        </div>
+        <div class="pdf-annotation-list" data-pdf-annotation-list data-density="comfortable"></div>
         <div class="pdf-annotation-empty" data-pdf-annotation-empty>当前页暂无绑定审稿批注。</div>
       </section>
       <div class="pdf-selection-tray" data-pdf-selection-tray hidden>
