@@ -160,7 +160,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert 'data-panel="review-queue"' in html
     assert 'data-panel="tool-trace"' in html
     assert 'data-panel="human-confirmation"' in html
+    assert 'data-panel="stream-console"' in html
+    assert "data-agent-runtime-strip" in html
+    assert "stream-chip" in html
     assert "agent-timeline" in html
+    assert 'data-stream-state="connecting"' in html
+    assert "new EventSource('/api/events')" in html
     assert "Statistics Agent" in html
     assert "Reported percentage needs clarification" in html
     assert "p.1 line 1" in html
@@ -190,6 +195,13 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
         assert state["tool_trace"]["counts_by_status"]["completed"] == 1
         assert state["tool_trace"]["latest_status_by_call"]["percentage_consistency_check"] == "completed"
         assert state["capability_invocations"][0]["capability_name"] == "percentage_consistency_check"
+
+        with urllib.request.urlopen(f"{base_url}/api/events", timeout=5) as response:
+            event_text = response.read().decode("utf-8")
+            content_type = response.headers["Content-Type"]
+        assert content_type.startswith("text/event-stream")
+        assert "event: state" in event_text
+        assert '"schema_version": "peerassist.confirmation_state.v1"' in event_text
 
         payload = json.dumps(
             {

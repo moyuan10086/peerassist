@@ -83,7 +83,7 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     ]
     invocations = json.loads(Path(result.outputs["capability_invocations"]).read_text(encoding="utf-8"))
     assert [row["capability_name"] for row in invocations["results"]] == [
-        "percentage_consistency_check",
+        "deterministic_consistency_checks",
         "peerassist_local_agents",
     ]
     assert all(row["status"] == "completed" for row in invocations["results"])
@@ -99,7 +99,7 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     ]
     trace_text = Path(result.outputs["tool_trace"]).read_text(encoding="utf-8")
     assert "resolve_parse_provider" in trace_text
-    assert "percentage_consistency_check" in trace_text
+    assert "deterministic_consistency_checks" in trace_text
 
 
 def test_run_peerassist_stage_off_is_skipped(tmp_path: Path) -> None:

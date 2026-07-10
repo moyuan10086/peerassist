@@ -177,7 +177,7 @@ def run_peerassist_stage(
 
     registry = default_capability_registry()
     handlers = {
-        "percentage_consistency_check": lambda _payload: {
+        "deterministic_consistency_checks": lambda _payload: {
             "checks": [
                 check.model_dump(mode="json") for check in run_deterministic_checks(ledger)
             ],
@@ -204,10 +204,10 @@ def run_peerassist_stage(
     deterministic_invocation = invoker.invoke(
         CapabilityInvocationRequest(
             task_id=paper_key,
-            call_id="percentage_consistency_check",
+            call_id="deterministic_consistency_checks",
             agent_id="statistics_agent",
-            capability_name="percentage_consistency_check",
-            input_summary="run deterministic percentage consistency checks",
+            capability_name="deterministic_consistency_checks",
+            input_summary="run deterministic PeerAssist consistency checks",
             payload={"evidence_items": len(ledger.items)},
             approved=True,
         )

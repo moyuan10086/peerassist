@@ -66,7 +66,7 @@ def _draft_for_check(check: DeterministicCheck) -> AgentConcernDraft:
 
 
 def _category_for_check_kind(kind: str) -> str:
-    if "percentage" in kind or "stat" in kind or "mean" in kind:
+    if any(token in kind for token in ("percentage", "stat", "mean", "significance", "p_value")):
         return "statistics"
     if "figure" in kind or "table" in kind:
         return "figure_table"
@@ -78,6 +78,8 @@ def _category_for_check_kind(kind: str) -> str:
 def _title_for_check(check: DeterministicCheck) -> str:
     if check.kind == "percentage_consistency":
         return "Reported percentage needs clarification"
+    if check.kind == "significance_star_consistency":
+        return "Significance stars need clarification"
     return check.kind.replace("_", " ").title()
 
 

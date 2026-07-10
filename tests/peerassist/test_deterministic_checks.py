@@ -211,3 +211,87 @@ def test_table_reference_check_uses_body_cross_reference_from_markdown_ledger(tm
     assert figure_check.status is DeterministicCheckStatus.LEAD
     assert figure_check.evidence_ids == ["P01-L002"]
     assert figure_check.metadata["missing_references"] == ["Table 3"]
+
+
+def test_significance_star_check_emits_lead_for_explicit_p_value_mismatch() -> None:
+    checks = run_deterministic_checks(
+        _ledger_with_items(
+            [
+                EvidenceItem(
+                    id="T01-R001",
+                    type=EvidenceType.TABLE_CELL,
+                    page=4,
+                    locator="Table 1 row 1",
+                    text="Treatment effect 0.42** (p = 0.08)",
+                    source_path="mineru_full.md",
+                ),
+                EvidenceItem(
+                    id="P04-L010",
+                    type=EvidenceType.TEXT_SPAN,
+                    page=4,
+                    locator="page 4, line 10",
+                    text="Significance: * p < 0.05, ** p < 0.01, *** p < 0.001.",
+                    source_path="mineru_full.md",
+                ),
+            ]
+        )
+    )
+
+    significance = next(check for check in checks if check.kind == "significance_star_consistency")
+    assert significance.applicability is DeterministicCheckApplicability.APPLICABLE
+    assert significance.status is DeterministicCheckStatus.LEAD
+    assert significance.evidence_ids == ["T01-R001", "P04-L010"]
+    assert significance.metadata["mismatches"][0]["stars"] == "**"
+    assert significance.metadata["mismatches"][0]["threshold"] == 0.01
+
+
+def test_significance_star_check_passes_for_explicit_p_value_match() -> None:
+    checks = run_deterministic_checks(
+        _ledger_with_items(
+            [
+                EvidenceItem(
+                    id="T01-R001",
+                    type=EvidenceType.TABLE_CELL,
+                    page=4,
+                    locator="Table 1 row 1",
+                    text="Treatment effect 0.42** (p = 0.008)",
+                    source_path="mineru_full.md",
+                ),
+                EvidenceItem(
+                    id="P04-L010",
+                    type=EvidenceType.TEXT_SPAN,
+                    page=4,
+                    locator="page 4, line 10",
+                    text="Significance: * p < 0.05, ** p < 0.01, *** p < 0.001.",
+                    source_path="mineru_full.md",
+                ),
+            ]
+        )
+    )
+
+    significance = next(check for check in checks if check.kind == "significance_star_consistency")
+    assert significance.applicability is DeterministicCheckApplicability.APPLICABLE
+    assert significance.status is DeterministicCheckStatus.PASS
+    assert significance.requires_human_review is False
+
+
+def test_significance_star_check_is_inconclusive_without_explicit_legend() -> None:
+    checks = run_deterministic_checks(
+        _ledger_with_items(
+            [
+                EvidenceItem(
+                    id="T01-R001",
+                    type=EvidenceType.TABLE_CELL,
+                    page=4,
+                    locator="Table 1 row 1",
+                    text="Treatment effect 0.42** (p = 0.08)",
+                    source_path="mineru_full.md",
+                )
+            ]
+        )
+    )
+
+    significance = next(check for check in checks if check.kind == "significance_star_consistency")
+    assert significance.applicability is DeterministicCheckApplicability.INSUFFICIENT_EVIDENCE
+    assert significance.status is DeterministicCheckStatus.INCONCLUSIVE
+    assert significance.requires_human_review is False

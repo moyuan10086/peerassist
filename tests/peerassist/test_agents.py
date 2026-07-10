@@ -69,6 +69,18 @@ def _figure_table_lead_check() -> DeterministicCheck:
     )
 
 
+def _significance_lead_check() -> DeterministicCheck:
+    return DeterministicCheck(
+        id="check_significance_star_consistency_001",
+        kind="significance_star_consistency",
+        applicability=DeterministicCheckApplicability.APPLICABLE,
+        status=DeterministicCheckStatus.LEAD,
+        evidence_ids=["P01-L001"],
+        message="Significance stars do not match exact p-values under the paper's own legend.",
+        benign_explanations=["table transcription issue", "p-value was rounded"],
+    )
+
+
 def test_build_agent_input_packet_records_review_scope() -> None:
     packet = build_agent_input_packet(
         agent_id="statistics_agent",
@@ -103,6 +115,17 @@ def test_fast_mode_figure_table_agent_reviews_figure_table_leads() -> None:
     assert by_agent["figure_table_agent"].status is AgentRunStatus.COMPLETED
     assert by_agent["figure_table_agent"].drafts[0].category == "figure_table"
     assert by_agent["statistics_agent"].drafts == []
+
+
+def test_statistics_agent_reviews_significance_star_leads() -> None:
+    results = run_peerassist_agents(mode="fast", ledger=_ledger(), checks=[_significance_lead_check()])
+
+    by_agent = {result.agent_id: result for result in results}
+    assert by_agent["statistics_agent"].drafts[0].category == "statistics"
+    assert by_agent["statistics_agent"].drafts[0].source_check_ids == [
+        "check_significance_star_consistency_001"
+    ]
+    assert by_agent["figure_table_agent"].drafts == []
 
 
 def test_standard_mode_citation_agent_reviews_citation_reference_leads() -> None:

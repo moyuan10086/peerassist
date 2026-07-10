@@ -52,6 +52,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       --danger: #a33a3a;
       --violet: #5f4b8b;
       --shadow: 0 18px 46px rgba(24, 32, 31, 0.10);
+      --mono-panel: #202724;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -77,6 +78,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: rgba(246, 246, 241, 0.96);
       backdrop-filter: blur(16px);
     }}
+    .topbar[data-stream-state="live"] .stream-dot {{ background: #14a076; box-shadow: 0 0 0 5px rgba(20, 160, 118, 0.15); }}
+    .topbar[data-stream-state="polling"] .stream-dot {{ background: #c38b22; box-shadow: 0 0 0 5px rgba(195, 139, 34, 0.16); }}
     .brand {{
       display: flex;
       gap: 12px;
@@ -96,6 +99,31 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     h1 {{ margin: 0; font-size: 19px; line-height: 1.15; font-weight: 760; letter-spacing: 0; }}
     .subtitle {{ margin-top: 3px; color: var(--muted); font-size: 12px; }}
     .meta {{ color: var(--muted); font-size: 13px; }}
+    .runtime-strip {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+    }}
+    .stream-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 9px;
+      background: #fff;
+      color: #394340;
+      font-weight: 700;
+    }}
+    .stream-dot {{
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #b8a15a;
+      box-shadow: 0 0 0 5px rgba(184, 161, 90, 0.14);
+    }}
     .console-shell {{
       width: min(1440px, 100%);
       margin: 0 auto;
@@ -149,6 +177,25 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .metric-value {{ font-size: 24px; font-weight: 800; line-height: 1.1; }}
     .metric-label {{ margin-top: 6px; color: var(--muted); font-size: 11px; }}
+    .run-map {{
+      padding: 0 12px 12px;
+      display: grid;
+      gap: 7px;
+    }}
+    .run-map-row {{
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-height: 28px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .run-map-bar {{
+      height: 8px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), #4f7fbd);
+    }}
     .mode-badge {{
       display: inline-flex;
       align-items: center;
@@ -181,6 +228,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .agent-name {{ font-weight: 760; font-size: 13px; }}
     .agent-detail {{ color: var(--muted); font-size: 12px; }}
+    .agent-meta {{
+      margin-top: 4px;
+      color: #7b8582;
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }}
     .queue {{
       min-height: 100%;
       overflow: hidden;
@@ -264,6 +317,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       padding: 10px;
       background: var(--panel-soft);
     }}
+    .trace-event[data-status="started"], .trace-event[data-status="queued"] {{
+      border-color: #c7d7ef;
+      background: #f5f8fe;
+    }}
+    .trace-event[data-status="completed"] {{
+      border-color: #c8e1d9;
+      background: #f4fbf8;
+    }}
+    .trace-event[data-status="failed"] {{
+      border-color: #e6b4b4;
+      background: #fff5f5;
+    }}
     .trace-head {{
       display: flex;
       align-items: center;
@@ -292,6 +357,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       color: #2f3835;
       font-size: 13px;
     }}
+    .stream-console {{
+      margin: 0 16px 16px;
+      border-radius: 8px;
+      background: var(--mono-panel);
+      color: #e8ede9;
+      padding: 12px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }}
+    .stream-console div + div {{ margin-top: 5px; }}
+    .stream-key {{ color: #9ad0c4; }}
     .empty {{ padding: 40px 0; color: var(--muted); }}
     @media (max-width: 1100px) {{
       .console-shell {{ grid-template-columns: 1fr; }}
@@ -306,7 +382,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
   </style>
 </head>
 <body data-peerassist-agent-console>
-  <header class="topbar">
+  <header class="topbar" data-stream-state="connecting">
     <div class="brand">
       <div class="mark">PA</div>
       <div>
@@ -314,7 +390,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         <div class="subtitle">Evidence-grounded peer review queue for <code>{html.escape(paper_id)}</code></div>
       </div>
     </div>
-    <div class="meta"><span class="mode-badge">{html.escape(mode or "unknown")} mode</span> · <span id="runtime-status">{len(events)} trace events</span></div>
+    <div class="meta runtime-strip">
+      <span class="mode-badge">{html.escape(mode or "unknown")} mode</span>
+      <span class="stream-chip"><span class="stream-dot"></span><span id="stream-status">stream connecting</span></span>
+      <span id="runtime-status">{len(events)} trace events</span>
+    </div>
   </header>
   <main class="console-shell">
     <aside class="rail">
@@ -328,6 +408,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           <div class="metric"><div class="metric-value">{actions_count}</div><div class="metric-label">Recorded actions</div></div>
           <div class="metric"><div class="metric-value">{len(agent_runs)}</div><div class="metric-label">Agent runs</div></div>
           <div class="metric"><div class="metric-value">{len(events)}</div><div class="metric-label">Trace events</div></div>
+        </div>
+        <div class="run-map" data-agent-runtime-strip>
+          <div class="run-map-row"><span>evidence</span><span class="run-map-bar" style="width: {min(100, max(18, len(events) * 8))}%"></span></div>
+          <div class="run-map-row"><span>agents</span><span class="run-map-bar" style="width: {min(100, max(18, len(agent_runs) * 18))}%"></span></div>
+          <div class="run-map-row"><span>human queue</span><span class="run-map-bar" style="width: {min(100, max(18, pending_count * 24))}%"></span></div>
         </div>
       </section>
       <section class="panel" data-panel="agent-runs">
@@ -361,6 +446,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         <div class="confirmation-note">
           Review edits are written to <code>human_confirmations.json</code>, then reports are regenerated in English and Chinese. Refreshing this page recovers queue, actions, paths, and trace state from disk.
         </div>
+        <div class="stream-console" data-panel="stream-console">
+          <div><span class="stream-key">event:</span> state</div>
+          <div><span class="stream-key">transport:</span> /api/events + /api/state fallback</div>
+          <div><span class="stream-key">contract:</span> evidence-bound human decision log</div>
+        </div>
         {_render_invocations(invocations)}
       </section>
     </aside>
@@ -392,15 +482,42 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const response = await fetch('/api/state');
       if (!response.ok) return;
       const state = await response.json();
+      updateRuntime(state, 'poll');
+    }}
+    function updateRuntime(state, source) {{
       const runtime = state.runtime || {{}};
       const status = document.getElementById('runtime-status');
       if (status) {{
         status.textContent = `${{runtime.tool_event_count || 0}} trace events · ${{state.actions_count || 0}} actions`;
       }}
+      const streamStatus = document.getElementById('stream-status');
+      if (streamStatus) {{
+        streamStatus.textContent = source === 'stream' ? 'stream live' : 'poll fallback';
+      }}
+      const topbar = document.querySelector('.topbar');
+      if (topbar) {{
+        topbar.dataset.streamState = source === 'stream' ? 'live' : 'polling';
+      }}
+    }}
+    function connectEventStream() {{
+      if (!window.EventSource) {{
+        refreshRuntime().catch(() => {{}});
+        return;
+      }}
+      const events = new EventSource('/api/events');
+      events.addEventListener('state', (event) => {{
+        updateRuntime(JSON.parse(event.data), 'stream');
+        events.close();
+      }});
+      events.onerror = () => {{
+        events.close();
+        refreshRuntime().catch(() => {{}});
+      }};
     }}
     document.querySelectorAll('button[data-action]').forEach((button) => {{
       button.addEventListener('click', () => submitDecision(button).catch((error) => alert(error.message)));
     }});
+    connectEventStream();
     window.setInterval(() => refreshRuntime().catch(() => {{}}), 15000);
   </script>
 </body>
@@ -449,6 +566,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             if self.path == "/api/state":
                 self._send_json(load_confirmation_state(run_dir=run_dir))
                 return
+            if self.path == "/api/events":
+                self._send_sse_state(load_confirmation_state(run_dir=run_dir))
+                return
             self.send_error(404, "not found")
 
         def do_POST(self) -> None:  # noqa: N802
@@ -494,6 +614,17 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             body = text.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_sse_state(self, payload: dict[str, Any]) -> None:
+            data = json.dumps(payload, ensure_ascii=False)
+            body = f"event: state\ndata: {data}\n\n".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -556,6 +687,8 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
             f"{int(row.get('draft_count') or 0)} drafts"
             f" · {int(row.get('warning_count') or 0)} warnings"
         )
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata_text = _compact_metadata(metadata)
         rows.append(
             f"""
 <div class="agent-row">
@@ -563,6 +696,7 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
   <div>
     <div class="agent-name">{html.escape(_display_name(str(row.get('agent_id') or 'agent')))} {_status_pill(status)}</div>
     <div class="agent-detail">{html.escape(detail)}</div>
+    <div class="agent-meta">{html.escape(metadata_text)}</div>
   </div>
 </div>
 """
@@ -580,12 +714,13 @@ def _render_trace_events(events: list[Any]) -> str:
         summary = str(row.get("output_summary") or row.get("input_summary") or "")
         duration = row.get("duration_ms")
         duration_text = f" · {int(duration)} ms" if isinstance(duration, int) else ""
+        status = str(row.get("status") or "unknown")
         rows.append(
             f"""
-<div class="trace-event">
+<div class="trace-event" data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}">
   <div class="trace-head">
     <div class="trace-tool">{html.escape(str(row.get('tool') or row.get('call_id') or 'tool'))}</div>
-    {_status_pill(str(row.get('status') or 'unknown'))}
+    {_status_pill(status)}
   </div>
   <div class="trace-summary">{html.escape(str(row.get('agent_id') or 'peerassist'))}{html.escape(duration_text)}</div>
   <div class="trace-summary">{html.escape(summary)}</div>
@@ -603,12 +738,13 @@ def _render_invocations(invocations: list[Any]) -> str:
         if not isinstance(row, dict):
             continue
         artifacts = ", ".join(str(item) for item in row.get("artifact_ids", []) if item)
+        status = str(row.get("status") or "unknown")
         rows.append(
             f"""
-<div class="trace-event">
+<div class="trace-event" data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}">
   <div class="trace-head">
     <div class="trace-tool">{html.escape(str(row.get('capability_name') or row.get('call_id') or 'capability'))}</div>
-    {_status_pill(str(row.get('status') or 'unknown'))}
+    {_status_pill(status)}
   </div>
   <div class="trace-summary">source={html.escape(str(row.get('source') or ''))} · attempts={html.escape(str(row.get('attempts') or 0))}</div>
   <div class="trace-summary">artifacts: {html.escape(artifacts or 'none')}</div>
@@ -632,6 +768,23 @@ def _status_pill(status: str) -> str:
 def _display_name(value: str) -> str:
     words = [word for word in value.replace("-", "_").split("_") if word]
     return " ".join(word.capitalize() for word in words) if words else "Agent"
+
+
+def _compact_metadata(metadata: dict[str, Any]) -> str:
+    if not metadata:
+        return "no metadata"
+    parts: list[str] = []
+    for key, value in metadata.items():
+        if isinstance(value, list):
+            shown = ", ".join(str(item) for item in value[:2])
+            if len(value) > 2:
+                shown += f", +{len(value) - 2}"
+        else:
+            shown = str(value)
+        parts.append(f"{key}={shown}")
+        if len(parts) >= 2:
+            break
+    return " · ".join(parts)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -26,6 +26,15 @@ FIGURE_REF_RE = re.compile(r"\b(?:fig(?:ure)?\.?)\s*(?P<num>S?\d+[A-Za-z0-9_.-]*
 TABLE_REF_RE = re.compile(r"\btable\s*(?P<num>S?\d+[A-Za-z0-9_.-]*)\b", re.I)
 CITATION_BRACKET_RE = re.compile(r"\[(?P<body>\d+(?:\s*,\s*\d+)*)\]")
 REFERENCE_NUMBER_RE = re.compile(r"^\[\s*(?P<num>\d+)\s*\]")
+SIGNIFICANCE_LEGEND_RE = re.compile(
+    r"(?P<stars>\*{1,3})\s*p\s*(?:<|≤)\s*(?P<threshold>0?\.\d+|\d+(?:\.\d+)?)",
+    re.I,
+)
+SIGNIFICANCE_VALUE_RE = re.compile(
+    r"(?P<value>[-+]?\d+(?:\.\d+)?)\s*(?P<stars>\*{1,3})\s*"
+    r"(?:\(|,)?\s*p\s*=\s*(?P<pvalue>0?\.\d+|\d+(?:\.\d+)?)",
+    re.I,
+)
 
 
 def _checkable_items(ledger: EvidenceLedger) -> list[EvidenceItem]:
@@ -304,9 +313,110 @@ def _numbered_citation_reference_checks(ledger: EvidenceLedger) -> list[Determin
     ]
 
 
+def _significance_legend(ledger: EvidenceLedger) -> tuple[dict[str, float], list[str]]:
+    thresholds: dict[str, float] = {}
+    evidence_ids: list[str] = []
+    for item in ledger.items:
+        for match in SIGNIFICANCE_LEGEND_RE.finditer(item.text):
+            stars = match.group("stars")
+            thresholds[stars] = float(match.group("threshold"))
+            if item.id not in evidence_ids:
+                evidence_ids.append(item.id)
+    return thresholds, evidence_ids
+
+
+def _significance_star_consistency_checks(ledger: EvidenceLedger) -> list[DeterministicCheck]:
+    thresholds, legend_evidence_ids = _significance_legend(ledger)
+    if not thresholds:
+        return [
+            DeterministicCheck(
+                id="check_significance_star_consistency_000",
+                kind="significance_star_consistency",
+                applicability=DeterministicCheckApplicability.INSUFFICIENT_EVIDENCE,
+                status=DeterministicCheckStatus.INCONCLUSIVE,
+                evidence_ids=[],
+                message="No explicit significance-star legend was available for deterministic checking.",
+                benign_explanations=["paper may use a nonstandard or implicit significance convention"],
+                requires_human_review=False,
+            )
+        ]
+
+    checked = 0
+    mismatches: list[dict[str, object]] = []
+    mismatch_evidence_ids: list[str] = []
+    for item in _checkable_items(ledger):
+        for match in SIGNIFICANCE_VALUE_RE.finditer(item.text):
+            stars = match.group("stars")
+            threshold = thresholds.get(stars)
+            if threshold is None:
+                continue
+            checked += 1
+            pvalue = float(match.group("pvalue"))
+            if pvalue <= threshold:
+                continue
+            mismatches.append(
+                {
+                    "evidence_id": item.id,
+                    "stars": stars,
+                    "p_value": pvalue,
+                    "threshold": threshold,
+                    "reported_value": float(match.group("value")),
+                }
+            )
+            if item.id not in mismatch_evidence_ids:
+                mismatch_evidence_ids.append(item.id)
+
+    if checked == 0:
+        return [
+            DeterministicCheck(
+                id="check_significance_star_consistency_001",
+                kind="significance_star_consistency",
+                applicability=DeterministicCheckApplicability.INSUFFICIENT_EVIDENCE,
+                status=DeterministicCheckStatus.INCONCLUSIVE,
+                evidence_ids=legend_evidence_ids[:1],
+                message="A significance-star legend was found, but no exact p-value plus star pairs were available.",
+                benign_explanations=["paper may report stars without exact p-values"],
+                requires_human_review=False,
+            )
+        ]
+
+    if not mismatches:
+        return [
+            DeterministicCheck(
+                id="check_significance_star_consistency_001",
+                kind="significance_star_consistency",
+                applicability=DeterministicCheckApplicability.APPLICABLE,
+                status=DeterministicCheckStatus.PASS,
+                evidence_ids=[],
+                message="All exact p-value plus significance-star pairs match the parsed legend thresholds.",
+                benign_explanations=["threshold convention explicitly parsed from the paper"],
+                requires_human_review=False,
+                metadata={"checked_pairs": checked, "thresholds": thresholds},
+            )
+        ]
+
+    return [
+        DeterministicCheck(
+            id="check_significance_star_consistency_001",
+            kind="significance_star_consistency",
+            applicability=DeterministicCheckApplicability.APPLICABLE,
+            status=DeterministicCheckStatus.LEAD,
+            evidence_ids=[*mismatch_evidence_ids, *legend_evidence_ids],
+            message="Significance stars do not match exact p-values under the paper's own legend.",
+            benign_explanations=[
+                "table transcription issue",
+                "star legend differs for this table",
+                "p-value was rounded from a more precise value",
+            ],
+            metadata={"checked_pairs": checked, "thresholds": thresholds, "mismatches": mismatches},
+        )
+    ]
+
+
 def run_deterministic_checks(ledger: EvidenceLedger) -> list[DeterministicCheck]:
     return [
         *_percentage_consistency_checks(ledger),
         *_figure_table_reference_checks(ledger),
         *_numbered_citation_reference_checks(ledger),
+        *_significance_star_consistency_checks(ledger),
     ]

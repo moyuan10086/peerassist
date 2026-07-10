@@ -114,8 +114,8 @@ def default_capability_registry() -> CapabilityRegistry:
                 output_summary="evidence_ledger.json",
             ),
             CapabilitySpec(
-                name="percentage_consistency_check",
-                description="Check count/denominator plus percentage consistency.",
+                name="deterministic_consistency_checks",
+                description="Run deterministic consistency checks for percentages, references, and statistics markers.",
                 source=CapabilitySource.BUILTIN,
                 permissions=[PermissionClass.READ_ARTIFACT, PermissionClass.WRITE_ARTIFACT],
                 input_summary="evidence ledger text/table items",
