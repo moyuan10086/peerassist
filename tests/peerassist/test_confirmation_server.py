@@ -233,6 +233,10 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "证据审稿队列" in html
     assert "论文原文 PDF" in html
     assert "真实 PDF 阅读面" in html
+    assert 'data-panel="review-inspector"' in html
+    assert "页边审稿意见" in html
+    assert ".paper-canvas {\n      display: grid;\n      grid-template-columns: minmax(0, 1fr);" in html
+    assert ".review-inspector" in html
     assert "抽取文本预览" in html
     assert "未发现源 PDF" in html
     assert "paper-highlight" in html

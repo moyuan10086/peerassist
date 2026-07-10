@@ -280,7 +280,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       margin: 0 auto;
       padding: 12px 18px 20px;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
+      grid-template-columns: minmax(0, 1fr) 390px;
       gap: 16px;
       min-height: calc(100vh - 68px);
     }}
@@ -449,9 +449,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .paper-canvas {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 260px;
-      gap: 14px;
-      padding: 16px;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+      padding: 14px;
       background: #eef3f2;
     }}
     .source-pdf-shell {{
@@ -507,7 +507,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .pdf-reader-stage {{
       position: relative;
       min-height: 780px;
-      height: calc(100vh - 235px);
+      height: calc(100vh - 218px);
       overflow: auto;
       padding: 22px;
       background:
@@ -640,12 +640,15 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       display: grid;
       gap: 10px;
       align-content: start;
+      padding: 12px 14px 16px;
+      max-height: min(520px, calc(100vh - 420px));
+      overflow: auto;
     }}
     .paper-comment {{
       border: 1px solid #c8e1d9;
       border-left: 4px solid var(--accent);
       border-radius: 8px;
-      background: #f4fbf8;
+      background: linear-gradient(180deg, #ffffff, #f4fbf8);
       padding: 10px;
     }}
     .paper-comment[data-active="true"], .item[data-active="true"] {{
@@ -757,6 +760,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       max-height: calc(100vh - 96px);
       overflow: auto;
     }}
+    .review-inspector {{
+      border-color: #b8d8cf;
+      background: linear-gradient(180deg, #ffffff, #f8fcfb);
+    }}
     .model-entry {{
       border-color: #b8d8cf;
       background: linear-gradient(180deg, #ffffff, #f6fbfa);
@@ -785,6 +792,32 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       margin: 12px 14px 14px;
       display: grid;
       gap: 8px;
+    }}
+    .agent-flow {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+      padding: 12px 14px 0;
+    }}
+    .agent-flow-step {{
+      min-height: 54px;
+      border: 1px solid #d4ddd9;
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }}
+    .agent-flow-index {{
+      color: var(--accent-strong);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+      font-weight: 900;
+    }}
+    .agent-flow-title {{
+      margin-top: 3px;
+      color: #24302d;
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.25;
     }}
     .agent-primary-button {{
       color: #fff;
@@ -986,6 +1019,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-reader-bar {{ grid-template-columns: 1fr; justify-items: center; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .paper-comments {{ grid-template-columns: 1fr; }}
+      .agent-flow {{ grid-template-columns: 1fr 1fr; }}
       .item {{ grid-template-columns: 1fr; }}
       .queue-toolbar {{ grid-template-columns: 1fr; }}
       .right-stack {{ grid-template-columns: 1fr; }}
@@ -1105,6 +1139,15 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     </section>
     <aside class="right-stack">
       {_render_model_entry(model_config)}
+      <section class="panel review-inspector" data-panel="review-inspector">
+        <div class="panel-header">
+          <p class="panel-title">页边审稿意见</p>
+          <div class="panel-subtitle">模型与确定性线索生成的待确认批注，点击可定位队列或原文证据</div>
+        </div>
+        <div class="paper-comments" aria-label="页边审稿意见">
+          {_render_margin_comments([item for item in items if isinstance(item, dict)], evidence_preview=evidence_preview)}
+        </div>
+      </section>
       <section class="panel" data-panel="evidence-focus">
         <div class="panel-header">
           <p class="panel-title">证据焦点</p>
@@ -1335,8 +1378,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           }});
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || '智能审稿失败');
-          stream.textContent = `${{payload.suggestion}}\\n\\n草稿路径：${{payload.draft_path}}`;
-          showToast('全篇智能审稿草稿已生成');
+          const structuredCount = Number(payload.structured_concern_count || 0);
+          const queueItems = Number(payload.queue_items || 0);
+          stream.textContent = `${{payload.suggestion}}\\n\\n已结构化入队：${{structuredCount}} 条 · 当前待确认：${{queueItems}} 条\\n草稿路径：${{payload.draft_path}}`;
+          showToast(structuredCount > 0 ? `已写入 ${{structuredCount}} 条待确认意见` : '全篇智能审稿草稿已生成');
+          if (structuredCount > 0) {{
+            window.setTimeout(() => window.location.reload(), 1200);
+          }}
         }} catch (error) {{
           stream.textContent = `智能审稿未完成：${{error.message}}`;
           showToast('智能审稿未完成');
@@ -2312,6 +2360,12 @@ def _render_model_entry(model_config: dict[str, str]) -> str:
           <div class="model-config-row"><span>Base URL</span><code>{html.escape(model_config["base_url"])}</code></div>
           <div class="model-config-row"><span>API Key</span><code>{html.escape(key_state)}</code></div>
         </div>
+        <div class="agent-flow" aria-label="全篇智能审稿流程">
+          <div class="agent-flow-step"><div class="agent-flow-index">01</div><div class="agent-flow-title">解析证据</div></div>
+          <div class="agent-flow-step"><div class="agent-flow-index">02</div><div class="agent-flow-title">多代理核查</div></div>
+          <div class="agent-flow-step"><div class="agent-flow-index">03</div><div class="agent-flow-title">结构化入队</div></div>
+          <div class="agent-flow-step"><div class="agent-flow-index">04</div><div class="agent-flow-title">人工确认</div></div>
+        </div>
         <div class="agent-review-box">
           <button class="agent-primary-button" type="button" data-agent-review-start>开始全篇智能审稿</button>
           <div class="agent-stream-box" data-agent-review-stream>系统将读取整篇论文证据台账、确定性核查和代理结果，生成可追溯审稿草稿；选中的 PDF 文字只作为额外关注点。</div>
@@ -2353,7 +2407,6 @@ def _render_paper_review_surface(
             first_impact=first_impact,
         )
     )
-    comments = _render_margin_comments(concerns, evidence_preview=preview_rows)
     source_label = "原始 PDF 已导入" if has_source_pdf else "抽取文本预览"
     return f"""
 <section class="panel paper-viewer" data-panel="paper-viewer" id="paper-viewer">
@@ -2370,9 +2423,6 @@ def _render_paper_review_surface(
   </div>
   <div class="paper-canvas">
     {source_document}
-    <aside class="paper-comments" aria-label="页边批注">
-      {comments}
-    </aside>
   </div>
 </section>
 """
