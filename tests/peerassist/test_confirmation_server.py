@@ -162,7 +162,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert 'data-panel="human-confirmation"' in html
     assert 'data-panel="stream-console"' in html
     assert "data-agent-runtime-strip" in html
+    assert "data-agent-ops-strip" in html
+    assert 'data-panel="session-navigator"' in html
     assert "stream-chip" in html
+    assert "运行态指挥条" in html
+    assert "会话导览" in html
+    assert "证据焦点" in html
     assert "agent-timeline" in html
     assert 'data-stream-state="connecting"' in html
     assert "new EventSource('/api/events')" in html

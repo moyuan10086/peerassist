@@ -31,6 +31,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         if isinstance(state.get("capability_invocations"), list)
         else []
     )
+    evidence_count = _evidence_count(items)
+    completed_event_count = _event_status_count(events, "completed")
+    failed_event_count = _event_status_count(events, "failed")
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -46,8 +49,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       --paper: #f6f6f1;
       --panel: #ffffff;
       --panel-soft: #f9faf6;
+      --panel-tint: #eef6ff;
       --accent: #0f766e;
       --accent-strong: #115e59;
+      --blue: #2458a6;
       --amber: #9a6500;
       --danger: #a33a3a;
       --violet: #5f4b8b;
@@ -59,7 +64,11 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       margin: 0;
       font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", ui-sans-serif, sans-serif;
       color: var(--ink);
-      background: var(--paper);
+      background:
+        linear-gradient(90deg, rgba(15, 118, 110, 0.04) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(36, 88, 166, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 42px 42px;
     }}
     code {{
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -106,6 +115,45 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       justify-content: flex-end;
       gap: 8px;
     }}
+    .ops-strip {{
+      width: min(1440px, calc(100% - 40px));
+      margin: 18px auto 0;
+      display: grid;
+      grid-template-columns: 1.2fr repeat(4, minmax(120px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }}
+    .ops-card {{
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.86);
+      box-shadow: 0 10px 28px rgba(24, 32, 31, 0.08);
+      padding: 12px;
+    }}
+    .ops-card.primary {{
+      background: #132320;
+      color: #eef8f4;
+      border-color: #132320;
+    }}
+    .ops-kicker {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }}
+    .ops-card.primary .ops-kicker {{ color: #98d6c8; }}
+    .ops-value {{
+      margin-top: 4px;
+      font-size: 22px;
+      font-weight: 820;
+      line-height: 1.1;
+    }}
+    .ops-label {{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .ops-card.primary .ops-label {{ color: #c7d8d4; }}
     .stream-chip {{
       display: inline-flex;
       align-items: center;
@@ -234,6 +282,34 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       font-size: 11px;
       overflow-wrap: anywhere;
     }}
+    .session-nav {{
+      display: grid;
+      gap: 8px;
+      padding: 12px 14px 16px;
+    }}
+    .nav-step {{
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      gap: 9px;
+      align-items: start;
+      min-height: 34px;
+      color: inherit;
+      text-decoration: none;
+    }}
+    .step-index {{
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: #edf4ff;
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 850;
+      border: 1px solid #c7d7ef;
+    }}
+    .step-title {{ font-weight: 780; font-size: 12px; }}
+    .step-copy {{ color: var(--muted); font-size: 11px; margin-top: 1px; }}
     .queue {{
       min-height: 100%;
       overflow: hidden;
@@ -311,6 +387,20 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       max-height: 360px;
       overflow: auto;
     }}
+    .evidence-focus {{
+      padding: 12px 14px 16px;
+      display: grid;
+      gap: 10px;
+    }}
+    .focus-row {{
+      border: 1px solid #c8e1d9;
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: #f4fbf8;
+      padding: 10px;
+    }}
+    .focus-title {{ font-weight: 780; font-size: 12px; }}
+    .focus-meta {{ color: var(--muted); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }}
     .trace-event {{
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -370,11 +460,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .stream-key {{ color: #9ad0c4; }}
     .empty {{ padding: 40px 0; color: var(--muted); }}
     @media (max-width: 1100px) {{
+      .ops-strip {{ grid-template-columns: 1fr 1fr; }}
       .console-shell {{ grid-template-columns: 1fr; }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
       .topbar {{ grid-template-columns: 1fr; }}
+      .ops-strip {{ width: calc(100% - 24px); grid-template-columns: 1fr; }}
       .console-shell {{ padding: 12px; }}
       .item {{ grid-template-columns: 1fr; }}
       .right-stack {{ grid-template-columns: 1fr; }}
@@ -396,6 +488,33 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <span id="runtime-status">{len(events)} 条追踪事件</span>
     </div>
   </header>
+  <section class="ops-strip" data-agent-ops-strip>
+    <div class="ops-card primary">
+      <div class="ops-kicker">运行态指挥条</div>
+      <div class="ops-value">{html.escape(_localized_mode(mode))}审稿</div>
+      <div class="ops-label">事件流、证据队列与人工闸门同步展示</div>
+    </div>
+    <div class="ops-card">
+      <div class="ops-kicker">待人工确认</div>
+      <div class="ops-value">{pending_count}</div>
+      <div class="ops-label">逐条处理</div>
+    </div>
+    <div class="ops-card">
+      <div class="ops-kicker">证据焦点</div>
+      <div class="ops-value">{evidence_count}</div>
+      <div class="ops-label">绑定证据条目</div>
+    </div>
+    <div class="ops-card">
+      <div class="ops-kicker">完成调用</div>
+      <div class="ops-value">{completed_event_count}</div>
+      <div class="ops-label">工具生命周期</div>
+    </div>
+    <div class="ops-card">
+      <div class="ops-kicker">失败调用</div>
+      <div class="ops-value">{failed_event_count}</div>
+      <div class="ops-label">需要复核</div>
+    </div>
+  </section>
   <main class="console-shell">
     <aside class="rail">
       <section class="panel" data-panel="run-summary">
@@ -415,6 +534,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           <div class="run-map-row"><span>人工队列</span><span class="run-map-bar" style="width: {min(100, max(18, pending_count * 24))}%"></span></div>
         </div>
       </section>
+      <section class="panel" data-panel="session-navigator">
+        <div class="panel-header">
+          <p class="panel-title">会话导览</p>
+          <div class="panel-subtitle">按审稿流转顺序定位当前任务</div>
+        </div>
+        <nav class="session-nav" aria-label="PeerAssist 会话导览">
+          <a class="nav-step" href="#review-queue"><span class="step-index">1</span><span><span class="step-title">证据队列</span><span class="step-copy">先看关注点与证据定位</span></span></a>
+          <a class="nav-step" href="#tool-trace"><span class="step-index">2</span><span><span class="step-title">工具追踪</span><span class="step-copy">核对 MCP/Skills 调用过程</span></span></a>
+          <a class="nav-step" href="#human-confirmation"><span class="step-index">3</span><span><span class="step-title">人工闸门</span><span class="step-copy">确认、改写、降级或删除</span></span></a>
+        </nav>
+      </section>
       <section class="panel" data-panel="agent-runs">
         <div class="panel-header">
           <p class="panel-title">代理时间线</p>
@@ -423,7 +553,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         {_render_agent_timeline(agent_runs)}
       </section>
     </aside>
-    <section class="panel queue" data-panel="review-queue">
+    <section class="panel queue" data-panel="review-queue" id="review-queue">
       <div class="panel-header">
         <p class="panel-title">证据审稿队列</p>
         <div class="panel-subtitle">逐条确认、改写、降级、删除或暂挂关注点</div>
@@ -431,14 +561,21 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <div class="queue-body">{rows}</div>
     </section>
     <aside class="right-stack">
-      <section class="panel" data-panel="tool-trace">
+      <section class="panel" data-panel="evidence-focus">
+        <div class="panel-header">
+          <p class="panel-title">证据焦点</p>
+          <div class="panel-subtitle">优先核对当前队列绑定的证据位置</div>
+        </div>
+        {_render_evidence_focus(items)}
+      </section>
+      <section class="panel" data-panel="tool-trace" id="tool-trace">
         <div class="panel-header">
           <p class="panel-title">工具追踪</p>
           <div class="panel-subtitle">MCP、Skills 与内置能力调用生命周期</div>
         </div>
         {_render_trace_events(events)}
       </section>
-      <section class="panel" data-panel="human-confirmation">
+      <section class="panel" data-panel="human-confirmation" id="human-confirmation">
         <div class="panel-header">
           <p class="panel-title">人工确认</p>
           <div class="panel-subtitle">没有证据的关注点不会进入确认报告</div>
@@ -675,6 +812,60 @@ def _render_item(item: dict[str, Any]) -> str:
   <div class="actions">{buttons}</div>
 </section>
 """
+
+
+def _evidence_count(items: list[Any]) -> int:
+    evidence_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        for row in evidence:
+            if isinstance(row, dict) and row.get("id"):
+                evidence_ids.add(str(row["id"]))
+    return len(evidence_ids)
+
+
+def _event_status_count(events: list[Any], status: str) -> int:
+    expected = status.replace(" ", "_").lower()
+    return sum(
+        1
+        for row in events
+        if isinstance(row, dict)
+        and str(row.get("status") or "").replace(" ", "_").lower() == expected
+    )
+
+
+def _render_evidence_focus(items: list[Any]) -> str:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _localized_copy(str(item.get("title") or "未命名关注点"))
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        for row in evidence:
+            if not isinstance(row, dict):
+                continue
+            evidence_id = str(row.get("id") or "").strip()
+            if not evidence_id or evidence_id in seen:
+                continue
+            seen.add(evidence_id)
+            rows.append(
+                f"""
+<div class="focus-row">
+  <div class="focus-title"><code>{html.escape(evidence_id)}</code> · {html.escape(title)}</div>
+  <div class="focus-meta">{html.escape(str(row.get('locator') or '未标注位置'))}</div>
+</div>
+"""
+            )
+            if len(rows) >= 5:
+                break
+        if len(rows) >= 5:
+            break
+    if not rows:
+        rows.append('<div class="trace-summary">暂无证据焦点。</div>')
+    return f'<div class="evidence-focus">{"".join(rows)}</div>'
 
 
 def _render_agent_timeline(agent_runs: list[Any]) -> str:

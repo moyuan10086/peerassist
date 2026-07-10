@@ -84,3 +84,11 @@ model keys, paper secrets, or reviewer-private material here.
   Agent console UI and deterministic stream update; Eval target detail ledger; Unevidenced fact rate accounting fix; Paired crossover recall regression diagnostics.
 - Feishu document revision 40 outline now shows only the numbered Chinese sections 一 through 十二.
 - Repair method: block_replace only on the four heading blocks; no overwrite, no delete, no history revert.
+
+## 2026-07-11 01:19 CST - Public PeerAssist confirmation service
+
+- PeerAssist confirmation console was started on 0.0.0.0:8766 with PID 11454.
+- Public URL verified: http://101.47.158.17:8766/
+- The page returns the modern Chinese agent UI with "运行态指挥条", "会话导览", "证据焦点", and "证据审稿队列".
+- Feishu document revision 41 adds section "十三、2026-07-11 PeerAssist 公网服务启动记录".
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
