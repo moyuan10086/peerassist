@@ -22,3 +22,11 @@ model keys, paper secrets, or reviewer-private material here.
 - Upgraded confirmation UI with stream state chip, runtime strip, agent metadata, status-colored tool trace, and SSE snapshot endpoint /api/events with /api/state fallback.
 - Verification: .venv/bin/python -m pytest -q -> 365 passed, 1 skipped, 3 deselected.
 - Note: browser screenshot validation was attempted, but Playwright/browser dependencies are not installed in this runtime.
+
+## 2026-07-10 23:39 CST - Eval target detail ledger
+
+- GitHub branch: https://github.com/moyuan10086/peerassist/tree/peerassist-mvp
+- Commit: 9e35841 feat: add eval target detail ledger
+- Added machine-readable target_details to PeerAssist-Eval-v1 aggregate reports, including passed, actual, threshold, direction, and margin for every objective metric.
+- Added failed_target_names so CI, Feishu summaries, and reviewer-facing status can explain exactly which frozen-set targets remain below threshold.
+- Verification: .venv/bin/python -m pytest -q -> 366 passed, 1 skipped, 3 deselected.
