@@ -262,6 +262,11 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "data-agent-review-start" in html
     assert "data-agent-review-stream" in html
     assert "fetch('/api/agent-review'" in html
+    assert "review_mode: reviewMode" in html
+    assert "peerassistSetPdfAgentReviewMode" in html
+    assert "data-pdf-agent-dock" in html
+    assert "data-pdf-agent-mode" in html
+    assert "data-pdf-agent-action" in html
     assert "请先在 PDF 正文中选中一段文字" not in html
     assert 'data-panel="artifact-workspace"' in html
     assert 'data-panel="next-actions"' in html
@@ -385,6 +390,18 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "下一未处理" in html
     assert "下一关注页" in html
     assert "data-pdf-review-command-strip" in html
+    assert "data-pdf-agent-dock" in html
+    assert "PDF 智能体审稿操作坞" in html
+    assert "data-review-mode=\"fast\"" in html
+    assert 'data-pdf-agent-mode="fast"' in html
+    assert 'data-pdf-agent-mode="standard"' in html
+    assert 'data-pdf-agent-mode="deep"' in html
+    assert 'data-pdf-agent-action="agent-review"' in html
+    assert 'data-pdf-agent-action="selection-review"' in html
+    assert 'data-pdf-agent-action="current-page"' in html
+    assert "智能体入口" in html
+    assert "证据约束审稿" in html
+    assert "必绑定" in html
     assert 'data-pdf-review-command="agent-review"' in html
     assert 'data-pdf-review-command="selection-review"' in html
     assert 'data-pdf-review-command="current-page"' in html
@@ -543,8 +560,11 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
     run_dir = tmp_path / "run"
     out_dir = _seed_peerassist_stage(run_dir)
     monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "test-key")
+    observed: dict[str, str] = {}
 
-    def fake_chat_completion(**_kwargs) -> str:
+    def fake_chat_completion(**kwargs) -> str:
+        messages = kwargs.get("messages") or []
+        observed["prompt"] = str(messages[-1]["content"]) if messages else ""
         return json.dumps(
             {
                 "report_markdown": "# 审稿辅助报告\n\n## 三、主要意见\n- Ablation evidence is missing.",
@@ -575,7 +595,7 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
     try:
         request = urllib.request.Request(
             f"{base_url}/api/agent-review",
-            data=json.dumps({"selected_text": ""}).encode("utf-8"),
+            data=json.dumps({"selected_text": "", "review_mode": "deep"}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -583,6 +603,9 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
             result = json.loads(response.read().decode("utf-8"))
 
         assert result["structured_concern_count"] == 1
+        assert result["review_mode"] == "deep"
+        assert '"review_mode": "deep"' in observed["prompt"]
+        assert "补充材料、复现线索、反方解释" in observed["prompt"]
         assert result["suggestion"].startswith("# 审稿辅助报告")
         assert result["queue_items"] == 2
         concerns = json.loads((out_dir / "peerassist_concerns.json").read_text(encoding="utf-8"))

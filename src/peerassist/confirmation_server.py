@@ -646,6 +646,107 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-color: #d8fff5;
       background: rgba(255, 255, 255, 0.14);
     }}
+    .pdf-agent-dock {{
+      display: grid;
+      grid-template-columns: minmax(180px, 0.9fr) minmax(240px, 1.1fr) minmax(250px, 1fr);
+      gap: 10px;
+      align-items: stretch;
+      padding: 10px 12px;
+      border-bottom: 1px solid #c7d0cc;
+      background: #edf5f2;
+    }}
+    .pdf-agent-card {{
+      min-width: 0;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background: #fff;
+      padding: 9px 10px;
+    }}
+    .pdf-agent-kicker {{
+      color: #0f766e;
+      font-size: 10px;
+      font-weight: 920;
+    }}
+    .pdf-agent-title {{
+      margin-top: 3px;
+      color: #182723;
+      font-size: 14px;
+      font-weight: 900;
+    }}
+    .pdf-agent-copy {{
+      margin-top: 3px;
+      color: #66736f;
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-agent-mode-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }}
+    .pdf-agent-mode {{
+      min-height: 30px;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background: #f8fbfa;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 860;
+      cursor: pointer;
+    }}
+    .pdf-agent-mode[aria-pressed="true"] {{
+      border-color: #0f766e;
+      background: #0f766e;
+      color: #fff;
+    }}
+    .pdf-agent-action-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }}
+    .pdf-agent-action {{
+      min-height: 32px;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background: #fff;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 880;
+      cursor: pointer;
+    }}
+    .pdf-agent-action.primary {{
+      border-color: #0f766e;
+      background: #0f766e;
+      color: #fff;
+    }}
+    .pdf-agent-status-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }}
+    .pdf-agent-status-chip {{
+      min-height: 34px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 6px 7px;
+    }}
+    .pdf-agent-status-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-agent-status-value {{
+      margin-top: 2px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }}
     .pdf-runtime-pulse {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1750,6 +1851,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .paper-comments {{ grid-template-columns: 1fr 1fr; }}
       .source-pdf-shell {{ min-height: 620px; }}
       .pdf-reader-stage {{ min-height: 580px; height: 70vh; }}
+      .pdf-agent-dock {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-agent-card:first-child {{ grid-column: 1 / -1; }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
@@ -1764,6 +1867,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-page-rail {{ padding: 8px; }}
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
+      .pdf-agent-dock {{ grid-template-columns: 1fr; }}
       .pdf-runtime-pulse {{ grid-template-columns: 1fr 1fr; }}
       .pdf-reader-stage {{ min-height: 480px; height: 68vh; padding: 14px; }}
       .agent-stage-board {{ grid-template-columns: 1fr 1fr; }}
@@ -2114,6 +2218,24 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (eventsEl) eventsEl.textContent = `${{runtime.tool_event_count || 0}} 条`;
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
+    function reviewModeLabel(mode) {{
+      const labels = {{fast: '快速', standard: '标准', deep: '深度'}};
+      return labels[mode] || labels.fast;
+    }}
+    function setPdfAgentReviewMode(mode) {{
+      const nextMode = ['fast', 'standard', 'deep'].includes(mode) ? mode : 'fast';
+      window.peerassistReviewMode = nextMode;
+      document.querySelectorAll('[data-pdf-agent-dock]').forEach((dock) => {{
+        dock.dataset.reviewMode = nextMode;
+      }});
+      document.querySelectorAll('[data-pdf-agent-mode]').forEach((button) => {{
+        button.setAttribute('aria-pressed', String(button.dataset.pdfAgentMode === nextMode));
+      }});
+      document.querySelectorAll('[data-pdf-agent-mode-label]').forEach((label) => {{
+        label.textContent = reviewModeLabel(nextMode);
+      }});
+    }}
+    window.peerassistSetPdfAgentReviewMode = setPdfAgentReviewMode;
     function handlePdfReviewCommand(command) {{
       if (command === 'agent-review') {{
         document.querySelector('[data-agent-review-start]')?.click();
@@ -2146,6 +2268,15 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     function wirePdfReviewCommands() {{
       document.querySelectorAll('[data-pdf-review-command]').forEach((button) => {{
         button.addEventListener('click', () => handlePdfReviewCommand(button.dataset.pdfReviewCommand || ''));
+      }});
+      document.querySelectorAll('[data-pdf-agent-action]').forEach((button) => {{
+        button.addEventListener('click', () => handlePdfReviewCommand(button.dataset.pdfAgentAction || ''));
+      }});
+      document.querySelectorAll('[data-pdf-agent-mode]').forEach((button) => {{
+        button.addEventListener('click', () => {{
+          setPdfAgentReviewMode(button.dataset.pdfAgentMode || 'fast');
+          showToast(`已切换为${{reviewModeLabel(window.peerassistReviewMode)}}审稿模式`);
+        }});
       }});
     }}
     window.peerassistHandlePdfReviewCommand = handlePdfReviewCommand;
@@ -2329,6 +2460,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-queue-search]').forEach((input) => {{
       input.addEventListener('input', () => applyQueueFilter());
     }});
+    setPdfAgentReviewMode('fast');
     wirePdfReviewCommands();
     document.querySelectorAll('[data-focus-review-toggle]').forEach((button) => {{
       button.addEventListener('click', () => {{
@@ -2394,14 +2526,16 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         if (!stream) return;
         button.disabled = true;
         const pageCopy = selectedEvidence.page ? `PDF 第 ${{selectedEvidence.page}} 页选区` : 'PDF 选区';
+        const reviewMode = window.peerassistReviewMode || 'fast';
+        const reviewModeCopy = reviewModeLabel(reviewMode);
         stream.textContent = selectedEvidence.text
-          ? `正在基于${{pageCopy}}启动智能审稿：读取论文证据台账、确定性核查、本地代理结果，并优先核对当前选中文字...`
-          : '正在按方法论启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...';
+          ? `正在以${{reviewModeCopy}}模式基于${{pageCopy}}启动智能审稿：读取论文证据台账、确定性核查、本地代理结果，并优先核对当前选中文字...`
+          : `正在以${{reviewModeCopy}}模式启动全篇智能审稿：读取证据台账、确定性核查、本地代理结果与现有确认队列...`;
         try {{
           const response = await fetch('/api/agent-review', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{selected_text: selectedText}})
+            body: JSON.stringify({{selected_text: selectedText, review_mode: reviewMode}})
           }});
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || '智能审稿失败');
@@ -2966,9 +3100,10 @@ def _normalize_pdf_key(value: str) -> str:
 
 
 def _run_agent_review(
-    *, run_dir: Path, selected_text: str, paper_id: str, state: dict[str, Any]
+    *, run_dir: Path, selected_text: str, paper_id: str, state: dict[str, Any], review_mode: str = "fast"
 ) -> dict[str, Any]:
     selected_text = selected_text.strip()
+    review_mode = _normalize_review_mode(review_mode)
     config = _resolve_model_config()
     api_key = _resolve_model_api_key()
     if not api_key:
@@ -2978,6 +3113,7 @@ def _run_agent_review(
         paper_id=paper_id,
         selected_text=selected_text,
         state=state,
+        review_mode=review_mode,
     )
     response = _chat_completion(
         api_key=api_key,
@@ -3009,12 +3145,18 @@ def _run_agent_review(
         "schema_version": "peerassist.agent_review_result.v1",
         "model": config["model"],
         "base_url": config["base_url"],
+        "review_mode": review_mode,
         "selected_text_chars": len(selected_text),
         "context": context["context_summary"],
         "draft_path": str(draft_path),
         **structured,
         "suggestion": report_markdown,
     }
+
+
+def _normalize_review_mode(value: str) -> str:
+    mode = value.strip().lower()
+    return mode if mode in {"fast", "standard", "deep"} else "fast"
 
 
 def _persist_agent_review_concerns(
@@ -3164,7 +3306,7 @@ def _evidence_lookup_from_ledger(path: Path) -> dict[str, str]:
 
 
 def _build_full_paper_review_context(
-    *, run_dir: Path, paper_id: str, selected_text: str, state: dict[str, Any]
+    *, run_dir: Path, paper_id: str, selected_text: str, state: dict[str, Any], review_mode: str
 ) -> dict[str, Any]:
     out_dir = peerassist_stage_dir(run_dir)
     ledger_payload = read_json_safely(out_dir / "evidence_ledger.json")
@@ -3178,6 +3320,12 @@ def _build_full_paper_review_context(
     return {
         "schema_version": "peerassist.full_paper_review_prompt.v1",
         "paper_id": paper_id,
+        "review_mode": review_mode,
+        "review_mode_policy": {
+            "fast": "优先覆盖主要证据、确定性核查和当前人工队列，输出精炼但可执行的审稿草稿。",
+            "standard": "在快速模式基础上补充结构、方法、统计、图表、引用和复现维度的均衡检查。",
+            "deep": "在标准模式基础上更严格地检查补充材料、复现线索、反方解释和证据缺口。",
+        }.get(review_mode, "优先覆盖主要证据、确定性核查和当前人工队列。"),
         "methodology": {
             "pipeline": [
                 "解析层",
@@ -3464,6 +3612,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                     result = _run_agent_review(
                         run_dir=run_dir,
                         selected_text=str(payload.get("selected_text") or ""),
+                        review_mode=str(payload.get("review_mode") or "fast"),
                         paper_id=paper_id,
                         state=state,
                     )
@@ -3980,6 +4129,44 @@ def _render_source_pdf_viewer() -> str:
           <button class="pdf-command-button" type="button" data-pdf-review-command="focus">专注模式</button>
         </div>
       </div>
+      <section class="pdf-agent-dock" data-pdf-agent-dock data-review-mode="fast" aria-label="PDF 智能体审稿操作坞">
+        <div class="pdf-agent-card">
+          <div class="pdf-agent-kicker">智能体入口</div>
+          <div class="pdf-agent-title">证据约束审稿</div>
+          <div class="pdf-agent-copy">当前 PDF、证据台账、确定性核查与人工队列会一起进入审稿上下文。</div>
+        </div>
+        <div class="pdf-agent-card">
+          <div class="pdf-agent-kicker">审稿模式</div>
+          <div class="pdf-agent-copy">当前：<span data-pdf-agent-mode-label>快速</span></div>
+          <div class="pdf-agent-mode-grid" role="group" aria-label="选择智能审稿模式">
+            <button class="pdf-agent-mode" type="button" data-pdf-agent-mode="fast" aria-pressed="true">快速</button>
+            <button class="pdf-agent-mode" type="button" data-pdf-agent-mode="standard" aria-pressed="false">标准</button>
+            <button class="pdf-agent-mode" type="button" data-pdf-agent-mode="deep" aria-pressed="false">深度</button>
+          </div>
+        </div>
+        <div class="pdf-agent-card">
+          <div class="pdf-agent-kicker">立即动作</div>
+          <div class="pdf-agent-action-grid">
+            <button class="pdf-agent-action primary" type="button" data-pdf-agent-action="agent-review">全篇审稿</button>
+            <button class="pdf-agent-action" type="button" data-pdf-agent-action="selection-review">选区审稿</button>
+            <button class="pdf-agent-action" type="button" data-pdf-agent-action="current-page">本页队列</button>
+          </div>
+          <div class="pdf-agent-status-grid" aria-label="智能体审稿约束">
+            <div class="pdf-agent-status-chip">
+              <div class="pdf-agent-status-label">证据</div>
+              <div class="pdf-agent-status-value">必绑定</div>
+            </div>
+            <div class="pdf-agent-status-chip">
+              <div class="pdf-agent-status-label">人工</div>
+              <div class="pdf-agent-status-value">逐条确认</div>
+            </div>
+            <div class="pdf-agent-status-chip">
+              <div class="pdf-agent-status-label">输出</div>
+              <div class="pdf-agent-status-value">中文草稿</div>
+            </div>
+          </div>
+        </div>
+      </section>
       <div class="pdf-runtime-pulse" data-pdf-runtime-pulse data-stream-source="connecting" aria-label="PDF 审稿运行脉冲">
         <div class="pdf-runtime-chip">
           <div class="pdf-runtime-label">事件流</div>
