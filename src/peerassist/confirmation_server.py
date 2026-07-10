@@ -698,6 +698,94 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       text-overflow: ellipsis;
       white-space: nowrap;
     }}
+    .pdf-reading-route-list {{
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+    }}
+    .pdf-reading-route-card {{
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      color: #25322f;
+      padding: 7px 8px;
+      text-align: left;
+      cursor: pointer;
+    }}
+    .pdf-reading-route-card[data-route-state="pending"] {{
+      border-color: #e4c783;
+      background: #fff8e6;
+    }}
+    .pdf-reading-route-card[data-route-state="major"] {{
+      border-color: #d39c3d;
+      background: #fff8ea;
+    }}
+    .pdf-reading-route-card[data-active="true"] {{
+      border-color: #0f766e;
+      background: #12302b;
+      color: #fff;
+    }}
+    .pdf-reading-route-page {{
+      min-width: 42px;
+      border-radius: 8px;
+      background: rgba(15, 118, 110, 0.1);
+      color: #0f766e;
+      padding: 6px 7px;
+      font-size: 10px;
+      font-weight: 920;
+      text-align: center;
+      white-space: nowrap;
+    }}
+    .pdf-reading-route-card[data-active="true"] .pdf-reading-route-page {{
+      background: rgba(216, 255, 245, 0.16);
+      color: #9df2de;
+    }}
+    .pdf-reading-route-title {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 900;
+    }}
+    .pdf-reading-route-meta {{
+      margin-top: 2px;
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .pdf-reading-route-card[data-active="true"] .pdf-reading-route-meta {{
+      color: #d8fff5;
+    }}
+    .pdf-reading-route-rank {{
+      color: #66736f;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+      font-weight: 900;
+    }}
+    .pdf-reading-route-card[data-active="true"] .pdf-reading-route-rank {{
+      color: #9df2de;
+    }}
+    .pdf-reading-route-empty {{
+      margin-top: 8px;
+      border: 1px dashed #cfdbd7;
+      border-radius: 8px;
+      padding: 8px;
+      color: #66736f;
+      background: #f8fbfa;
+      font-size: 11px;
+      font-weight: 800;
+      text-align: center;
+    }}
     .pdf-search-strip {{
       display: grid;
       grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1fr) auto;
@@ -3428,6 +3516,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const routeCurrent = reader.querySelector('[data-pdf-route-current]');
       const routePending = reader.querySelector('[data-pdf-route-pending]');
       const routeConcern = reader.querySelector('[data-pdf-route-concern]');
+      const readingRouteList = reader.querySelector('[data-pdf-reading-route-list]');
+      const readingRouteEmpty = reader.querySelector('[data-pdf-reading-route-empty]');
       const pageContextTitle = reader.querySelector('[data-pdf-page-context-title]');
       const pageContextCopy = reader.querySelector('[data-pdf-page-context-copy]');
       const annotationList = reader.querySelector('[data-pdf-annotation-list]');
@@ -3727,11 +3817,73 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         return pages.find((page) => page > pageNumber) || pages[0];
       }}
 
+      function isMajorRouteLevel(level) {{
+        return String(level || '').toLowerCase().includes('major');
+      }}
+
+      function reviewRouteScore(item) {{
+        const pendingScore = isResolvedConcernStatus(item.dataset.concernStatus) ? 0 : 1000;
+        const majorScore = isMajorRouteLevel(item.dataset.concernLevel) ? 200 : 0;
+        const currentPageScore = Number(item.dataset.pdfPage || 0) === pageNumber ? 80 : 0;
+        return pendingScore + majorScore + currentPageScore;
+      }}
+
+      function collectPdfReadingRouteItems() {{
+        return Array.from(document.querySelectorAll('.queue-body .item[data-concern-id][data-pdf-page]'))
+          .filter((item) => Number(item.dataset.pdfPage || 0) > 0)
+          .sort((left, right) => {{
+            const scoreDelta = reviewRouteScore(right) - reviewRouteScore(left);
+            if (scoreDelta !== 0) return scoreDelta;
+            const pageDelta = Number(left.dataset.pdfPage || 0) - Number(right.dataset.pdfPage || 0);
+            if (pageDelta !== 0) return pageDelta;
+            return String(left.dataset.concernTitle || '').localeCompare(String(right.dataset.concernTitle || ''), 'zh-Hans-CN');
+          }})
+          .slice(0, 4);
+      }}
+
+      function renderPdfReadingRoute() {{
+        if (!readingRouteList || !readingRouteEmpty) return;
+        const routeItems = collectPdfReadingRouteItems();
+        readingRouteList.replaceChildren();
+        readingRouteEmpty.hidden = routeItems.length > 0;
+        routeItems.forEach((item, index) => {{
+          const page = Number(item.dataset.pdfPage || 0);
+          const concernId = item.dataset.concernId || '';
+          const title = item.dataset.concernTitle || '未命名关注点';
+          const level = item.dataset.concernLevel || 'unknown';
+          const category = item.dataset.concernCategory || 'general';
+          const pending = !isResolvedConcernStatus(item.dataset.concernStatus);
+          const card = document.createElement('button');
+          card.type = 'button';
+          card.className = 'pdf-reading-route-card';
+          card.dataset.pdfReadingRouteCard = concernId;
+          card.dataset.pdfPage = String(page);
+          card.dataset.active = String(page === pageNumber);
+          card.dataset.routeState = pending ? 'pending' : isMajorRouteLevel(level) ? 'major' : 'ready';
+          card.title = `${{title}} · PDF 第 ${{page}} 页`;
+          card.innerHTML = `
+            <span class="pdf-reading-route-page">P${{page}}</span>
+            <span>
+              <span class="pdf-reading-route-title">${{escapeHtml(title)}}</span>
+              <span class="pdf-reading-route-meta">${{escapeHtml(level)}} · ${{escapeHtml(category)}} · ${{pending ? '待确认' : '已处理'}}</span>
+            </span>
+            <span class="pdf-reading-route-rank">#${{index + 1}}</span>
+          `;
+          card.addEventListener('click', () => {{
+            window.peerassistFocusAnnotation?.(concernId, '', 'queue', page);
+            appendPdfActivityLine('route', `按重点阅读路线定位 PDF 第 ${{page}} 页：${{title}}`);
+          }});
+          readingRouteList.appendChild(card);
+        }});
+      }}
+      window.peerassistRenderPdfReadingRoute = renderPdfReadingRoute;
+
       function updatePdfPageContext() {{
         const count = concernCountForPage(pageNumber);
         const pendingCount = pendingCountForPage(pageNumber);
         const nextPendingPage = nextPendingConcernPage();
         const nextPage = nextPendingPage || nextConcernPage();
+        renderPdfReadingRoute();
         if (routeCurrent) {{
           routeCurrent.textContent = pendingCount > 0
             ? `第 ${{pageNumber}} 页 · ${{pendingCount}} 条未处理`
@@ -5313,6 +5465,8 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
               <div class="pdf-route-value" data-pdf-route-concern>等待队列</div>
             </div>
           </div>
+          <div class="pdf-reading-route-list" data-pdf-reading-route-list aria-label="重点阅读路线"></div>
+          <div class="pdf-reading-route-empty" data-pdf-reading-route-empty>等待证据队列生成重点阅读路线。</div>
         </div>
       </section>
       <section class="pdf-search-strip" data-pdf-search-strip aria-label="PDF 原文检索">

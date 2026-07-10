@@ -330,6 +330,11 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "annotatePdfPageRail" in html
     assert "syncCurrentPdfPage" in html
     assert "updatePdfPageContext" in html
+    assert "collectPdfReadingRouteItems" in html
+    assert "renderPdfReadingRoute" in html
+    assert "peerassistRenderPdfReadingRoute" in html
+    assert "reviewRouteScore" in html
+    assert "按重点阅读路线定位 PDF 第" in html
     assert "peerassistPdfNextConcernPage" in html
     assert "peerassistPdfNextPendingConcernPage" in html
     assert "wirePdfReviewCommands" in html
@@ -415,6 +420,9 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "data-pdf-page-filter-current" in html
     assert "data-pdf-page-next-pending" in html
     assert "data-pdf-page-next-concern" in html
+    assert "data-pdf-reading-route-list" in html
+    assert "data-pdf-reading-route-empty" in html
+    assert "重点阅读路线" in html
     assert "只看本页队列" in html
     assert "下一未处理" in html
     assert "下一关注页" in html
