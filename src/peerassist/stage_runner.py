@@ -14,7 +14,11 @@ from common.pipeline_context import (
 )
 from peerassist.agents import integrate_agent_results, run_peerassist_agents
 from peerassist.capabilities import default_capability_registry
-from peerassist.confirmations import apply_confirmations, build_confirmation_bundle
+from peerassist.confirmations import (
+    apply_confirmations,
+    build_confirmation_bundle,
+    build_confirmation_review_queue,
+)
 from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
 from peerassist.ocr_providers import MinerUParseProvider
@@ -248,9 +252,15 @@ def run_peerassist_stage(
         )
     evidence_lookup = _evidence_lookup([item.model_dump(mode="json") for item in ledger.items])
     confirmation_bundle_path = out_dir / "confirmation_bundle.json"
+    confirmation_bundle = build_confirmation_bundle(concerns=concerns, evidence_lookup=evidence_lookup)
     write_json_file(
         confirmation_bundle_path,
-        build_confirmation_bundle(concerns=concerns, evidence_lookup=evidence_lookup),
+        confirmation_bundle,
+    )
+    confirmation_review_queue_path = out_dir / "confirmation_review_queue.json"
+    write_json_file(
+        confirmation_review_queue_path,
+        build_confirmation_review_queue(confirmation_bundle),
     )
 
     confirmed_concerns = apply_confirmations(concerns, _load_confirmations(confirmations_path))
@@ -269,6 +279,7 @@ def run_peerassist_stage(
     report_payload["agent_results_path"] = str(agent_results_path)
     report_payload["capability_invocations_path"] = str(capability_invocations_path)
     report_payload["confirmation_bundle_path"] = str(confirmation_bundle_path)
+    report_payload["confirmation_review_queue_path"] = str(confirmation_review_queue_path)
     report_payload["parse_provider"] = {
         "provider_name": parse_result.provider_name,
         "kind": parse_result.kind.value,
@@ -311,6 +322,7 @@ def run_peerassist_stage(
             "agent_results": str(agent_results_path),
             "concerns": str(concerns_path),
             "confirmation_bundle": str(confirmation_bundle_path),
+            "confirmation_review_queue": str(confirmation_review_queue_path),
             "human_confirmations": str(confirmations_path),
             "tool_trace": str(out_dir / "tool_trace.jsonl"),
             "report_md": str(report_md_path),

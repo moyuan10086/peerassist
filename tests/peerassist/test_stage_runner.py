@@ -40,6 +40,7 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
         "agent_results",
         "concerns",
         "confirmation_bundle",
+        "confirmation_review_queue",
         "human_confirmations",
         "tool_trace",
         "report_md",
@@ -63,6 +64,9 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     }
     assert report_payload["parse_provider"]["provider_name"] == "mineru"
     assert report_payload["confirmation_bundle_path"] == result.outputs["confirmation_bundle"]
+    assert report_payload["confirmation_review_queue_path"] == result.outputs[
+        "confirmation_review_queue"
+    ]
     assert report_payload["agent_results_path"] == result.outputs["agent_results"]
     assert report_payload["capability_invocations_path"] == result.outputs["capability_invocations"]
     assert report_payload["concerns"][0]["source_agent_ids"] == [
@@ -77,6 +81,14 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     assert all(row["status"] == "completed" for row in invocations["results"])
     bundle = json.loads(Path(result.outputs["confirmation_bundle"]).read_text(encoding="utf-8"))
     assert bundle["groups"]["pending_human_confirmation"][0]["evidence"][0]["locator"]
+    queue = json.loads(Path(result.outputs["confirmation_review_queue"]).read_text(encoding="utf-8"))
+    assert queue["items"][0]["allowed_actions"] == [
+        "confirm",
+        "rewrite",
+        "downgrade",
+        "delete",
+        "mark_pending",
+    ]
     trace_text = Path(result.outputs["tool_trace"]).read_text(encoding="utf-8")
     assert "resolve_parse_provider" in trace_text
     assert "percentage_consistency_check" in trace_text

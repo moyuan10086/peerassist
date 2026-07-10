@@ -6,6 +6,14 @@ from typing import Any
 
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus, HumanConfirmationAction
 
+ALLOWED_CONFIRMATION_ACTIONS = [
+    "confirm",
+    "rewrite",
+    "downgrade",
+    "delete",
+    "mark_pending",
+]
+
 
 def _apply_action(concern: Concern, action: HumanConfirmationAction) -> Concern:
     updated = concern.model_copy(deep=True)
@@ -69,4 +77,76 @@ def build_confirmation_bundle(
         "schema_version": "peerassist.confirmation_bundle.v1",
         "counts_by_status": {status: len(rows) for status, rows in groups.items()},
         "groups": groups,
+    }
+
+
+def build_confirmation_review_queue(bundle: dict[str, Any]) -> dict[str, Any]:
+    groups = bundle.get("groups") if isinstance(bundle.get("groups"), dict) else {}
+    ordered_statuses = [
+        ConcernStatus.PENDING_HUMAN_CONFIRMATION.value,
+        ConcernStatus.REWRITTEN.value,
+        ConcernStatus.DOWNGRADED.value,
+        ConcernStatus.CONFIRMED.value,
+        ConcernStatus.DELETED.value,
+    ]
+    items: list[dict[str, Any]] = []
+    for status in ordered_statuses:
+        rows = groups.get(status, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                items.append(_queue_item(row, position=len(items) + 1))
+    return {
+        "schema_version": "peerassist.confirmation_review_queue.v1",
+        "source_schema_version": bundle.get("schema_version", ""),
+        "total_items": len(items),
+        "items": items,
+        "allowed_actions": list(ALLOWED_CONFIRMATION_ACTIONS),
+    }
+
+
+def confirmation_action_from_queue_decision(
+    *,
+    concern_id: str,
+    action: str,
+    reviewer_id: str,
+    timestamp: str,
+    previous_text: str = "",
+    new_text: str = "",
+    reason: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> HumanConfirmationAction:
+    normalized = action.strip().lower()
+    if normalized not in ALLOWED_CONFIRMATION_ACTIONS:
+        raise ValueError(f"unsupported confirmation action: {action}")
+    return HumanConfirmationAction(
+        concern_id=concern_id,
+        action=normalized,
+        previous_text=previous_text,
+        new_text=new_text,
+        reviewer_id=reviewer_id,
+        timestamp=timestamp,
+        reason=reason,
+        metadata=dict(metadata or {}),
+    )
+
+
+def _queue_item(row: dict[str, Any], *, position: int) -> dict[str, Any]:
+    return {
+        "position": position,
+        "id": row.get("id", ""),
+        "status": row.get("status", ""),
+        "level": row.get("level", ""),
+        "category": row.get("category", ""),
+        "title": row.get("title", ""),
+        "impact": row.get("impact", ""),
+        "benign_explanation": row.get("benign_explanation", ""),
+        "author_action": row.get("author_action", ""),
+        "evidence": list(row.get("evidence") or []),
+        "evidence_ids": list(row.get("evidence_ids") or []),
+        "source_agent_ids": list(row.get("source_agent_ids") or []),
+        "source_check_ids": list(row.get("source_check_ids") or []),
+        "allowed_actions": list(ALLOWED_CONFIRMATION_ACTIONS),
+        "metadata": dict(row.get("metadata") or {}),
     }
