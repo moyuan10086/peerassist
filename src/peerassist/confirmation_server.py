@@ -1150,6 +1150,116 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .queue-empty[hidden] {{ display: none; }}
     .item:last-child {{ border-bottom: 0; }}
     .item h2 {{ margin: 0 0 10px; font-size: 18px; line-height: 1.25; letter-spacing: 0; }}
+    .evidence-chain {{
+      overflow: hidden;
+    }}
+    .evidence-chain-head {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(90deg, #fbfdfc, #f6fbff);
+    }}
+    .evidence-chain-title {{
+      margin: 0;
+      color: #172320;
+      font-size: 15px;
+      font-weight: 900;
+    }}
+    .evidence-chain-copy {{
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .evidence-chain-count {{
+      border: 1px solid #c9ddd8;
+      border-radius: 999px;
+      padding: 5px 10px;
+      color: var(--accent-strong);
+      background: #eef8f4;
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }}
+    .evidence-chain-grid {{
+      display: grid;
+      padding: 0 16px 14px;
+      background: #fff;
+    }}
+    .evidence-chain-row {{
+      display: grid;
+      grid-template-columns: minmax(180px, 1.35fr) 76px 84px minmax(120px, 0.8fr) 92px 92px 116px;
+      gap: 10px;
+      align-items: center;
+      min-height: 58px;
+      border-bottom: 1px solid #edf1ef;
+      color: #24312e;
+      font-size: 12px;
+    }}
+    .evidence-chain-row:last-child {{ border-bottom: 0; }}
+    .evidence-chain-row[data-active="true"] {{
+      background: #eef8f4;
+      box-shadow: inset 3px 0 0 var(--accent);
+    }}
+    .evidence-chain-row.header {{
+      min-height: 34px;
+      color: #6a7572;
+      font-size: 11px;
+      font-weight: 900;
+    }}
+    .chain-title {{
+      min-width: 0;
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .chain-muted {{ color: var(--muted); font-size: 11px; }}
+    .chain-pill {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: fit-content;
+      max-width: 100%;
+      min-height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 8px;
+      background: #fafcfb;
+      color: #3d4845;
+      font-size: 11px;
+      font-weight: 850;
+      overflow-wrap: anywhere;
+    }}
+    .chain-pill.ok {{ border-color: #bee0d7; color: var(--accent-strong); background: #eef8f4; }}
+    .chain-pill.warn {{ border-color: #eed9a9; color: var(--amber); background: #fff8e6; }}
+    .chain-pill.danger {{ border-color: #f0c4c4; color: var(--danger); background: #fff3f3; }}
+    .chain-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      justify-content: flex-end;
+    }}
+    .chain-action {{
+      min-height: 26px;
+      border: 1px solid #cbd6d2;
+      border-radius: 8px;
+      padding: 4px 8px;
+      background: #fff;
+      color: #26322f;
+      font-size: 11px;
+      font-weight: 850;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .chain-action:hover {{
+      border-color: #9bc9bd;
+      color: var(--accent-strong);
+      background: #f4fbf8;
+    }}
     .tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }}
     .tag {{
       border: 1px solid var(--line);
@@ -1571,6 +1681,14 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .queue-toolbar {{ grid-template-columns: 1fr; }}
       .queue-filterbar {{ grid-template-columns: 1fr; }}
       .queue-result-count {{ white-space: normal; }}
+      .evidence-chain-row {{
+        grid-template-columns: minmax(0, 1fr) 68px 72px 86px;
+      }}
+      .evidence-chain-row.header span:nth-child(n+5),
+      .evidence-chain-row:not(.header) > span:nth-child(n+5),
+      .evidence-chain-row:not(.header) > div:nth-child(n+5) {{
+        display: none;
+      }}
       .right-stack {{ grid-template-columns: 1fr; }}
     }}
   </style>
@@ -1672,6 +1790,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     </aside>
     <section class="paper-review-stage" data-panel="paper-review-stage">
       {_render_paper_review_surface(items, paper_id=paper_id, evidence_preview=evidence_preview, has_source_pdf=source_pdf_path is not None)}
+      {_render_evidence_chain_matrix(items, events=events, invocations=invocations)}
       <section class="panel queue" data-panel="review-queue" id="review-queue">
         <div class="panel-header">
           <p class="panel-title">证据审稿队列</p>
@@ -1968,14 +2087,16 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     function focusAnnotation(concernId, evidenceId, target, pdfPage) {{
       clearAnnotationActiveState();
-      const item = concernId ? document.querySelector(`[data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
+      const item = concernId ? document.querySelector(`.queue-body .item[data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
       const highlight = evidenceId ? document.querySelector(`[data-evidence-anchor="${{CSS.escape(evidenceId)}}"]`) : null;
       const comment = concernId ? document.querySelector(`[data-paper-concern="${{CSS.escape(concernId)}}"].paper-comment`) : null;
       const pdfAnnotation = concernId ? document.querySelector(`[data-pdf-annotation-card="${{CSS.escape(concernId)}}"]`) : null;
+      const chainRow = concernId ? document.querySelector(`[data-evidence-chain-row][data-concern-id="${{CSS.escape(concernId)}}"]`) : null;
       if (item) item.dataset.active = 'true';
       if (highlight) highlight.dataset.active = 'true';
       if (comment) comment.dataset.active = 'true';
       if (pdfAnnotation) pdfAnnotation.dataset.active = 'true';
+      if (chainRow) chainRow.dataset.active = 'true';
       const scrollTarget = target === 'queue' ? item : highlight || comment;
       if (scrollTarget) {{
         scrollTarget.scrollIntoView({{behavior: 'smooth', block: 'center'}});
@@ -3332,6 +3453,146 @@ def _event_status_count(events: list[Any], status: str) -> int:
         if isinstance(row, dict)
         and str(row.get("status") or "").replace(" ", "_").lower() == expected
     )
+
+
+def _render_evidence_chain_matrix(
+    items: list[Any], *, events: list[Any], invocations: list[Any]
+) -> str:
+    concerns = [item for item in items if isinstance(item, dict)]
+    if not concerns:
+        return """
+<section class="panel evidence-chain" data-panel="evidence-chain-matrix">
+  <div class="evidence-chain-head">
+    <div>
+      <p class="evidence-chain-title">证据链矩阵</p>
+      <div class="evidence-chain-copy">暂无待展示的审稿关注点。</div>
+    </div>
+    <span class="evidence-chain-count">0 条</span>
+  </div>
+</section>
+"""
+    rows: list[str] = [
+        """
+  <div class="evidence-chain-row header" aria-hidden="true">
+    <span>关注点</span><span>PDF 页</span><span>证据数</span><span>来源代理</span><span>调用状态</span><span>人工状态</span><span>操作</span>
+  </div>
+"""
+    ]
+    for item in concerns:
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        evidence_rows = [row for row in evidence if isinstance(row, dict)]
+        first_evidence = evidence_rows[0] if evidence_rows else {}
+        evidence_ids = {
+            str(row.get("id"))
+            for row in evidence_rows
+            if isinstance(row.get("id"), str) and str(row.get("id")).strip()
+        }
+        concern_id = str(item.get("id") or "")
+        title = _localized_copy(str(item.get("title") or "未命名关注点"))
+        if len(title) > 54:
+            title = title[:51].rstrip() + "..."
+        pdf_page = _evidence_pdf_page(first_evidence)
+        pdf_page_text = f"第 {pdf_page} 页" if pdf_page else "未绑定"
+        source_agents = item.get("source_agent_ids") if isinstance(item.get("source_agent_ids"), list) else []
+        agent_text = "、".join(_display_name(str(agent_id)) for agent_id in source_agents[:2])
+        if len(source_agents) > 2:
+            agent_text += f" +{len(source_agents) - 2}"
+        if not agent_text:
+            agent_text = "待归属"
+        call_status = _evidence_chain_call_status(
+            evidence_ids=evidence_ids,
+            source_agents={str(agent_id) for agent_id in source_agents},
+            events=events,
+            invocations=invocations,
+        )
+        call_label, call_class = _evidence_chain_status_badge(call_status)
+        human_status = _localized_status(str(item.get("status") or "pending_human_confirmation"))
+        human_class = (
+            "ok"
+            if str(item.get("status") or "").lower() in {"confirmed", "rewritten", "downgraded"}
+            else "warn"
+        )
+        pdf_page_attr = f' data-pdf-page="{pdf_page}"' if pdf_page else ""
+        evidence_anchor = str(first_evidence.get("id") or concern_id)
+        rows.append(
+            f"""
+  <div class="evidence-chain-row" data-evidence-chain-row data-concern-id="{html.escape(concern_id, quote=True)}"{pdf_page_attr}>
+    <div>
+      <div class="chain-title">{html.escape(title)}</div>
+      <div class="chain-muted">{html.escape(str(first_evidence.get('locator') or '未标注位置'))}</div>
+    </div>
+    <span class="chain-pill">{html.escape(pdf_page_text)}</span>
+    <span class="chain-pill ok">{len(evidence_rows)} 条</span>
+    <span class="chain-pill">{html.escape(agent_text)}</span>
+    <span class="chain-pill {call_class}">{html.escape(call_label)}</span>
+    <span class="chain-pill {human_class}">{html.escape(human_status)}</span>
+    <div class="chain-actions">
+      <button class="chain-action" type="button" data-jump-concern="{html.escape(concern_id, quote=True)}" data-paper-target="{html.escape(evidence_anchor, quote=True)}"{pdf_page_attr}>定位</button>
+    </div>
+  </div>
+"""
+        )
+    return f"""
+<section class="panel evidence-chain" data-panel="evidence-chain-matrix" aria-label="证据链矩阵">
+  <div class="evidence-chain-head">
+    <div>
+      <p class="evidence-chain-title">证据链矩阵</p>
+      <div class="evidence-chain-copy">把每条关注点的 PDF 位置、证据、代理来源、调用状态和人工状态放在同一行。</div>
+    </div>
+    <span class="evidence-chain-count">{len(concerns)} 条关注点</span>
+  </div>
+  <div class="evidence-chain-grid">
+    {''.join(rows)}
+  </div>
+</section>
+"""
+
+
+def _evidence_chain_call_status(
+    *,
+    evidence_ids: set[str],
+    source_agents: set[str],
+    events: list[Any],
+    invocations: list[Any],
+) -> str:
+    statuses: list[str] = []
+    for row in [*events, *invocations]:
+        if not isinstance(row, dict):
+            continue
+        row_evidence = row.get("evidence_ids") if isinstance(row.get("evidence_ids"), list) else []
+        row_evidence_ids = {str(value) for value in row_evidence if str(value).strip()}
+        row_agent = str(row.get("agent_id") or "")
+        matches_evidence = bool(evidence_ids and row_evidence_ids & evidence_ids)
+        matches_agent = bool(source_agents and row_agent in source_agents)
+        if matches_evidence or matches_agent:
+            statuses.append(str(row.get("status") or "").replace(" ", "_").lower())
+    if not statuses:
+        return "not_recorded"
+    priority = [
+        "failed",
+        "approval_required",
+        "running",
+        "progress",
+        "started",
+        "queued",
+        "completed",
+    ]
+    for status in priority:
+        if status in statuses:
+            return status
+    return statuses[-1] or "not_recorded"
+
+
+def _evidence_chain_status_badge(status: str) -> tuple[str, str]:
+    if status == "failed":
+        return "失败", "danger"
+    if status == "approval_required":
+        return "需批准", "warn"
+    if status in {"running", "progress", "started", "queued"}:
+        return "进行中", "warn"
+    if status == "completed":
+        return "已完成", "ok"
+    return "未记录", "warn"
 
 
 def _render_evidence_focus(items: list[Any]) -> str:

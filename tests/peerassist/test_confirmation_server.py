@@ -195,6 +195,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "人工确认完成度" in html
     assert "实时事件" in html
     assert "证据焦点" in html
+    assert 'data-panel="evidence-chain-matrix"' in html
+    assert "证据链矩阵" in html
+    assert "data-evidence-chain-row" in html
+    assert "调用状态" in html
+    assert "人工状态" in html
+    assert "把每条关注点的 PDF 位置、证据、代理来源、调用状态和人工状态放在同一行。" in html
     assert "产物工作区" in html
     assert "智能体审稿入口" in html
     assert "开始全篇智能审稿" in html
@@ -286,6 +292,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "查看原文高亮" in html
     assert "定位队列" in html
     assert "focusAnnotation" in html
+    assert "chainRow" in html
+    assert ".queue-body .item[data-concern-id=" in html
     assert "peerassistPdfGoToPage" in html
     assert "已跳转到 PDF 第" in html
     assert "data-pdf-page-rail" in html
