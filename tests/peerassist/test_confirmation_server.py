@@ -171,6 +171,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "agent-timeline" in html
     assert 'data-stream-state="connecting"' in html
     assert "new EventSource('/api/events')" in html
+    assert "addEventListener('heartbeat'" in html
+    assert "addEventListener('done'" in html
     assert "统计核查代理" in html
     assert "报告百分比需要澄清" in html
     assert "确认" in html
@@ -208,7 +210,10 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
             event_text = response.read().decode("utf-8")
             content_type = response.headers["Content-Type"]
         assert content_type.startswith("text/event-stream")
+        assert "retry: 15000" in event_text
         assert "event: state" in event_text
+        assert "event: heartbeat" in event_text
+        assert "event: done" in event_text
         assert '"schema_version": "peerassist.confirmation_state.v1"' in event_text
 
         payload = json.dumps(

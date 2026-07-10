@@ -92,3 +92,11 @@ model keys, paper secrets, or reviewer-private material here.
 - The page returns the modern Chinese agent UI with "运行态指挥条", "会话导览", "证据焦点", and "证据审稿队列".
 - Feishu document revision 41 adds section "十三、2026-07-11 PeerAssist 公网服务启动记录".
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
+
+## 2026-07-11 01:25 CST - PeerAssist SSE stream lifecycle
+
+- The confirmation console /api/events endpoint now emits retry, state, heartbeat, and done SSE frames instead of a single state-only snapshot.
+- Frontend EventSource logic now listens for heartbeat and done while preserving /api/state polling fallback.
+- Public URL verified: http://101.47.158.17:8766/api/events returns retry: 15000, event: state, event: heartbeat, and event: done.
+- Feishu document revision 42 adds section "十四、2026-07-11 PeerAssist SSE 数据流增强".
+- Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.

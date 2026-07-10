@@ -644,6 +644,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const events = new EventSource('/api/events');
       events.addEventListener('state', (event) => {{
         updateRuntime(JSON.parse(event.data), 'stream');
+      }});
+      events.addEventListener('heartbeat', (event) => {{
+        const streamStatus = document.getElementById('stream-status');
+        if (streamStatus) streamStatus.textContent = '事件流心跳正常';
+      }});
+      events.addEventListener('done', () => {{
         events.close();
       }});
       events.onerror = () => {{
@@ -756,8 +762,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             self.wfile.write(body)
 
         def _send_sse_state(self, payload: dict[str, Any]) -> None:
-            data = json.dumps(payload, ensure_ascii=False)
-            body = f"event: state\ndata: {data}\n\n".encode("utf-8")
+            body = _sse_stream(payload)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -767,6 +772,32 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             self.wfile.write(body)
 
     return ConfirmationHandler
+
+
+def _sse_stream(payload: dict[str, Any]) -> bytes:
+    state_data = json.dumps(payload, ensure_ascii=False)
+    heartbeat = json.dumps(
+        {
+            "schema_version": "peerassist.confirmation_stream_event.v1",
+            "event": "heartbeat",
+            "pending_count": int(payload.get("pending_count") or 0),
+            "actions_count": int(payload.get("actions_count") or 0),
+        },
+        ensure_ascii=False,
+    )
+    done = json.dumps(
+        {
+            "schema_version": "peerassist.confirmation_stream_event.v1",
+            "event": "done",
+        },
+        ensure_ascii=False,
+    )
+    return (
+        "retry: 15000\n"
+        f"event: state\ndata: {state_data}\n\n"
+        f"event: heartbeat\ndata: {heartbeat}\n\n"
+        f"event: done\ndata: {done}\n\n"
+    ).encode("utf-8")
 
 
 def _render_item(item: dict[str, Any]) -> str:
