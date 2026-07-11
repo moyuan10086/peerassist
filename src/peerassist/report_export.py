@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any
 
+from schemas.citation import CitationAudit
 from schemas.peerassist import Concern, ConcernStatus
 
 CONFIRMED_STATUSES = {
@@ -48,6 +50,16 @@ REPORT_COPY = {
         "provenance": "## Provenance Appendix",
         "confirmed_count": "Confirmed concerns",
         "pending_count": "Pending manual checks",
+        "citation_audit": "## Citation Audit",
+        "citation_audit_path": "Audit path",
+        "citation_records": "Reference records",
+        "citation_links": "Citation links",
+        "citation_findings": "Findings by status",
+        "citation_verifications": "Verifications by status",
+        "citation_audit_limitation": (
+            "`not_found`, `unavailable`, and `verification_failed` results require manual review; "
+            "they do not prove a reference is nonexistent or fraudulent."
+        ),
     },
     "zh": {
         "title": "# PeerAssist 论文审核辅助报告",
@@ -77,6 +89,16 @@ REPORT_COPY = {
         "provenance": "## 溯源附录",
         "confirmed_count": "已确认意见",
         "pending_count": "待人工确认检查项",
+        "citation_audit": "## 引用核查与溯源",
+        "citation_audit_path": "核查路径",
+        "citation_records": "参考文献记录",
+        "citation_links": "引用链接",
+        "citation_findings": "按状态统计的发现",
+        "citation_verifications": "按状态统计的核验",
+        "citation_audit_limitation": (
+            "`not_found`、`unavailable` 和 `verification_failed` 结果需要人工复核；"
+            "它们不能证明参考文献不存在或存在造假。"
+        ),
     },
 }
 
@@ -124,12 +146,36 @@ def _concern_block(
     ]
 
 
+def _citation_audit_summary(citation_audit: CitationAudit | None) -> dict[str, Any]:
+    if citation_audit is None:
+        return {}
+    validated_audit = CitationAudit.model_validate(citation_audit)
+    return {
+        "record_count": len(validated_audit.records),
+        "link_count": len(validated_audit.links),
+        "finding_status_counts": dict(
+            sorted(Counter(finding.status.value for finding in validated_audit.findings).items())
+        ),
+        "verification_status_counts": dict(
+            sorted(
+                Counter(verification.status.value for verification in validated_audit.verifications).items()
+            )
+        ),
+    }
+
+
+def _status_counts_text(status_counts: dict[str, int]) -> str:
+    return ", ".join(f"`{status}`: `{count}`" for status, count in status_counts.items()) or "`none`: `0`"
+
+
 def export_peerassist_report(
     *,
     paper_id: str,
     concerns: list[Concern],
     evidence_lookup: dict[str, str] | None = None,
     language: str = "en",
+    citation_audit: CitationAudit | None = None,
+    citation_audit_path: str = "",
 ) -> tuple[str, dict[str, Any]]:
     evidence_lookup = evidence_lookup or {}
     normalized_language = str(language or "en").strip().lower()
@@ -142,6 +188,7 @@ def export_peerassist_report(
 
     confirmed = [concern for concern in active if concern.status in CONFIRMED_STATUSES]
     pending = [concern for concern in active if concern.status is ConcernStatus.PENDING_HUMAN_CONFIRMATION]
+    citation_audit_summary = _citation_audit_summary(citation_audit)
 
     lines: list[str] = [
         str(copy["title"]),
@@ -168,6 +215,23 @@ def export_peerassist_report(
     else:
         lines.extend([str(copy["no_pending"]), ""])
 
+    if citation_audit is not None:
+        lines.extend(
+            [
+                str(copy["citation_audit"]),
+                "",
+                f"- {copy['citation_audit_path']}: `{citation_audit_path}`",
+                f"- {copy['citation_records']}: `{citation_audit_summary['record_count']}`",
+                f"- {copy['citation_links']}: `{citation_audit_summary['link_count']}`",
+                f"- {copy['citation_findings']}: "
+                f"{_status_counts_text(citation_audit_summary['finding_status_counts'])}",
+                f"- {copy['citation_verifications']}: "
+                f"{_status_counts_text(citation_audit_summary['verification_status_counts'])}",
+                f"- {copy['citation_audit_limitation']}",
+                "",
+            ]
+        )
+
     lines.extend(
         [
             str(copy["limitations"]),
@@ -187,5 +251,7 @@ def export_peerassist_report(
         "confirmed_count": len(confirmed),
         "pending_count": len(pending),
         "concerns": [concern.model_dump(mode="json") for concern in active],
+        "citation_audit_path": citation_audit_path,
+        "citation_audit_summary": citation_audit_summary,
     }
     return "\n".join(lines).rstrip() + "\n", payload

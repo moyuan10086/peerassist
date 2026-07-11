@@ -357,12 +357,16 @@ def run_peerassist_stage(
         concerns=confirmed_concerns,
         evidence_lookup=evidence_lookup,
         language="en",
+        citation_audit=citation_result.audit,
+        citation_audit_path=str(citation_result.audit_path),
     )
     report_zh_md, _report_zh_payload = export_peerassist_report(
         paper_id=paper_key,
         concerns=confirmed_concerns,
         evidence_lookup=evidence_lookup,
         language="zh",
+        citation_audit=citation_result.audit,
+        citation_audit_path=str(citation_result.audit_path),
     )
     report_payload["agent_results_path"] = str(agent_results_path)
     report_payload["capability_invocations_path"] = str(capability_invocations_path)

@@ -91,6 +91,12 @@ def test_run_peerassist_stage_writes_traceable_citation_audit(tmp_path: Path) ->
         row["call_id"] for row in trace
     }
     assert any(row["status"] == "artifact_created" for row in trace)
+    report_payload = json.loads(Path(result.outputs["report_json"]).read_text(encoding="utf-8"))
+    assert report_payload["citation_audit_path"] == result.outputs["citation_audit"]
+    assert report_payload["citation_audit_summary"]["record_count"] == len(audit["records"])
+    assert report_payload["citation_audit_summary"]["link_count"] == len(audit["links"])
+    assert "## Citation Audit" in Path(result.outputs["report_en_md"]).read_text(encoding="utf-8")
+    assert "## 引用核查与溯源" in Path(result.outputs["report_zh_md"]).read_text(encoding="utf-8")
 
 
 def test_run_peerassist_stage_missing_refcheck_remains_ok_with_insufficient_evidence(tmp_path: Path) -> None:
