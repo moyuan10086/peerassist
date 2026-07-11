@@ -49,6 +49,7 @@ _REFERENCE_ONLY_STATUSES = frozenset(
     }
 )
 _NUMBERED_REFERENCE_PREFIX_RE = re.compile(r"^\s*\[\s*(?P<number>\d+)\s*\]")
+_COMPARABLE_METADATA_FIELDS = frozenset({"doi", "title", "year"})
 
 
 class CitationAuditIntegrityError(Exception):
@@ -78,7 +79,9 @@ def finding_status_for(
     if verification.status is VerificationStatus.FAILED:
         return CitationFindingStatus.VERIFICATION_FAILED
 
-    differences = verification.field_differences
+    differences = [
+        item for item in verification.field_differences if item.field in _COMPARABLE_METADATA_FIELDS
+    ]
     if any(item.comparison is CitationFieldComparison.MISMATCH for item in differences):
         return CitationFindingStatus.METADATA_MISMATCH
     comparable_fields = {
@@ -136,6 +139,7 @@ def validate_citation_audit(
     artifact_root: str | Path,
 ) -> None:
     """Validate all audit references and immutable response-artifact bindings."""
+    _validate_verification_match_contracts(audit.verifications)
     _validate_schema(audit)
     if audit.paper_id != ledger.paper_id:
         _fail("paper_id_mismatch")
@@ -491,6 +495,40 @@ def _validate_verification_provenance_uniqueness(verifications: Iterable[Citatio
         if verification.raw_response_artifact.path in artifact_paths:
             _fail("duplicate_response_artifact_path")
         artifact_paths.add(verification.raw_response_artifact.path)
+
+
+def _validate_verification_match_contracts(verifications: Iterable[CitationVerification]) -> None:
+    for verification in verifications:
+        match = verification.match
+        if match is None:
+            if verification.status in {
+                VerificationStatus.COMPLETED,
+                VerificationStatus.NOT_FOUND,
+                VerificationStatus.AMBIGUOUS,
+            }:
+                _fail("verification_match_mismatch")
+            continue
+
+        candidate_ids = match.candidate_ids
+        if len(candidate_ids) != len(set(candidate_ids)) or match.candidate_count != len(candidate_ids):
+            _fail("verification_match_mismatch")
+        if verification.status is VerificationStatus.COMPLETED:
+            if (
+                match.candidate_count != 1
+                or not match.selected_candidate_id
+                or match.selected_candidate_id not in candidate_ids
+                or verification.source_record is None
+                or verification.source_record.id != match.selected_candidate_id
+            ):
+                _fail("verification_match_mismatch")
+        elif verification.status is VerificationStatus.NOT_FOUND:
+            if match.candidate_count != 0 or candidate_ids or match.selected_candidate_id is not None:
+                _fail("verification_match_mismatch")
+        elif verification.status is VerificationStatus.AMBIGUOUS:
+            if match.candidate_count < 1 or match.selected_candidate_id is not None:
+                _fail("verification_match_mismatch")
+        elif verification.status is VerificationStatus.UNAVAILABLE:
+            _fail("verification_match_mismatch")
 
 
 def _validate_response_artifact(verification: CitationVerification, artifact_root: str | Path) -> None:

@@ -416,6 +416,71 @@ def test_comparable_fields_require_distinct_names(tmp_path: Path) -> None:
     assert finding_status_for(link(), completed) is CitationFindingStatus.INSUFFICIENT_EVIDENCE
 
 
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_policy_excluded_metadata_differences_do_not_verify_or_mismatch(
+    tmp_path: Path, mismatch: bool
+) -> None:
+    completed = verification(tmp_path)
+    completed.field_differences = [
+        difference(0, mismatch=mismatch).model_copy(update={"field": "authors"}),
+        difference(1, mismatch=mismatch).model_copy(update={"field": "publisher"}),
+    ]
+    assert finding_status_for(link(), completed) is CitationFindingStatus.INSUFFICIENT_EVIDENCE
+
+
+def test_doi_and_title_comparisons_verify_completed_reference(tmp_path: Path) -> None:
+    completed = verification(tmp_path)
+    completed.field_differences = [difference(0, mismatch=False), difference(1, mismatch=False)]
+    assert finding_status_for(link(), completed) is CitationFindingStatus.VERIFIED
+
+
+def test_rejects_inconsistent_verification_match_candidate_summary(tmp_path: Path) -> None:
+    audit = valid_audit(tmp_path)
+    assert audit.verifications[0].match is not None
+    audit.verifications[0].match.candidate_ids = ["different-candidate"]
+    with pytest.raises(CitationAuditIntegrityError, match="verification_match_mismatch"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+    ambiguous = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record()],
+        links=[link()],
+        selected_verifications=[verification(tmp_path / "ambiguous", status=VerificationStatus.AMBIGUOUS)],
+    )
+    assert ambiguous.verifications[0].match is not None
+    ambiguous.verifications[0].match.candidate_ids = ["external-1"]
+    with pytest.raises(CitationAuditIntegrityError, match="verification_match_mismatch"):
+        validate_citation_audit(ambiguous, ledger(), tmp_path / "ambiguous")
+
+    duplicate_candidates = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record()],
+        links=[link()],
+        selected_verifications=[verification(tmp_path / "duplicate-candidates", status=VerificationStatus.AMBIGUOUS)],
+    )
+    assert duplicate_candidates.verifications[0].match is not None
+    duplicate_candidates.verifications[0].match.candidate_ids = ["external-1", "external-1"]
+    with pytest.raises(CitationAuditIntegrityError, match="verification_match_mismatch"):
+        validate_citation_audit(duplicate_candidates, ledger(), tmp_path / "duplicate-candidates")
+
+    not_found = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record()],
+        links=[link()],
+        selected_verifications=[verification(tmp_path / "not-found", status=VerificationStatus.NOT_FOUND)],
+    )
+    assert not_found.verifications[0].match is not None
+    not_found.verifications[0].match.candidate_ids = ["unexpected"]
+    with pytest.raises(CitationAuditIntegrityError, match="verification_match_mismatch"):
+        validate_citation_audit(not_found, ledger(), tmp_path / "not-found")
+
+
 @pytest.mark.parametrize(
     "coverage",
     [
