@@ -13,11 +13,8 @@ _DOI_PREFIX_RE = re.compile(r"^(?:doi\s*:\s*|https?://(?:dx\.)?doi\.org/)", re.I
 
 
 def normalize_doi(value: object) -> str:
-    """Return a canonical DOI while retaining DOI punctuation and balanced delimiters."""
+    """Return a canonical DOI without changing meaningful DOI punctuation."""
     doi = _DOI_PREFIX_RE.sub("", str(value or "").strip())
-    doi = doi.rstrip(".,;:")
-    while doi.endswith(")") and doi.count(")") > doi.count("("):
-        doi = doi[:-1].rstrip(".,;:")
     return doi.lower()
 
 
@@ -103,6 +100,7 @@ def compare_reference_metadata(
     if reference.title and external_title:
         manuscript_title = normalize_title(reference.title)
         observed_title = normalize_title(external_title)
+        similarity = title_similarity(reference.title, external_title)
         differences.append(
             _field_difference(
                 field="title",
@@ -110,8 +108,8 @@ def compare_reference_metadata(
                 external_value=external_title,
                 normalized_manuscript_value=manuscript_title,
                 normalized_external_value=observed_title,
-                is_match=manuscript_title == observed_title,
-                rule="normalized_title_exact",
+                is_match=similarity >= 0.95,
+                rule="title_similarity_unique" if similarity >= 0.95 else "title_similarity_below_unique",
             )
         )
 

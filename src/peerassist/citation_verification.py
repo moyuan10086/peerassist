@@ -1,9 +1,12 @@
-"""Adapters and immutable attempts for auditable citation metadata verification."""
+"""Adapters and attempts for auditable citation metadata verification."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
+import threading
+import unicodedata
 from collections.abc import Mapping, MutableSequence, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,6 +14,12 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+from peerassist.citation_artifacts import (
+    ArtifactSerializationError,
+    ArtifactWriteError,
+    validate_response_artifact,
+    write_response_artifact,
+)
 from peerassist.citation_metadata import (
     compare_reference_metadata,
     normalize_doi,
@@ -31,6 +40,19 @@ _RETRYABLE_CODES = frozenset({"timeout", "rate_limit", "transient_5xx"})
 _NO_RESPONSE = object()
 _REFCHECK_LIST_FIELDS = frozenset({"issues", "error_details", "warning_details", "unverified_details"})
 _REFCHECK_INTEGER_FIELDS = frozenset({"total_refs", "errors", "warnings", "unverified"})
+_REFCHECK_ROW_FIELDS = frozenset(
+    {
+        "severity",
+        "type",
+        "reference_title",
+        "reference_year",
+        "cited_url",
+        "verified_url",
+        "details",
+        "raw_reference",
+        "corrected_bibtex",
+    }
+)
 _TERMINAL_STATUSES = frozenset(
     {
         VerificationStatus.COMPLETED,
@@ -39,6 +61,12 @@ _TERMINAL_STATUSES = frozenset(
         VerificationStatus.UNAVAILABLE,
     }
 )
+_BIBTEX_FIELD_RE = re.compile(
+    r"\b(?P<field>title|year|doi|url)\s*=\s*(?P<value>\{(?:[^{}]|\{[^{}]*\})*\}|\"[^\"]*\")",
+    re.IGNORECASE,
+)
+_ATTEMPT_LOCKS: dict[str, threading.Lock] = {}
+_ATTEMPT_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -48,7 +76,7 @@ class MetadataLookupResult:
 
 
 class CitationAdapterError(Exception):
-    """A classified adapter error that is safe for deterministic retry policy."""
+    """A classified adapter failure, optionally retaining a received response."""
 
     def __init__(
         self,
@@ -69,11 +97,11 @@ class CitationMetadataAdapter(Protocol):
     version: str
 
     def lookup(self, record: ReferenceRecord) -> MetadataLookupResult:
-        """Return candidate metadata and an auditable raw response."""
+        """Return candidates and their raw source response, or raise a classified error."""
 
 
 class OfflineMetadataVerifier:
-    """A network-free, fixed-record adapter for tests and frozen fixtures."""
+    """A fixed-record, network-free adapter for tests and frozen fixtures."""
 
     name = "offline"
     version = "1"
@@ -82,28 +110,13 @@ class OfflineMetadataVerifier:
         self._records = [dict(record) for record in records]
 
     def lookup(self, record: ReferenceRecord) -> MetadataLookupResult:
-        exact_doi = normalize_doi(record.doi)
-        doi_matches = [
-            candidate
-            for candidate in self._records
-            if exact_doi and normalize_doi(candidate.get("doi")) == exact_doi
-        ]
-        if doi_matches:
-            candidates = doi_matches
-        elif record.title:
-            candidates = [
-                candidate
-                for candidate in self._records
-                if candidate.get("title") and title_similarity(record.title, candidate["title"]) >= 0.85
-            ]
-        else:
-            candidates = []
-        candidates = sorted(candidates, key=_candidate_sort_key)
-        return MetadataLookupResult(candidates=candidates, raw_response={"records": candidates})
+        del record
+        records = [dict(candidate) for candidate in self._records]
+        return MetadataLookupResult(candidates=records, raw_response={"records": records})
 
 
 class ExistingRefcheckAdapter:
-    """Conservatively map a completed FactReview ``reference_check.json`` payload."""
+    """Map lossy FactReview ``reference_check.json`` rows without inventing metadata."""
 
     name = "existing_refcheck"
     version = "1"
@@ -112,43 +125,123 @@ class ExistingRefcheckAdapter:
         self._payload_source = payload
 
     def lookup(self, record: ReferenceRecord) -> MetadataLookupResult:
-        payload = self._load_payload()
+        payload, raw_response = self._load_payload()
         if not _is_refcheck_payload(payload):
-            raise CitationAdapterError("adapter_schema_error", raw_response=payload)
-        issues = payload.get("issues")
+            raise CitationAdapterError("adapter_schema_error", raw_response=raw_response)
         if not payload["ok"]:
-            raise CitationAdapterError("adapter_unavailable", message=str(payload.get("error_message") or ""))
+            raise CitationAdapterError(
+                "source_error",
+                message=payload["error_message"],
+                raw_response=raw_response,
+            )
 
-        candidates: list[dict[str, Any]] = []
-        for issue in issues:
-            if not self._matches_reference(issue, record):
-                continue
-            metadata = issue.get("external_metadata")
-            if not isinstance(metadata, Mapping):
-                continue
-            candidate = dict(metadata)
-            if issue.get("verified_url") and not candidate.get("url"):
-                candidate["url"] = str(issue["verified_url"])
-            candidates.append(candidate)
-        return MetadataLookupResult(candidates=sorted(candidates, key=_candidate_sort_key), raw_response=dict(payload))
+        matched_rows = _matching_refcheck_rows(payload["issues"], record)
+        if matched_rows is None:
+            raise CitationAdapterError("adapter_unavailable")
+        if all(_is_explicit_no_match(row) for row in matched_rows):
+            return MetadataLookupResult(candidates=[], raw_response=raw_response)
 
-    def _load_payload(self) -> Any:
+        candidates = [_candidate_from_warning(row) for row in matched_rows]
+        parsed_candidates = [candidate for candidate in candidates if candidate is not None]
+        if not parsed_candidates:
+            raise CitationAdapterError("adapter_unavailable")
+        return MetadataLookupResult(candidates=parsed_candidates, raw_response=raw_response)
+
+    def _load_payload(self) -> tuple[Any, Any]:
         if isinstance(self._payload_source, Mapping):
-            return dict(self._payload_source)
+            payload = dict(self._payload_source)
+            return payload, payload
+        source = Path(self._payload_source)
         try:
-            return json.loads(Path(self._payload_source).read_text(encoding="utf-8"))
+            raw = source.read_bytes()
         except OSError as exc:
-            raise CitationAdapterError("adapter_schema_error") from exc
-        except json.JSONDecodeError as exc:
-            raise CitationAdapterError("adapter_schema_error", raw_response=exc.doc) from exc
+            raise CitationAdapterError("adapter_unavailable") from exc
+        try:
+            return json.loads(raw.decode("utf-8")), raw
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CitationAdapterError("adapter_schema_error", raw_response=raw) from exc
 
-    @staticmethod
-    def _matches_reference(issue: Mapping[str, Any], record: ReferenceRecord) -> bool:
-        issue_title = normalize_title(issue.get("reference_title"))
-        if record.title and issue_title and issue_title != normalize_title(record.title):
-            return False
-        issue_year = str(issue.get("reference_year") or "").strip()
-        return not (record.year is not None and issue_year and issue_year != str(record.year))
+
+def _is_refcheck_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+        return False
+    if not all(isinstance(payload.get(field), int) and not isinstance(payload[field], bool) for field in _REFCHECK_INTEGER_FIELDS):
+        return False
+    if not all(isinstance(payload.get(field), list) for field in _REFCHECK_LIST_FIELDS):
+        return False
+    if not isinstance(payload.get("error_message"), str) or not isinstance(payload.get("report_file"), str):
+        return False
+    return all(
+        isinstance(row, dict)
+        and _REFCHECK_ROW_FIELDS.issubset(row)
+        and all(isinstance(row[field], str) for field in _REFCHECK_ROW_FIELDS)
+        for row in payload["issues"]
+    )
+
+
+def _normalized_raw_reference(value: object) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def _matching_refcheck_rows(rows: list[Any], record: ReferenceRecord) -> list[dict[str, str]] | None:
+    typed_rows = [row for row in rows if isinstance(row, dict)]
+    raw_matches = [
+        row
+        for row in typed_rows
+        if _normalized_raw_reference(row["raw_reference"]) == _normalized_raw_reference(record.raw_text)
+    ]
+    if raw_matches:
+        return raw_matches
+    title_year_matches = [
+        row
+        for row in typed_rows
+        if record.title
+        and record.year is not None
+        and normalize_title(row["reference_title"]) == normalize_title(record.title)
+        and row["reference_year"].strip() == str(record.year)
+    ]
+    return title_year_matches if len(title_year_matches) == 1 else None
+
+
+def _is_explicit_no_match(row: Mapping[str, str]) -> bool:
+    issue_type = row["type"].casefold()
+    if issue_type == "unverified::no_match":
+        return True
+    return row["severity"].casefold() == "error" and "no_match" in issue_type and (
+        "hallucination" in issue_type or "fake" in issue_type
+    )
+
+
+def _candidate_from_warning(row: Mapping[str, str]) -> dict[str, Any] | None:
+    if row["severity"].casefold() != "warning" or not row["corrected_bibtex"].strip():
+        return None
+    fields = _parse_bibtex_fields(row["corrected_bibtex"])
+    candidate: dict[str, Any] = {
+        "id": f"refcheck-{hashlib.sha256(_canonical_json_bytes(row)).hexdigest()[:12]}"
+    }
+    for key in ("title", "doi"):
+        if fields.get(key):
+            candidate[key] = fields[key]
+    if fields.get("year"):
+        try:
+            candidate["year"] = int(fields["year"])
+        except ValueError:
+            pass
+    if row["verified_url"].strip():
+        candidate["url"] = row["verified_url"].strip()
+    elif fields.get("url"):
+        candidate["url"] = fields["url"]
+    return candidate if len(candidate) > 1 else None
+
+
+def _parse_bibtex_fields(bibtex: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for match in _BIBTEX_FIELD_RE.finditer(bibtex):
+        value = match.group("value").strip()
+        if (value.startswith("{") and value.endswith("}")) or (value.startswith('"') and value.endswith('"')):
+            value = value[1:-1].strip()
+        fields[match.group("field").casefold()] = value
+    return fields
 
 
 def normalize_query(record: ReferenceRecord) -> dict[str, Any]:
@@ -163,53 +256,20 @@ def normalize_query(record: ReferenceRecord) -> dict[str, Any]:
     return query
 
 
-def _is_refcheck_payload(payload: Any) -> bool:
-    if not isinstance(payload, Mapping) or not isinstance(payload.get("ok"), bool):
-        return False
-    if not all(isinstance(payload.get(field), int) and not isinstance(payload[field], bool) for field in _REFCHECK_INTEGER_FIELDS):
-        return False
-    if not all(isinstance(payload.get(field), list) for field in _REFCHECK_LIST_FIELDS):
-        return False
-    if not all(isinstance(issue, Mapping) for issue in payload["issues"]):
-        return False
-    return isinstance(payload.get("error_message"), str) and isinstance(payload.get("report_file"), str)
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
 
 
 def verification_id(record: ReferenceRecord, adapter_name: str, adapter_version: str) -> str:
-    query_bytes = json.dumps(normalize_query(record), sort_keys=True, separators=(",", ":")).encode("utf-8")
-    digest = hashlib.sha256(query_bytes).hexdigest()[:8]
+    digest = hashlib.sha256(_canonical_json_bytes(normalize_query(record))).hexdigest()[:8]
     return f"V-{record.id}-{adapter_name}-{adapter_version}-{digest}"
-
-
-def _candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[str, str, str]:
-    return (
-        normalize_doi(candidate.get("doi")),
-        normalize_title(candidate.get("title")),
-        str(candidate.get("id") or ""),
-    )
 
 
 def _candidate_id(candidate: Mapping[str, Any]) -> str:
     candidate_id = str(candidate.get("id") or "").strip()
     if candidate_id:
         return candidate_id
-    material = json.dumps(dict(candidate), sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
-    return f"candidate-{hashlib.sha256(material).hexdigest()[:12]}"
-
-
-def _write_artifact(artifact_dir: Path, attempt_id: str, payload: Any) -> RawResponseArtifact:
-    relative_path = Path("citation_verifications") / f"attempt-{attempt_id}.json"
-    destination = artifact_dir / relative_path
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise FileExistsError(destination)
-    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    if temporary.exists():
-        raise FileExistsError(temporary)
-    temporary.write_bytes(encoded)
-    temporary.replace(destination)
-    return RawResponseArtifact(path=relative_path.as_posix(), sha256=hashlib.sha256(encoded).hexdigest())
+    return f"candidate-{hashlib.sha256(_canonical_json_bytes(dict(candidate))).hexdigest()[:12]}"
 
 
 def _timestamp() -> str:
@@ -258,17 +318,48 @@ def _unavailable_verification(
     *,
     attempt_id: str | None = None,
 ) -> CitationVerification:
-    adapter_name = adapter.name if adapter is not None else "unavailable"
-    adapter_version = adapter.version if adapter is not None else "1"
     return _build_verification(
         record=record,
-        adapter_name=adapter_name,
-        adapter_version=adapter_version,
+        adapter_name=adapter.name if adapter is not None else "unavailable",
+        adapter_version=adapter.version if adapter is not None else "1",
         status=VerificationStatus.UNAVAILABLE,
         attempt_id=attempt_id or f"unavailable-{uuid4().hex}",
         attempt_number=attempt_number,
         error_code="adapter_unavailable",
     )
+
+
+def _failed_verification(
+    record: ReferenceRecord,
+    adapter: CitationMetadataAdapter,
+    attempt_id: str,
+    attempt_number: int,
+    error_code: str,
+    artifact: RawResponseArtifact | None = None,
+) -> CitationVerification:
+    return _build_verification(
+        record=record,
+        adapter_name=adapter.name,
+        adapter_version=adapter.version,
+        status=VerificationStatus.FAILED,
+        attempt_id=attempt_id,
+        attempt_number=attempt_number,
+        raw_response_artifact=artifact,
+        error_code=error_code,
+    )
+
+
+def _persist_response(
+    artifact_dir: str | Path,
+    attempt_id: str,
+    raw_response: Any,
+) -> tuple[RawResponseArtifact | None, str | None]:
+    try:
+        return write_response_artifact(artifact_dir, attempt_id, raw_response), None
+    except ArtifactSerializationError:
+        return None, "artifact_serialization_error"
+    except (ArtifactWriteError, FileExistsError, ValueError):
+        return None, "artifact_write_error"
 
 
 def verify_reference(
@@ -279,52 +370,44 @@ def verify_reference(
     attempt_number: int = 1,
     attempt_id: str | None = None,
 ) -> CitationVerification:
-    """Perform one attempt, preserving an artifact for every received response or error."""
+    """Perform one attempt and preserve every received response exactly once."""
     if adapter is None or not normalize_query(record):
         return _unavailable_verification(record, adapter, attempt_number)
 
     attempt_id = attempt_id or uuid4().hex
-    artifact_root = Path(artifact_dir)
-    received_raw: Any = _NO_RESPONSE
     try:
         result = adapter.lookup(record)
-        if isinstance(result, MetadataLookupResult):
-            received_raw = result.raw_response
-        if not isinstance(result, MetadataLookupResult) or not isinstance(result.candidates, list):
-            raise CitationAdapterError("adapter_schema_error")
-        if not all(isinstance(candidate, Mapping) for candidate in result.candidates):
-            raise CitationAdapterError("adapter_schema_error")
-        artifact = _write_artifact(artifact_root, attempt_id, received_raw)
     except CitationAdapterError as exc:
         if exc.error_code == "adapter_unavailable":
             return _unavailable_verification(record, adapter, attempt_number, attempt_id=attempt_id)
-        raw_response = exc.raw_response if exc.raw_response is not _NO_RESPONSE else received_raw
-        artifact = _write_artifact(artifact_root, attempt_id, raw_response) if raw_response is not _NO_RESPONSE else None
-        return _build_verification(
-            record=record,
-            adapter_name=adapter.name,
-            adapter_version=adapter.version,
-            status=VerificationStatus.FAILED,
-            attempt_id=attempt_id,
-            attempt_number=attempt_number,
-            raw_response_artifact=artifact,
-            error_code=exc.error_code,
+        artifact, persistence_error = (
+            _persist_response(artifact_dir, attempt_id, exc.raw_response)
+            if exc.raw_response is not _NO_RESPONSE
+            else (None, None)
         )
-    except Exception:  # Adapters must not leak unclassified failures into the audit run.
-        artifact = _write_artifact(artifact_root, attempt_id, received_raw) if received_raw is not _NO_RESPONSE else None
-        return _build_verification(
-            record=record,
-            adapter_name=adapter.name,
-            adapter_version=adapter.version,
-            status=VerificationStatus.FAILED,
-            attempt_id=attempt_id,
-            attempt_number=attempt_number,
-            raw_response_artifact=artifact,
-            error_code="adapter_error",
+        return _failed_verification(
+            record,
+            adapter,
+            attempt_id,
+            attempt_number,
+            persistence_error or exc.error_code,
+            artifact,
         )
+    except Exception:
+        return _failed_verification(record, adapter, attempt_id, attempt_number, "adapter_error")
+
+    if not isinstance(result, MetadataLookupResult):
+        return _failed_verification(record, adapter, attempt_id, attempt_number, "adapter_schema_error")
+    artifact, persistence_error = _persist_response(artifact_dir, attempt_id, result.raw_response)
+    if persistence_error:
+        return _failed_verification(record, adapter, attempt_id, attempt_number, persistence_error)
+    if not isinstance(result.candidates, list) or not all(isinstance(candidate, Mapping) for candidate in result.candidates):
+        return _failed_verification(record, adapter, attempt_id, attempt_number, "adapter_schema_error", artifact)
 
     candidates = [dict(candidate) for candidate in result.candidates]
-    if not candidates:
+    selected, method, matching_candidates = _select_candidate(record, candidates)
+    candidate_ids = [_candidate_id(candidate) for candidate in matching_candidates]
+    if method == "no_candidates":
         return _build_verification(
             record=record,
             adapter_name=adapter.name,
@@ -333,12 +416,9 @@ def verify_reference(
             attempt_id=attempt_id,
             attempt_number=attempt_number,
             raw_response_artifact=artifact,
-            match=CitationMatch(
-                method="no_candidates", candidate_count=0, selected_candidate_id=None, selection_reason="", candidate_ids=[]
-            ),
+            match=CitationMatch(method=method, candidate_count=0, selected_candidate_id=None, selection_reason="", candidate_ids=[]),
         )
-    candidate_ids = [_candidate_id(candidate) for candidate in candidates]
-    if len(candidates) > 1:
+    if selected is None:
         return _build_verification(
             record=record,
             adapter_name=adapter.name,
@@ -348,50 +428,17 @@ def verify_reference(
             attempt_number=attempt_number,
             raw_response_artifact=artifact,
             match=CitationMatch(
-                method="multiple_candidates",
-                candidate_count=len(candidates),
+                method=method,
+                candidate_count=len(matching_candidates),
                 selected_candidate_id=None,
-                selection_reason="multiple candidates returned by adapter",
+                selection_reason="candidate identity is not unique",
                 candidate_ids=candidate_ids,
             ),
         )
 
-    candidate = candidates[0]
-    exact_doi = bool(record.doi and candidate.get("doi") and normalize_doi(record.doi) == normalize_doi(candidate["doi"]))
-    score = title_similarity(record.title, candidate.get("title")) if record.title and candidate.get("title") else 0.0
-    if not exact_doi and score < 0.85:
-        return _build_verification(
-            record=record,
-            adapter_name=adapter.name,
-            adapter_version=adapter.version,
-            status=VerificationStatus.NOT_FOUND,
-            attempt_id=attempt_id,
-            attempt_number=attempt_number,
-            raw_response_artifact=artifact,
-            match=CitationMatch(
-                method="title_similarity_no_match", candidate_count=0, selected_candidate_id=None, selection_reason="", candidate_ids=[]
-            ),
-        )
-    if not exact_doi and score < 0.95:
-        return _build_verification(
-            record=record,
-            adapter_name=adapter.name,
-            adapter_version=adapter.version,
-            status=VerificationStatus.AMBIGUOUS,
-            attempt_id=attempt_id,
-            attempt_number=attempt_number,
-            raw_response_artifact=artifact,
-            match=CitationMatch(
-                method="title_similarity_ambiguous",
-                candidate_count=1,
-                selected_candidate_id=None,
-                selection_reason=f"title similarity {score:.4f} is below unique threshold",
-                candidate_ids=candidate_ids,
-            ),
-        )
-
-    candidate_id = candidate_ids[0]
-    candidate["id"] = candidate_id
+    selected_id = _candidate_id(selected)
+    observed = dict(selected)
+    observed.pop("id", None)
     return _build_verification(
         record=record,
         adapter_name=adapter.name,
@@ -401,45 +448,70 @@ def verify_reference(
         attempt_number=attempt_number,
         raw_response_artifact=artifact,
         match=CitationMatch(
-            method="doi_exact" if exact_doi else "title_similarity_unique",
+            method=method,
             candidate_count=1,
-            selected_candidate_id=candidate_id,
-            selection_reason="normalized DOI exact match" if exact_doi else f"title similarity {score:.4f}",
-            candidate_ids=candidate_ids,
+            selected_candidate_id=selected_id,
+            selection_reason="normalized DOI exact match" if method == "doi_exact" else "unique title similarity match",
+            candidate_ids=[selected_id],
         ),
-        source_record=CitationSourceRecord(id=candidate_id, url=str(candidate.get("url") or "")),
-        observed_metadata={key: value for key, value in candidate.items() if key != "id"},
-        field_differences=compare_reference_metadata(record, candidate),
+        source_record=CitationSourceRecord(id=selected_id, url=str(selected.get("url") or "")),
+        observed_metadata=observed,
+        field_differences=compare_reference_metadata(record, selected),
     )
 
 
-def _valid_completed_artifact(verification: CitationVerification, artifact_dir: Path) -> bool:
-    artifact = verification.raw_response_artifact
-    if artifact is None:
-        return False
-    path = artifact_dir / artifact.path
-    try:
-        return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == artifact.sha256
-    except OSError:
-        return False
+def _select_candidate(
+    record: ReferenceRecord, candidates: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str, list[dict[str, Any]]]:
+    exact_doi = [
+        candidate
+        for candidate in candidates
+        if record.doi and candidate.get("doi") and normalize_doi(record.doi) == normalize_doi(candidate["doi"])
+    ]
+    if len(exact_doi) == 1:
+        return exact_doi[0], "doi_exact", exact_doi
+    if len(exact_doi) > 1:
+        return None, "multiple_doi_exact", exact_doi
+
+    scored = [
+        (candidate, title_similarity(record.title, candidate.get("title")))
+        for candidate in candidates
+        if record.title and candidate.get("title")
+    ]
+    unique_matches = [candidate for candidate, score in scored if score >= 0.95]
+    if len(unique_matches) == 1:
+        return unique_matches[0], "title_similarity_unique", unique_matches
+    if len(unique_matches) > 1:
+        return None, "title_similarity_ambiguous", unique_matches
+    ambiguous_matches = [candidate for candidate, score in scored if score >= 0.85]
+    if ambiguous_matches:
+        return None, "title_similarity_ambiguous", ambiguous_matches
+    return None, "no_candidates", []
+
+
+def _artifact_valid(verification: CitationVerification, artifact_dir: str | Path) -> bool:
+    if verification.raw_response_artifact is None:
+        return verification.status in {VerificationStatus.FAILED, VerificationStatus.UNAVAILABLE}
+    return validate_response_artifact(artifact_dir, verification.raw_response_artifact)
 
 
 def select_authoritative_verification(
     verifications: Sequence[CitationVerification], *, artifact_dir: str | Path | None = None
 ) -> CitationVerification | None:
-    """Choose the newest valid terminal, falling back to the newest failure only."""
-    valid_terminals = [verification for verification in verifications if verification.status in _TERMINAL_STATUSES]
+    """Choose the latest hash-valid terminal, otherwise the latest valid failure."""
+    candidates = list(verifications)
     if artifact_dir is not None:
-        root = Path(artifact_dir)
-        valid_terminals = [
-            verification
-            for verification in valid_terminals
-            if verification.status is VerificationStatus.UNAVAILABLE or _valid_completed_artifact(verification, root)
-        ]
-    if valid_terminals:
-        return max(valid_terminals, key=lambda verification: verification.attempt_number)
-    failed = [verification for verification in verifications if verification.status is VerificationStatus.FAILED]
+        candidates = [verification for verification in candidates if _artifact_valid(verification, artifact_dir)]
+    terminals = [verification for verification in candidates if verification.status in _TERMINAL_STATUSES]
+    if terminals:
+        return max(terminals, key=lambda verification: verification.attempt_number)
+    failed = [verification for verification in candidates if verification.status is VerificationStatus.FAILED]
     return max(failed, key=lambda verification: verification.attempt_number) if failed else None
+
+
+def _attempt_lock(verification_key: str) -> threading.Lock:
+    with _ATTEMPT_LOCKS_GUARD:
+        return _ATTEMPT_LOCKS.setdefault(verification_key, threading.Lock())
 
 
 def verify_reference_with_retries(
@@ -451,29 +523,55 @@ def verify_reference_with_retries(
     existing_verifications: Sequence[CitationVerification] | None = None,
     max_attempts: int = 3,
 ) -> CitationVerification:
-    """Retry classified transient failures while preserving every attempt in ``attempts``."""
+    """Run at most ``max_attempts`` serialized attempts for one idempotency key."""
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be positive")
+    adapter_name = adapter.name if adapter is not None else "unavailable"
+    adapter_version = adapter.version if adapter is not None else "1"
+    verification_key = verification_id(record, adapter_name, adapter_version)
     all_attempts = attempts if attempts is not None else []
-    if existing_verifications:
-        all_attempts.extend(existing_verifications)
-    if adapter is None or not normalize_query(record):
-        verification = _unavailable_verification(record, adapter, max((a.attempt_number for a in all_attempts), default=0) + 1)
-        all_attempts.append(verification)
-        return verification
 
-    expected_id = verification_id(record, adapter.name, adapter.version)
-    retained_attempts = [attempt for attempt in all_attempts if attempt.id == expected_id]
-    authoritative = select_authoritative_verification(retained_attempts, artifact_dir=artifact_dir)
-    if authoritative is not None and authoritative.status in _TERMINAL_STATUSES:
-        return authoritative
+    with _attempt_lock(verification_key):
+        if existing_verifications:
+            all_attempts.extend(existing_verifications)
+        retained = [attempt for attempt in all_attempts if attempt.id == verification_key]
+        authoritative = select_authoritative_verification(retained, artifact_dir=artifact_dir)
+        if authoritative is not None and authoritative.status in _TERMINAL_STATUSES:
+            return authoritative
 
-    next_attempt = max((attempt.attempt_number for attempt in retained_attempts), default=0) + 1
-    if next_attempt > max_attempts:
-        return select_authoritative_verification(retained_attempts, artifact_dir=artifact_dir)
+        next_attempt = max((attempt.attempt_number for attempt in retained), default=0) + 1
+        if next_attempt > max_attempts:
+            selected = select_authoritative_verification(retained, artifact_dir=artifact_dir)
+            if selected is not None:
+                return selected
+            return _failed_verification(
+                record,
+                adapter if adapter is not None else _UnavailableAdapter(),
+                f"invalid-cache-{uuid4().hex}",
+                max_attempts,
+                "artifact_invalid",
+            )
 
-    last: CitationVerification | None = None
-    for attempt_number in range(next_attempt, max_attempts + 1):
-        last = verify_reference(record, adapter, artifact_dir=artifact_dir, attempt_number=attempt_number)
-        all_attempts.append(last)
-        if last.status is not VerificationStatus.FAILED or last.error_code not in _RETRYABLE_CODES:
-            return last
-    return last
+        if adapter is None or not normalize_query(record):
+            unavailable = _unavailable_verification(record, adapter, next_attempt)
+            all_attempts.append(unavailable)
+            return unavailable
+
+        last: CitationVerification | None = None
+        for attempt_number in range(next_attempt, max_attempts + 1):
+            last = verify_reference(record, adapter, artifact_dir=artifact_dir, attempt_number=attempt_number)
+            all_attempts.append(last)
+            if last.status is not VerificationStatus.FAILED or last.error_code not in _RETRYABLE_CODES:
+                return last
+        if last is None:
+            raise RuntimeError("attempt allocation unexpectedly produced no verification")
+        return last
+
+
+class _UnavailableAdapter:
+    name = "unavailable"
+    version = "1"
+
+    def lookup(self, record: ReferenceRecord) -> MetadataLookupResult:
+        del record
+        raise CitationAdapterError("adapter_unavailable")

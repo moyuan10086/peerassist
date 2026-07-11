@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+from peerassist.citation_artifacts import validate_response_artifact, write_response_artifact
 from peerassist.citation_metadata import (
     compare_reference_metadata,
     normalize_doi,
@@ -21,7 +25,7 @@ from peerassist.citation_verification import (
     verify_reference,
     verify_reference_with_retries,
 )
-from schemas.citation import ReferenceRecord, VerificationStatus
+from schemas.citation import RawResponseArtifact, ReferenceRecord, VerificationStatus
 
 
 def reference_record(
@@ -46,10 +50,10 @@ def reference_record(
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (" doi:10.1000/ABC. ", "10.1000/abc"),
-        ("https://doi.org/10.1000/ABC;", "10.1000/abc"),
-        ("http://dx.doi.org/10.1000/foo(bar).", "10.1000/foo(bar)"),
-        ("https://doi.org/10.1000/foo).", "10.1000/foo"),
+        (" doi:10.1000/ABC. ", "10.1000/abc."),
+        ("https://doi.org/10.1000/ABC;", "10.1000/abc;"),
+        ("http://dx.doi.org/10.1000/foo(bar).", "10.1000/foo(bar)."),
+        ("https://doi.org/10.1000/foo).", "10.1000/foo)."),
     ],
 )
 def test_normalize_doi_removes_variants_and_keeps_balanced_parentheses(value: str, expected: str) -> None:
@@ -197,13 +201,14 @@ def test_raw_response_is_atomic_immutable_and_hashed(tmp_path: Path) -> None:
     assert artifact.is_file()
     assert not list(artifact.parent.glob("*.tmp"))
     assert hashlib.sha256(artifact.read_bytes()).hexdigest() == verification.raw_response_artifact.sha256
-    with pytest.raises(FileExistsError):
-        verify_reference(
-            reference_record(),
-            OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}]),
-            artifact_dir=tmp_path,
-            attempt_id=verification.attempt_id,
-        )
+    duplicate = verify_reference(
+        reference_record(),
+        OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}]),
+        artifact_dir=tmp_path,
+        attempt_id=verification.attempt_id,
+    )
+    assert duplicate.status is VerificationStatus.FAILED
+    assert duplicate.error_code == "artifact_write_error"
 
 
 class SequencedAdapter:
@@ -308,6 +313,23 @@ def test_retry_ceiling_excludes_corrupt_cached_terminal_artifact(tmp_path: Path)
     assert adapter.calls == 0
 
 
+def test_retry_ceiling_with_only_invalid_cache_returns_failed_verification(tmp_path: Path) -> None:
+    cached_adapter = OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}])
+    cached_adapter.name = "sequence"
+    corrupt = verify_reference(reference_record(), cached_adapter, artifact_dir=tmp_path, attempt_number=1)
+    assert corrupt.raw_response_artifact is not None
+    (tmp_path / corrupt.raw_response_artifact.path).write_bytes(b"corrupt")
+    adapter = SequencedAdapter([result({"id": "external-2", "doi": "10.1000/example"})])
+
+    verification = verify_reference_with_retries(
+        reference_record(), adapter, artifact_dir=tmp_path, attempts=[corrupt], max_attempts=1
+    )
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "artifact_invalid"
+    assert adapter.calls == 0
+
+
 def test_adapter_unavailable_is_terminal_without_retry_or_response_data(tmp_path: Path) -> None:
     adapter = SequencedAdapter([CitationAdapterError("adapter_unavailable"), result()])
     attempts: list = []
@@ -384,31 +406,222 @@ def test_stable_verification_id_does_not_depend_on_attempt(tmp_path: Path) -> No
     assert first.attempt_id != second.attempt_id
 
 
-def test_existing_refcheck_maps_explicit_external_metadata_without_network(tmp_path: Path) -> None:
-    payload = {
-        "ok": True,
+def refcheck_payload(*issues: dict[str, object], ok: bool = True, error_message: str = "") -> dict[str, object]:
+    return {
+        "ok": ok,
         "total_refs": 1,
-        "errors": 0,
-        "warnings": 1,
-        "unverified": 0,
-        "error_message": "",
-        "issues": [
-            {
-                "severity": "warning",
-                "reference_title": "A Study",
-                "reference_year": "2024",
-                "verified_url": "https://example.test/record",
-                "external_metadata": {"id": "record-1", "doi": "10.1000/example", "title": "A Study"},
-            }
-        ],
-        "error_details": [],
-        "warning_details": [],
-        "unverified_details": [],
+        "errors": sum(issue["severity"] == "error" for issue in issues),
+        "warnings": sum(issue["severity"] == "warning" for issue in issues),
+        "unverified": sum(issue["severity"] == "unverified" for issue in issues),
+        "error_message": error_message,
+        "issues": list(issues),
+        "error_details": [issue for issue in issues if issue["severity"] == "error"],
+        "warning_details": [issue for issue in issues if issue["severity"] == "warning"],
+        "unverified_details": [issue for issue in issues if issue["severity"] == "unverified"],
         "report_file": "",
     }
 
-    verification = verify_reference(reference_record(), ExistingRefcheckAdapter(payload), artifact_dir=tmp_path)
+
+def refcheck_issue(**overrides: object) -> dict[str, object]:
+    issue: dict[str, object] = {
+        "severity": "warning",
+        "type": "incomplete::missing_doi",
+        "reference_title": "A Study",
+        "reference_year": "2024",
+        "cited_url": "",
+        "verified_url": "https://records.example/a-study",
+        "details": "DOI absent",
+        "raw_reference": "[1] A Study. 2024.",
+        "corrected_plaintext": "",
+        "corrected_bibtex": (
+            "@article{a_study,\n"
+            "  title = {A Study},\n"
+            "  year = {2024},\n"
+            "  doi = {10.1000/a-study},\n"
+            "  url = {https://doi.org/10.1000/a-study}\n"
+            "}"
+        ),
+        "corrected_bibitem": "",
+    }
+    issue.update(overrides)
+    return issue
+
+
+def test_existing_refcheck_warning_parses_real_corrected_bibtex_from_exact_path_bytes(tmp_path: Path) -> None:
+    payload = refcheck_payload(refcheck_issue())
+    source = tmp_path / "reference_check.json"
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    source.write_bytes(raw)
+
+    verification = verify_reference(reference_record(), ExistingRefcheckAdapter(source), artifact_dir=tmp_path)
 
     assert verification.status is VerificationStatus.COMPLETED
-    assert verification.source_record is not None and verification.source_record.id == "record-1"
-    assert json.loads((tmp_path / verification.raw_response_artifact.path).read_text(encoding="utf-8")) == payload
+    assert verification.observed_metadata["doi"] == "10.1000/a-study"
+    assert verification.source_record is not None
+    assert verification.source_record.url == "https://records.example/a-study"
+    assert verification.raw_response_artifact is not None
+    assert (tmp_path / verification.raw_response_artifact.path).read_bytes() == raw
+
+
+def test_existing_refcheck_explicit_no_match_is_not_found_but_omitted_success_is_unavailable(tmp_path: Path) -> None:
+    no_match = refcheck_payload(refcheck_issue(severity="unverified", type="unverified::no_match", corrected_bibtex=""))
+
+    explicit = verify_reference(reference_record(), ExistingRefcheckAdapter(no_match), artifact_dir=tmp_path)
+    omitted = verify_reference(reference_record(), ExistingRefcheckAdapter(refcheck_payload()), artifact_dir=tmp_path)
+
+    assert explicit.status is VerificationStatus.NOT_FOUND
+    assert omitted.status is VerificationStatus.UNAVAILABLE
+    assert omitted.error_code == "adapter_unavailable"
+
+
+def test_existing_refcheck_failed_source_preserves_received_error_payload(tmp_path: Path) -> None:
+    payload = refcheck_payload(ok=False, error_message="backend interrupted")
+
+    verification = verify_reference(reference_record(), ExistingRefcheckAdapter(payload), artifact_dir=tmp_path)
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "source_error"
+    assert verification.raw_response_artifact is not None
+    assert json.loads((tmp_path / verification.raw_response_artifact.path).read_text(encoding="utf-8"))["error_message"] == "backend interrupted"
+
+
+def test_existing_refcheck_malformed_path_preserves_exact_source_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "reference_check.json"
+    raw = b'{"ok": true, broken'
+    source.write_bytes(raw)
+
+    verification = verify_reference(reference_record(), ExistingRefcheckAdapter(source), artifact_dir=tmp_path)
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "adapter_schema_error"
+    assert verification.raw_response_artifact is not None
+    assert (tmp_path / verification.raw_response_artifact.path).read_bytes() == raw
+
+
+def test_existing_refcheck_missing_path_is_unavailable(tmp_path: Path) -> None:
+    verification = verify_reference(reference_record(), ExistingRefcheckAdapter(tmp_path / "missing.json"), artifact_dir=tmp_path)
+
+    assert verification.status is VerificationStatus.UNAVAILABLE
+    assert verification.raw_response_artifact is None
+
+
+def test_normalize_doi_preserves_trailing_punctuation_and_title_similarity_controls_comparison() -> None:
+    assert normalize_doi(" doi:10.1000/example. ") == "10.1000/example."
+    left = "a b c d e f g h i j k l m n o p q r s t"
+    right = "a b c d e f g h i j k l m n o p q r s"
+
+    difference = next(diff for diff in compare_reference_metadata(reference_record(title=left), {"title": right}) if diff.field == "title")
+
+    assert difference.comparison.value == "match"
+    assert difference.rule == "title_similarity_unique"
+
+
+def test_candidate_selection_prefers_one_exact_doi_and_rejects_multiple_exact_dois(tmp_path: Path) -> None:
+    one_exact = verify_reference(
+        reference_record(),
+        SequencedAdapter(
+            [
+                result(
+                    {"id": "other", "doi": "10.1000/other", "title": "Other"},
+                    {"id": "exact", "doi": "10.1000/example", "title": "Different"},
+                )
+            ]
+        ),
+        artifact_dir=tmp_path,
+    )
+    multiple_exact = verify_reference(
+        reference_record(),
+        SequencedAdapter(
+            [
+                result(
+                    {"id": "one", "doi": "10.1000/example"},
+                    {"id": "two", "doi": "10.1000/example"},
+                )
+            ]
+        ),
+        artifact_dir=tmp_path,
+    )
+
+    assert one_exact.status is VerificationStatus.COMPLETED
+    assert one_exact.match is not None and one_exact.match.selected_candidate_id == "exact"
+    assert multiple_exact.status is VerificationStatus.AMBIGUOUS
+
+
+def test_artifacts_reject_traversal_and_cached_outside_or_symlink_paths(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        write_response_artifact(tmp_path, "../escape", b"data")
+
+    outside = tmp_path.parent / "outside.json"
+    outside.write_bytes(b"outside")
+    outside_artifact = RawResponseArtifact(path="../outside.json", sha256=hashlib.sha256(b"outside").hexdigest())
+    assert not validate_response_artifact(tmp_path, outside_artifact)
+
+    artifact_dir = tmp_path / "citation_verifications"
+    artifact_dir.mkdir()
+    link = artifact_dir / "attempt-link.json"
+    os.symlink(outside, link)
+    linked_artifact = RawResponseArtifact(path="citation_verifications/attempt-link.json", sha256=hashlib.sha256(b"outside").hexdigest())
+    assert not validate_response_artifact(tmp_path, linked_artifact)
+
+
+def test_artifact_publish_is_immutable_for_concurrent_same_attempt(tmp_path: Path) -> None:
+    payload = b'{"raw":true}'
+    barrier = threading.Barrier(2)
+
+    def write() -> object:
+        barrier.wait()
+        try:
+            return write_response_artifact(tmp_path, "same_attempt", payload)
+        except FileExistsError:
+            return "exists"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: write(), range(2)))
+
+    assert sum(outcome == "exists" for outcome in outcomes) == 1
+    artifact = next(outcome for outcome in outcomes if outcome != "exists")
+    assert isinstance(artifact, RawResponseArtifact)
+    assert (tmp_path / artifact.path).read_bytes() == payload
+
+
+def test_artifact_serialization_and_write_failures_are_failed_verifications(tmp_path: Path) -> None:
+    nonserializable = verify_reference(
+        reference_record(),
+        SequencedAdapter([MetadataLookupResult(candidates=[], raw_response=object())]),
+        artifact_dir=tmp_path,
+    )
+    root_file = tmp_path / "not-a-directory"
+    root_file.write_text("x", encoding="utf-8")
+    unwritable = verify_reference(reference_record(), OfflineMetadataVerifier([]), artifact_dir=root_file)
+
+    assert nonserializable.status is VerificationStatus.FAILED
+    assert nonserializable.error_code == "artifact_serialization_error"
+    assert nonserializable.raw_response_artifact is None
+    assert unwritable.status is VerificationStatus.FAILED
+    assert unwritable.error_code == "artifact_write_error"
+    assert unwritable.raw_response_artifact is None
+
+
+def test_retry_rejects_nonpositive_max_attempts_without_adapter_work(tmp_path: Path) -> None:
+    adapter = SequencedAdapter([result()])
+
+    with pytest.raises(ValueError, match="max_attempts"):
+        verify_reference_with_retries(reference_record(), adapter, artifact_dir=tmp_path, max_attempts=0)
+    assert adapter.calls == 0
+
+
+def test_concurrent_retry_callers_share_unique_attempt_numbers_and_ceiling(tmp_path: Path) -> None:
+    adapter = SequencedAdapter([CitationAdapterError("timeout", retryable=True) for _ in range(3)])
+    attempts: list = []
+    barrier = threading.Barrier(2)
+
+    def verify() -> object:
+        barrier.wait()
+        return verify_reference_with_retries(reference_record(), adapter, artifact_dir=tmp_path, attempts=attempts)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: verify(), range(2)))
+
+    assert all(isinstance(outcome, type(outcomes[0])) for outcome in outcomes)
+    assert sorted(attempt.attempt_number for attempt in attempts) == [1, 2, 3]
+    assert adapter.calls == 3
