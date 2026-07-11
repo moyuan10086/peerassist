@@ -24,10 +24,13 @@ DOI_RE = re.compile(
 )
 YEAR_RE = re.compile(r"\b(?P<year>(?:19|20)\d{2})\b")
 CI_PREFIX_RE = re.compile(r"(?:\b\d+(?:\.\d+)?%\s*)?\bCI\s*$", re.I)
-NUMERIC_CITATION_SHAPED_RE = re.compile(r"\[\s*(?=[^\]]*\d)(?:[\d,\-\s]+|[^\]]*-[^\]]*)\]")
+NUMERIC_CITATION_SHAPED_RE = re.compile(
+    r"\[\s*(?:[\d,\-\s]+|(?:\d\s*-\s*[a-z]|[a-z]\s*-\s*\d))\s*\]"
+)
 IMMEDIATE_NON_CITATION_CONTEXT_RE = re.compile(
-    r"(?:\bvector\s+is|\barray\s*=|\b(?:confidence\s+)?interval|\brange|\bCI|\bcoordinates|\bindices)"
-    r"[\s:;,=]*$",
+    r"(?:\b(?:x|values)\s*(?:=|:)|\b(?:bounds|shape|dimensions)\s+(?:were|is|are)|"
+    r"\b(?:tensor|array|vector|coordinates|indices)\s*(?:is|are|=|:)|"
+    r"\b(?:confidence\s+)?interval|\brange|\bCI)\s*[\s:;,=]*$",
     re.I,
 )
 APA_TITLE_RE = re.compile(

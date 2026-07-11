@@ -112,6 +112,37 @@ def test_extract_uses_only_immediate_non_citation_context_before_bracket() -> No
     assert result.unsupported_markers == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x = [1, 3]",
+        "values: [1, 3]",
+        "The bounds were [1, 3]",
+        "The shape is [1, 3]",
+        "dimensions are [1, 3]",
+        "The tensor = [1, 3]",
+        "The array is [1, 3]",
+        "The vector = [1, 3]",
+        "coordinates: [1, 3]",
+        "indices = [1, 3]",
+    ],
+)
+def test_extract_excludes_immediately_introduced_structured_numeric_lists(text: str) -> None:
+    result = extract_citation_evidence(ledger_with(evidence("P02-L004", EvidenceType.TEXT_SPAN, text)))
+
+    assert result.mentions == []
+    assert result.links == []
+    assert result.unsupported_markers == []
+
+
+def test_extract_keeps_citation_after_non_immediate_range_prose() -> None:
+    source = evidence("P02-L004", EvidenceType.TEXT_SPAN, "Across a broad range of methods, prior work [2].")
+
+    result = extract_citation_evidence(ledger_with(source))
+
+    assert [mention.metadata["number"] for mention in result.mentions] == [2]
+
+
 def test_extract_routes_mixed_hyphenated_numeric_markers_to_unsupported() -> None:
     source = evidence("P02-L004", EvidenceType.TEXT_SPAN, "Broken [1-a] and [a-3].")
 
@@ -124,6 +155,16 @@ def test_extract_routes_mixed_hyphenated_numeric_markers_to_unsupported() -> Non
         "invalid_range_endpoint",
         "invalid_range_endpoint",
     ]
+
+
+@pytest.mark.parametrize("label", ["[A-1]", "[bert-2]", "[Table-1]"])
+def test_extract_ignores_hyphenated_labels_without_warning(label: str) -> None:
+    result = extract_citation_evidence(ledger_with(evidence("P02-L004", EvidenceType.TEXT_SPAN, f"Use {label}.")))
+
+    assert result.mentions == []
+    assert result.links == []
+    assert result.unsupported_markers == []
+    assert result.warnings == []
 
 
 def test_extract_ignores_non_citation_brackets_without_unsupported_warning() -> None:
