@@ -159,3 +159,12 @@ model keys, paper secrets, or reviewer-private material here.
 - Confirmed frontend source is tracked under `web/peerassist-workspace`; GitHub language statistics may still show Python-dominant because of file size and Linguist timing.
 - Updated local git author config for future commits to `moyuan10086 <moyuan10086@users.noreply.github.com>`; historical pushed commits remain unchanged unless history is explicitly rewritten.
 - Security rule retained: no real API keys, GitHub tokens, model keys, or reviewer-private material are written to docs, code, Feishu, or git config.
+
+## 2026-07-11 - Traceable citation audit v1
+
+- Appended Feishu section `六十一、2026-07-11 可追溯证据定位与引用核查第一版`; no overwrite operation was used.
+- Feishu revision advanced from `93` to `94`; keyword fetch confirmed both sections `六十` and `六十一` remain present.
+- Implemented numeric citation extraction, reference linking, RefCopilot artifact adaptation, immutable verification attempts, semantic audit integrity, conservative citation concerns, confirmation reconciliation, pipeline integration, and bilingual report provenance.
+- Final PeerAssist smoke suite: `445 passed`; citation Ruff checks passed; public service returned HTTP `200`.
+- GitHub branch: `moyuan10086/peerassist@peerassist-mvp`; merge commit `a477fc3`.
+- Remaining scope is explicit: author-year citations, retraction/PubPeer checks, semantic support relation, and frozen `CitationBench-200` evaluation are not yet complete.
