@@ -46,6 +46,7 @@ def ledger_with(*items: EvidenceItem) -> EvidenceLedger:
     [
         ("[1]", [1]),
         ("[1,3-5]", [1, 3, 4, 5]),
+        ("[1, 1, 2]", [1, 2]),
     ],
 )
 def test_parse_numeric_citation_expands_valid_markers(raw: str, numbers: list[int]) -> None:
@@ -76,6 +77,37 @@ def test_extracts_expanded_body_citations_and_inherits_location() -> None:
     assert all(mention.page == 2 and mention.section == "Related Work" for mention in result.mentions)
     assert all(mention.metadata["source_evidence_id"] == "P02-L004" for mention in result.mentions)
     assert result.links and all(link.status is CitationLinkStatus.MISSING_REFERENCE for link in result.links)
+
+
+def test_extract_deduplicates_repeated_marker_numbers_into_unique_mentions_and_links() -> None:
+    source = evidence("P02-L004", EvidenceType.TEXT_SPAN, "Prior work [1, 1, 2].")
+
+    result = extract_citation_evidence(ledger_with(source))
+
+    assert [mention.id for mention in result.mentions] == ["C-P02-L004-11-20-1", "C-P02-L004-11-20-2"]
+    assert [link.reference_number for link in result.links] == [1, 2]
+
+
+def test_extract_ignores_non_numeric_and_statistical_brackets_but_keeps_body_citations() -> None:
+    default = evidence("P02-L004", EvidenceType.TEXT_SPAN, "The mode is [default].")
+    vector = evidence("P02-L005", EvidenceType.TEXT_SPAN, "The vector is [1, 3].")
+    citation = evidence("P02-L006", EvidenceType.TEXT_SPAN, "Prior work [1, 3].")
+
+    result = extract_citation_evidence(ledger_with(default, vector, citation))
+
+    assert [mention.metadata["number"] for mention in result.mentions] == [1, 3]
+    assert [link.reference_number for link in result.links] == [1, 3]
+    assert result.unsupported_markers == []
+    assert result.warnings == []
+
+
+def test_extract_ignores_non_citation_brackets_without_unsupported_warning() -> None:
+    result = extract_citation_evidence(ledger_with(evidence("P02-L004", EvidenceType.TEXT_SPAN, "Use [default].")))
+
+    assert result.mentions == []
+    assert result.links == []
+    assert result.unsupported_markers == []
+    assert result.warnings == []
 
 
 def test_mention_inherits_trace_and_uses_stable_offsets() -> None:
@@ -150,7 +182,7 @@ def test_excludes_text_span_citations_in_reference_section_but_keeps_continuatio
     assert result.references[0].source_evidence_ids == ["P08-L014", "P08-L015"]
 
 
-@pytest.mark.parametrize("item_type", [EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE])
+@pytest.mark.parametrize("item_type", [EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE, EvidenceType.TABLE_CELL])
 def test_caption_and_table_mentions_preserve_source_type_at_lower_confidence(item_type: EvidenceType) -> None:
     source = evidence("P02-L004", item_type, "Figure 1: Adapted from [2].")
 
@@ -174,6 +206,34 @@ def test_build_reference_records_uses_stable_hash_and_aggregates_identical_dupli
     assert records[0].title == "Alpha Study"
 
 
+def test_build_reference_records_extracts_only_reliable_apa_like_titles() -> None:
+    apa = evidence(
+        "P08-L014",
+        EvidenceType.REFERENCE,
+        "[2] Smith, J. (2020). Alpha Study.",
+        page=8,
+        section="References",
+    )
+    year_leading = evidence(
+        "P08-L015",
+        EvidenceType.REFERENCE,
+        "[3] 2020. Alpha Study.",
+        page=8,
+        section="References",
+    )
+    ambiguous = evidence(
+        "P08-L016",
+        EvidenceType.REFERENCE,
+        "[4] Smith 2020. Alpha Study.",
+        page=8,
+        section="References",
+    )
+
+    records = build_reference_records([apa, year_leading, ambiguous])
+
+    assert [record.title for record in records] == ["Alpha Study", "", ""]
+
+
 @pytest.mark.parametrize(
     ("raw", "doi"),
     [
@@ -186,6 +246,24 @@ def test_build_reference_records_trims_only_unbalanced_doi_sentence_punctuation(
     record = build_reference_records([evidence("P08-L014", EvidenceType.REFERENCE, raw, section="References")])[0]
 
     assert record.doi == doi
+
+
+@pytest.mark.parametrize(
+    "doi_source",
+    [
+        "doi:10.1000/foo(bar).",
+        "https://doi.org/10.1000/foo(bar).",
+        "http://doi.org/10.1000/foo(bar).",
+        "https://dx.doi.org/10.1000/foo(bar).",
+        "http://dx.doi.org/10.1000/foo(bar).",
+    ],
+)
+def test_build_reference_records_normalizes_doi_url_forms(doi_source: str) -> None:
+    raw = f"[1] Alpha Study. 2020. {doi_source}"
+
+    record = build_reference_records([evidence("P08-L014", EvidenceType.REFERENCE, raw, section="References")])[0]
+
+    assert record.doi == "10.1000/foo(bar)"
 
 
 def test_build_reference_records_groups_multiline_continuations() -> None:
@@ -231,6 +309,27 @@ def test_extract_warns_for_duplicate_doi_without_aggregating_distinct_records() 
     assert any(warning.startswith("duplicate_doi:10.1/a") for warning in result.warnings)
 
 
+def test_extract_warns_for_duplicate_doi_across_url_forms() -> None:
+    one = evidence(
+        "P08-L014",
+        EvidenceType.REFERENCE,
+        "[1] Alpha Study. 2020. doi:10.1000/foo(bar).",
+        page=8,
+        section="References",
+    )
+    two = evidence(
+        "P08-L015",
+        EvidenceType.REFERENCE,
+        "[2] Beta Study. 2021. https://doi.org/10.1000/foo(bar).",
+        page=8,
+        section="References",
+    )
+
+    result = extract_citation_evidence(ledger_with(one, two))
+
+    assert any(warning == "duplicate_doi:10.1000/foo(bar)" for warning in result.warnings)
+
+
 def test_extract_builds_stable_link_for_see_marker() -> None:
     body = evidence("P02-L004", EvidenceType.TEXT_SPAN, "See [1].")
     reference = evidence("P08-L014", EvidenceType.REFERENCE, "[1] Alpha Study. 2020.", page=8, section="References")
@@ -243,8 +342,8 @@ def test_extract_builds_stable_link_for_see_marker() -> None:
 
 
 def test_with_citation_evidence_copies_ledger_and_recomputes_coverage() -> None:
-    source = evidence("P02-L004", EvidenceType.TEXT_SPAN, "See [1].")
-    original = ledger_with(source)
+    source = evidence("P02-L004", EvidenceType.TEXT_SPAN, "See [1].", metadata={"nested": {"value": "source"}})
+    original = EvidenceLedger(paper_id="paper-1", items=[source], metadata={"nested": {"value": "source"}})
 
     augmented = with_citation_evidence(original)
 
@@ -253,3 +352,11 @@ def test_with_citation_evidence_copies_ledger_and_recomputes_coverage() -> None:
     assert len(augmented.items) == 2
     assert augmented.coverage["citation"] == 1
     assert augmented.items[-1].id == "C-P02-L004-4-7-1"
+
+    augmented.items[0].text = "changed"
+    augmented.items[0].metadata["nested"]["value"] = "changed"
+    augmented.metadata["nested"]["value"] = "changed"
+
+    assert source.text == "See [1]."
+    assert source.metadata["nested"]["value"] == "source"
+    assert original.metadata["nested"]["value"] == "source"

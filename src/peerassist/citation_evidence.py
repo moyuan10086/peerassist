@@ -18,9 +18,21 @@ from schemas.peerassist import EvidenceItem, EvidenceLedger, EvidenceType
 
 NUMERIC_MARKER_RE = re.compile(r"\[(?P<body>[^\]\r\n]+)\]")
 NUMBERED_REFERENCE_RE = re.compile(r"^\[\s*(?P<number>\d+)\s*\]\s*(?P<body>.*)$")
-DOI_RE = re.compile(r"\bdoi\s*:\s*(?P<doi>10\.\d{1,9}/[-._;()/:A-Z0-9]+)", re.I)
+DOI_RE = re.compile(
+    r"(?:\bdoi\s*:\s*|https?://(?:dx\.)?doi\.org/)(?P<doi>10\.\d{1,9}/[-._;()/:A-Z0-9]+)",
+    re.I,
+)
 YEAR_RE = re.compile(r"\b(?P<year>(?:19|20)\d{2})\b")
 CI_PREFIX_RE = re.compile(r"(?:\b\d+(?:\.\d+)?%\s*)?\bCI\s*$", re.I)
+NUMERIC_CITATION_SHAPED_RE = re.compile(r"\[\s*(?=[\d,\-\s]*\d)[\d,\-\s]+\]")
+NON_CITATION_CONTEXT_RE = re.compile(
+    r"\b(?:vector|array|interval|range|confidence\s+interval|ci|coordinates|index|indices|shape|tensor)\b",
+    re.I,
+)
+APA_TITLE_RE = re.compile(
+    r"^.+?\(\s*(?:19|20)\d{2}[a-z]?\s*\)\.\s*(?P<title>[^.]+)\.",
+    re.I,
+)
 REFERENCE_SECTIONS = frozenset({"references", "bibliography", "参考文献"})
 
 
@@ -63,13 +75,14 @@ def parse_numeric_citation(raw: str, *, max_range: int = 100) -> NumericCitation
             return NumericCitationParse([], "unsupported", raw, "nonnumeric_component")
         numbers.append(int(component))
 
-    return NumericCitationParse(numbers, "supported", raw)
+    return NumericCitationParse(list(dict.fromkeys(numbers)), "supported", raw)
 
 
 def _is_citation_source(item: EvidenceItem) -> bool:
     return (
         item.section.strip().casefold() not in REFERENCE_SECTIONS
-        and item.type in {EvidenceType.TEXT_SPAN, EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE}
+        and item.type
+        in {EvidenceType.TEXT_SPAN, EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE, EvidenceType.TABLE_CELL}
     )
 
 
@@ -79,6 +92,10 @@ def _citation_confidence(item: EvidenceItem) -> float:
 
 def _is_confidence_interval(text: str, start: int) -> bool:
     return bool(CI_PREFIX_RE.search(text[:start]))
+
+
+def _is_non_citation_context(text: str, start: int) -> bool:
+    return bool(NON_CITATION_CONTEXT_RE.search(text[max(0, start - 80) : start]))
 
 
 def _citation_mention(source: EvidenceItem, raw: str, start: int, end: int, number: int) -> EvidenceItem:
@@ -149,10 +166,17 @@ def _reference_groups(items: list[EvidenceItem]) -> list[tuple[int, str, list[st
 def _conservative_title(raw: str, number: int, year: int | None) -> str:
     match = NUMBERED_REFERENCE_RE.match(raw)
     body = match.group("body").strip() if match else raw.strip()
-    body = DOI_RE.sub("", body).strip(" .;,:")
-    if year is not None:
-        body = re.split(rf"\b{year}\b", body, maxsplit=1)[0].strip(" .;,:")
-    return body
+    body = DOI_RE.sub("", body).strip()
+    apa_match = APA_TITLE_RE.match(body)
+    if apa_match:
+        return apa_match.group("title").strip(" .;,:")
+    body = body.strip(" .;,:" )
+    if year is None or body.startswith(str(year)):
+        return ""
+    before_year = body.split(str(year), maxsplit=1)[0].strip()
+    if not before_year.endswith(".") or "," in before_year or re.search(r"\bet\s+al\b|\b[A-Z]\.", before_year):
+        return ""
+    return before_year.rstrip(".").strip()
 
 
 def _trim_doi_sentence_punctuation(doi: str) -> str:
@@ -242,7 +266,9 @@ def extract_citation_evidence(ledger: EvidenceLedger) -> CitationEvidenceResult:
             continue
         for match in NUMERIC_MARKER_RE.finditer(source.text):
             raw = match.group(0)
-            if _is_confidence_interval(source.text, match.start()):
+            if not NUMERIC_CITATION_SHAPED_RE.fullmatch(raw):
+                continue
+            if _is_confidence_interval(source.text, match.start()) or _is_non_citation_context(source.text, match.start()):
                 continue
             parsed = parse_numeric_citation(raw)
             if parsed.status == "unsupported":
