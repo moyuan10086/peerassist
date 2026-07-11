@@ -468,7 +468,7 @@ def verify_reference_with_retries(
 
     next_attempt = max((attempt.attempt_number for attempt in retained_attempts), default=0) + 1
     if next_attempt > max_attempts:
-        return select_authoritative_verification(retained_attempts)
+        return select_authoritative_verification(retained_attempts, artifact_dir=artifact_dir)
 
     last: CitationVerification | None = None
     for attempt_number in range(next_attempt, max_attempts + 1):

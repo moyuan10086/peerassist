@@ -281,6 +281,33 @@ def test_retained_attempt_at_max_prevents_new_adapter_call(tmp_path: Path) -> No
     assert adapter.calls == 0
 
 
+def test_retry_ceiling_excludes_corrupt_cached_terminal_artifact(tmp_path: Path) -> None:
+    failed = verify_reference(
+        reference_record(),
+        SequencedAdapter([CitationAdapterError("timeout", retryable=True)]),
+        artifact_dir=tmp_path,
+        attempt_number=1,
+    )
+    completed_adapter = OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}])
+    completed_adapter.name = "sequence"
+    corrupt_completed = verify_reference(
+        reference_record(),
+        completed_adapter,
+        artifact_dir=tmp_path,
+        attempt_number=3,
+    )
+    assert corrupt_completed.raw_response_artifact is not None
+    (tmp_path / corrupt_completed.raw_response_artifact.path).write_text("corrupt", encoding="utf-8")
+    adapter = SequencedAdapter([result({"id": "external-2", "doi": "10.1000/example"})])
+
+    verification = verify_reference_with_retries(
+        reference_record(), adapter, artifact_dir=tmp_path, attempts=[failed, corrupt_completed], max_attempts=3
+    )
+
+    assert verification == failed
+    assert adapter.calls == 0
+
+
 def test_adapter_unavailable_is_terminal_without_retry_or_response_data(tmp_path: Path) -> None:
     adapter = SequencedAdapter([CitationAdapterError("adapter_unavailable"), result()])
     attempts: list = []
