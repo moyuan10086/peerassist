@@ -350,6 +350,12 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "syncPdfRuntimePagePulse" in html
     assert "updatePdfToolTrace" in html
     assert "renderPdfToolTraceCard" in html
+    assert "pdf-tool-trace-summary" in html
+    assert "pdf-tool-trace-detail-grid" in html
+    assert "pdf-tool-trace-field" in html
+    assert "输入摘要" in html
+    assert "输出摘要" in html
+    assert "duration_ms" in html
     assert "appendPdfActivityLine" in html
     assert "data-pdf-human-gate" in html
     assert "updatePdfHumanGate" in html

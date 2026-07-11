@@ -1635,6 +1635,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       background: #fff;
       padding: 8px;
     }}
+    .pdf-tool-trace-card[open] {{
+      box-shadow: 0 14px 28px rgba(20, 35, 35, 0.08);
+    }}
     .pdf-tool-trace-card[data-status="completed"] {{
       border-color: #b8d8cf;
       background: #eef8f4;
@@ -1643,6 +1646,12 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       border-color: #f0b9b9;
       background: #fff5f5;
     }}
+    .pdf-tool-trace-summary {{
+      display: block;
+      cursor: pointer;
+      list-style: none;
+    }}
+    .pdf-tool-trace-summary::-webkit-details-marker {{ display: none; }}
     .pdf-tool-trace-top {{
       display: flex;
       gap: 6px;
@@ -1674,6 +1683,37 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       color: #66736f;
       font-size: 10px;
       line-height: 1.3;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-tool-trace-detail-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(15, 118, 110, 0.14);
+    }}
+    .pdf-tool-trace-field {{
+      min-width: 0;
+      border: 1px solid rgba(203, 220, 215, 0.85);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.62);
+      padding: 6px 7px;
+    }}
+    .pdf-tool-trace-field[data-wide="true"] {{
+      grid-column: 1 / -1;
+    }}
+    .pdf-tool-trace-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-tool-trace-value {{
+      margin-top: 2px;
+      color: #25322f;
+      font-size: 10px;
+      font-weight: 820;
+      line-height: 1.32;
       overflow-wrap: anywhere;
     }}
     .pdf-tool-trace-empty {{
@@ -3246,18 +3286,46 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const tool = String(event?.tool || event?.call_id || 'tool');
       const agent = String(event?.agent_id || 'peerassist');
       const summary = String(event?.output_summary || event?.input_summary || event?.error_code || '等待输出摘要').slice(0, 120);
-      const article = document.createElement('article');
-      article.className = 'pdf-tool-trace-card';
-      article.dataset.pdfToolTraceCard = 'true';
-      article.dataset.status = status;
-      article.innerHTML = `
-        <div class="pdf-tool-trace-top">
-          <span class="pdf-tool-trace-name">${{escapeHtml(tool)}}</span>
-          <span class="pdf-tool-trace-status">${{escapeHtml(localizedTraceStatus(status))}}</span>
+      const details = document.createElement('details');
+      details.className = 'pdf-tool-trace-card';
+      details.dataset.pdfToolTraceCard = 'true';
+      details.dataset.status = status;
+      details.innerHTML = `
+        <summary class="pdf-tool-trace-summary">
+          <div class="pdf-tool-trace-top">
+            <span class="pdf-tool-trace-name">${{escapeHtml(tool)}}</span>
+            <span class="pdf-tool-trace-status">${{escapeHtml(localizedTraceStatus(status))}}</span>
+          </div>
+          <div class="pdf-tool-trace-copy">${{escapeHtml(agent)}} · ${{escapeHtml(summary)}}</div>
+        </summary>
+        <div class="pdf-tool-trace-detail-grid">
+          <div class="pdf-tool-trace-field">
+            <div class="pdf-tool-trace-label">来源</div>
+            <div class="pdf-tool-trace-value">${{escapeHtml(event?.source || 'builtin')}}</div>
+          </div>
+          <div class="pdf-tool-trace-field">
+            <div class="pdf-tool-trace-label">耗时</div>
+            <div class="pdf-tool-trace-value">${{event?.duration_ms == null ? '未记录' : `${{Number(event.duration_ms)}} ms`}}</div>
+          </div>
+          <div class="pdf-tool-trace-field" data-wide="true">
+            <div class="pdf-tool-trace-label">输入摘要</div>
+            <div class="pdf-tool-trace-value">${{escapeHtml(event?.input_summary || '未记录')}}</div>
+          </div>
+          <div class="pdf-tool-trace-field" data-wide="true">
+            <div class="pdf-tool-trace-label">输出摘要</div>
+            <div class="pdf-tool-trace-value">${{escapeHtml(event?.output_summary || event?.error_message || event?.error_code || '未记录')}}</div>
+          </div>
+          <div class="pdf-tool-trace-field">
+            <div class="pdf-tool-trace-label">产物</div>
+            <div class="pdf-tool-trace-value">${{escapeHtml(Array.isArray(event?.artifact_ids) && event.artifact_ids.length ? event.artifact_ids.join('、') : '无')}}</div>
+          </div>
+          <div class="pdf-tool-trace-field">
+            <div class="pdf-tool-trace-label">证据</div>
+            <div class="pdf-tool-trace-value">${{escapeHtml(Array.isArray(event?.evidence_ids) && event.evidence_ids.length ? event.evidence_ids.join('、') : '无')}}</div>
+          </div>
         </div>
-        <div class="pdf-tool-trace-copy">${{escapeHtml(agent)}} · ${{escapeHtml(summary)}}</div>
       `;
-      return article;
+      return details;
     }}
     function updatePdfToolTrace(state) {{
       const list = document.querySelector('[data-pdf-tool-trace-list]');
@@ -6563,14 +6631,49 @@ def _render_pdf_tool_trace_card(event: dict[str, Any]) -> str:
     tool = str(event.get("tool") or event.get("call_id") or "tool")
     summary = str(event.get("output_summary") or event.get("input_summary") or event.get("error_code") or "等待输出摘要")
     agent = _display_name(str(event.get("agent_id") or "peerassist"))
+    artifact_ids = event.get("artifact_ids") if isinstance(event.get("artifact_ids"), list) else []
+    evidence_ids = event.get("evidence_ids") if isinstance(event.get("evidence_ids"), list) else []
+    duration = event.get("duration_ms")
+    duration_text = f"{duration} ms" if duration is not None else "未记录"
+    output_summary = str(
+        event.get("output_summary") or event.get("error_message") or event.get("error_code") or "未记录"
+    )
     return f"""
-          <article class="pdf-tool-trace-card" data-pdf-tool-trace-card data-status="{html.escape(status, quote=True)}">
-            <div class="pdf-tool-trace-top">
-              <span class="pdf-tool-trace-name">{html.escape(tool)}</span>
-              <span class="pdf-tool-trace-status">{html.escape(_localized_status(status))}</span>
+          <details class="pdf-tool-trace-card" data-pdf-tool-trace-card data-status="{html.escape(status, quote=True)}">
+            <summary class="pdf-tool-trace-summary">
+              <div class="pdf-tool-trace-top">
+                <span class="pdf-tool-trace-name">{html.escape(tool)}</span>
+                <span class="pdf-tool-trace-status">{html.escape(_localized_status(status))}</span>
+              </div>
+              <div class="pdf-tool-trace-copy">{html.escape(agent)} · {html.escape(summary[:120])}</div>
+            </summary>
+            <div class="pdf-tool-trace-detail-grid">
+              <div class="pdf-tool-trace-field">
+                <div class="pdf-tool-trace-label">来源</div>
+                <div class="pdf-tool-trace-value">{html.escape(str(event.get("source") or "builtin"))}</div>
+              </div>
+              <div class="pdf-tool-trace-field">
+                <div class="pdf-tool-trace-label">耗时</div>
+                <div class="pdf-tool-trace-value">{html.escape(duration_text)}</div>
+              </div>
+              <div class="pdf-tool-trace-field" data-wide="true">
+                <div class="pdf-tool-trace-label">输入摘要</div>
+                <div class="pdf-tool-trace-value">{html.escape(str(event.get("input_summary") or "未记录"))}</div>
+              </div>
+              <div class="pdf-tool-trace-field" data-wide="true">
+                <div class="pdf-tool-trace-label">输出摘要</div>
+                <div class="pdf-tool-trace-value">{html.escape(output_summary)}</div>
+              </div>
+              <div class="pdf-tool-trace-field">
+                <div class="pdf-tool-trace-label">产物</div>
+                <div class="pdf-tool-trace-value">{html.escape("、".join(str(item) for item in artifact_ids) or "无")}</div>
+              </div>
+              <div class="pdf-tool-trace-field">
+                <div class="pdf-tool-trace-label">证据</div>
+                <div class="pdf-tool-trace-value">{html.escape("、".join(str(item) for item in evidence_ids) or "无")}</div>
+              </div>
             </div>
-            <div class="pdf-tool-trace-copy">{html.escape(agent)} · {html.escape(summary[:120])}</div>
-          </article>
+          </details>
 """
 
 
