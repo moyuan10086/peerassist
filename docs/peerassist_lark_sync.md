@@ -150,3 +150,12 @@ model keys, paper secrets, or reviewer-private material here.
 - Browser verification: Playwright clicked both directions, observed "已定位到审稿队列" and "已定位到论文高亮", and reported overflow=0.
 - Verification: .venv/bin/python -m pytest -q -> 369 passed, 1 skipped, 3 deselected.
 - Static check: .venv/bin/python -m ruff check src/peerassist/confirmation_server.py tests/peerassist/test_confirmation_server.py -> all checks passed.
+
+## 2026-07-11 09:28 CST - Documentation and operation manual update
+
+- Added `docs/peerassist_operation_manual.md` as the Chinese operation manual for service startup, frontend development, PDF-first review workflow, manual confirmation, API endpoints, Feishu sync rules, GitHub submission, troubleshooting, and security boundaries.
+- Replaced the repository README with a Chinese PeerAssist-first homepage, covering public service URL, frontend source path, operation manual link, quick-start commands, GitHub author explanation, and the FactReview base note.
+- Added `web/peerassist-workspace/README.md` so the frontend directory clearly shows how to run and build the React/Vite workspace.
+- Confirmed frontend source is tracked under `web/peerassist-workspace`; GitHub language statistics may still show Python-dominant because of file size and Linguist timing.
+- Updated local git author config for future commits to `moyuan10086 <moyuan10086@users.noreply.github.com>`; historical pushed commits remain unchanged unless history is explicitly rewritten.
+- Security rule retained: no real API keys, GitHub tokens, model keys, or reviewer-private material are written to docs, code, Feishu, or git config.
