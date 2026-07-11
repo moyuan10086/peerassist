@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
+from schemas.citation import CitationAudit
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus, HumanConfirmationAction
 
 ALLOWED_CONFIRMATION_ACTIONS = [
@@ -13,6 +15,51 @@ ALLOWED_CONFIRMATION_ACTIONS = [
     "delete",
     "mark_pending",
 ]
+
+
+@dataclass(frozen=True)
+class CitationConfirmationReconciliation:
+    replayable_actions: list[HumanConfirmationAction]
+    unresolved_historical_actions: list[HumanConfirmationAction]
+    concern_ids_needing_reconciliation: list[str]
+
+
+def reconcile_citation_confirmations(
+    concerns: list[Concern],
+    actions: list[HumanConfirmationAction],
+    audit: CitationAudit,
+) -> CitationConfirmationReconciliation:
+    """Classify citation confirmation history without changing historical actions."""
+    concern_ids_by_finding: dict[str, set[str]] = {}
+    for concern in concerns:
+        finding_ids = concern.metadata.get("citation_finding_ids", [])
+        if isinstance(finding_ids, list):
+            for finding_id in finding_ids:
+                if isinstance(finding_id, str):
+                    concern_ids_by_finding.setdefault(finding_id, set()).add(concern.id)
+    current_finding_ids = {finding.id for finding in audit.findings}
+    audit_version = f"{audit.schema_version}:{audit.parse_version}"
+    replayable: list[HumanConfirmationAction] = []
+    unresolved: list[HumanConfirmationAction] = []
+    needs_reconciliation: list[str] = []
+    for action in actions:
+        if not action.citation_finding_ids:
+            replayable.append(action)
+            continue
+        action_findings = set(action.citation_finding_ids)
+        current_concerns = set().union(*(concern_ids_by_finding.get(finding_id, set()) for finding_id in action_findings))
+        unchanged = action_findings <= current_finding_ids and action.audit_version == audit_version
+        if unchanged and action.concern_id in current_concerns:
+            replayable.append(action)
+            continue
+        unresolved.append(action)
+        if action.concern_id not in needs_reconciliation:
+            needs_reconciliation.append(action.concern_id)
+    return CitationConfirmationReconciliation(
+        replayable_actions=replayable,
+        unresolved_historical_actions=unresolved,
+        concern_ids_needing_reconciliation=needs_reconciliation,
+    )
 
 
 def _apply_action(concern: Concern, action: HumanConfirmationAction) -> Concern:

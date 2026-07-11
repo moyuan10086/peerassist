@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from peerassist.citation_concerns import concerns_from_citation_audit
 from peerassist.concerns import concern_from_agent_draft
+from schemas.citation import CitationAudit
 from schemas.peerassist import (
     AgentConcernDraft,
     AgentInputPacket,
@@ -138,14 +140,11 @@ def _integrator_agent(statistics_result: AgentReviewResult) -> AgentReviewResult
     )
 
 
-def _citation_agent(checks: list[DeterministicCheck]) -> AgentReviewResult:
-    drafts = [_draft_for_check(check) for check in _lead_checks_for_category(checks, "citation")]
+def _citation_agent() -> AgentReviewResult:
     return AgentReviewResult(
         agent_id="citation_agent",
         status=AgentRunStatus.COMPLETED,
-        drafts=drafts,
-        warnings=[] if drafts else ["No citation/reference deterministic leads found."],
-        metadata={"lead_count": len(drafts)},
+        metadata={"source": "citation_audit", "draft_count": 0},
     )
 
 
@@ -184,14 +183,14 @@ def run_peerassist_agents(
     if normalized_mode == "standard":
         results.extend(
             [
-                _citation_agent(checks),
+                _citation_agent(),
                 _unsupported_agent("novelty_agent", normalized_mode),
             ]
         )
     elif normalized_mode == "deep":
         results.extend(
             [
-                _citation_agent(checks),
+                _citation_agent(),
                 _unsupported_agent("novelty_agent", normalized_mode),
                 _unsupported_agent("methodology_agent", normalized_mode),
                 _unsupported_agent("reproducibility_agent", normalized_mode),
@@ -200,7 +199,12 @@ def run_peerassist_agents(
     return results
 
 
-def integrate_agent_results(results: list[AgentReviewResult]) -> list[Concern]:
+def integrate_agent_results(
+    results: list[AgentReviewResult],
+    *,
+    citation_audit: CitationAudit | None = None,
+    mode: str = "fast",
+) -> list[Concern]:
     draft_sources: dict[str, list[str]] = defaultdict(list)
     drafts_by_id: dict[str, AgentConcernDraft] = {}
     concerns: list[Concern] = []
@@ -216,6 +220,11 @@ def integrate_agent_results(results: list[AgentReviewResult]) -> list[Concern]:
 
     for draft_id, draft in drafts_by_id.items():
         concerns.append(concern_from_agent_draft(draft, source_agent_ids=draft_sources[draft_id]))
+    if citation_audit is not None:
+        source_agent_id = "citation_agent" if mode.strip().lower() in {"standard", "deep"} else "citation_audit"
+        concerns.extend(concerns_from_citation_audit(citation_audit, source_agent_id=source_agent_id))
+    if len({concern.id for concern in concerns}) != len(concerns):
+        raise ValueError("agent integration produced duplicate concern identifiers")
     return concerns
 
 
