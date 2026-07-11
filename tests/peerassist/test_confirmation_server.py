@@ -348,6 +348,16 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "handlePdfReviewCommand" in html
     assert "updatePdfRuntimePulse" in html
     assert "syncPdfRuntimePagePulse" in html
+    assert "pdf-selection-context" in html
+    assert "data-pdf-selection-signal" in html
+    assert "page: page > 0 ? `第 ${page} 页`" in html
+    assert "chars: text ? `${text.length} 字`" in html
+    assert "queue: page > 0 ? `${pendingOnPage} / ${pageQueue} 待确认`" in html
+    assert "mode: `${currentMode}模式`" in html
+    assert "updatePdfSelectionContext" in html
+    assert "peerassistUpdatePdfSelectionContext" in html
+    assert "选区审稿上下文" in html
+    assert "当前页待确认" in html
     assert "updatePdfToolTrace" in html
     assert "renderPdfToolTraceCard" in html
     assert "pdf-tool-trace-summary" in html

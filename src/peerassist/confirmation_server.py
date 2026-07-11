@@ -1997,7 +1997,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .pdf-annotation-empty[hidden] {{ display: none; }}
     .pdf-selection-tray {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.85fr) auto;
       gap: 10px;
       align-items: center;
       padding: 10px 12px;
@@ -2017,6 +2017,35 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       line-height: 1.35;
       max-height: 44px;
       overflow: hidden;
+    }}
+    .pdf-selection-context {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+      min-width: 0;
+    }}
+    .pdf-selection-signal {{
+      min-width: 0;
+      border: 1px solid rgba(15, 118, 110, 0.14);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.72);
+      padding: 6px 7px;
+    }}
+    .pdf-selection-signal-label {{
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 920;
+      white-space: nowrap;
+    }}
+    .pdf-selection-signal-value {{
+      margin-top: 2px;
+      color: #25322f;
+      font-size: 11px;
+      font-weight: 920;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }}
     .pdf-selection-actions {{
       display: inline-flex;
@@ -2850,6 +2879,8 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .paper-comments {{ grid-template-columns: 1fr 1fr; }}
       .source-pdf-shell {{ min-height: 620px; }}
       .pdf-reader-stage {{ min-height: 580px; height: 70vh; }}
+      .pdf-selection-tray {{ grid-template-columns: 1fr; }}
+      .pdf-selection-actions {{ justify-content: flex-start; flex-wrap: wrap; }}
       .pdf-reading-map {{ grid-template-columns: 1fr; }}
       .pdf-mission-control {{ grid-template-columns: 1fr; }}
       .pdf-mission-actions {{ grid-template-columns: repeat(4, minmax(0, 1fr)); min-width: 0; }}
@@ -2875,6 +2906,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-search-actions {{ justify-content: flex-start; }}
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
+      .pdf-selection-context {{ grid-template-columns: 1fr 1fr; }}
       .pdf-mission-grid {{ grid-template-columns: 1fr 1fr; }}
       .pdf-mission-actions {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
@@ -3218,6 +3250,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           popover.dataset.visible = 'false';
           popover.removeAttribute('style');
         }}
+        updatePdfSelectionContext();
         updatePdfAgentContext();
         updatePdfMissionControl();
         return;
@@ -3252,9 +3285,34 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           popover.style.top = `${{Math.round(top)}}px`;
         }}
       }}
+      updatePdfSelectionContext();
       updatePdfAgentContext();
       updatePdfMissionControl();
     }}
+    function updatePdfSelectionContext() {{
+      const selected = window.peerassistSelectedEvidence || {{}};
+      const page = Number(selected.page || window.peerassistCurrentPdfPage || 0);
+      const text = String(selected.text || '');
+      const currentMode = reviewModeLabel(window.peerassistReviewMode || 'fast');
+      const pageQueue = page > 0
+        ? document.querySelectorAll(`.queue-body .item[data-concern-id][data-pdf-page="${{CSS.escape(String(page))}}"]`).length
+        : 0;
+      const pendingOnPage = page > 0
+        ? Array.from(document.querySelectorAll(`.queue-body .item[data-concern-id][data-pdf-page="${{CSS.escape(String(page))}}"]`))
+            .filter((item) => !isHumanResolvedQueueStatus(item.dataset.concernStatus)).length
+        : 0;
+      const values = {{
+        page: page > 0 ? `第 ${{page}} 页` : '未定位',
+        chars: text ? `${{text.length}} 字` : '未选择',
+        queue: page > 0 ? `${{pendingOnPage}} / ${{pageQueue}} 待确认` : '等待页码',
+        mode: `${{currentMode}}模式`
+      }};
+      Object.entries(values).forEach(([key, value]) => {{
+        const node = document.querySelector(`[data-pdf-selection-signal="${{CSS.escape(key)}}"]`);
+        if (node) node.textContent = value;
+      }});
+    }}
+    window.peerassistUpdatePdfSelectionContext = updatePdfSelectionContext;
     window.peerassistSetPdfSelection = setPdfSelectionEvidence;
     function setReviewFocusMode(enabled) {{
       const isEnabled = Boolean(enabled);
@@ -3653,6 +3711,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       updatePdfEvidenceGate();
       updatePdfMissionControl(state);
       updatePdfAgentTimeline(state);
+      updatePdfSelectionContext();
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3695,6 +3754,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         label.textContent = reviewModeLabel(nextMode);
       }});
       setPdfAgentPhase('prepare', `已选择${{reviewModeLabel(nextMode)}}模式`, quiet ? '' : 'mode');
+      updatePdfSelectionContext();
       updatePdfMissionControl();
     }}
     window.peerassistSetPdfAgentReviewMode = setPdfAgentReviewMode;
@@ -3872,9 +3932,17 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     window.peerassistSetAgentReviewRunState = setAgentReviewRunState;
     function buildAgentReviewPayload() {{
       const selectedEvidence = window.peerassistSelectedEvidence || {{}};
+      const selectedPage = Number(selectedEvidence.page || 0);
+      const pageQueueItems = selectedPage > 0
+        ? Array.from(document.querySelectorAll(`.queue-body .item[data-concern-id][data-pdf-page="${{CSS.escape(String(selectedPage))}}"]`))
+        : [];
+      const pendingOnPage = pageQueueItems.filter((item) => !isHumanResolvedQueueStatus(item.dataset.concernStatus)).length;
+      const selectionContext = selectedEvidence.text && selectedPage > 0
+        ? `\\n\\n[选区审稿上下文]\\n页码：PDF 第 ${{selectedPage}} 页\\n当前页待确认：${{pendingOnPage}} / ${{pageQueueItems.length}} 条\\n审稿模式：${{reviewModeLabel(window.peerassistReviewMode || 'fast')}}`
+        : '';
       const selectedText = String(
         selectedEvidence.text
-          ? `[PDF 第 ${{selectedEvidence.page || '未知'}} 页选区]\\n${{selectedEvidence.text}}`
+          ? `[PDF 第 ${{selectedEvidence.page || '未知'}} 页选区]\\n${{selectedEvidence.text}}${{selectionContext}}`
           : window.getSelection()?.toString() || ''
       ).trim();
       const reviewMode = window.peerassistReviewMode || 'fast';
@@ -4208,6 +4276,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     updatePdfEvidenceGate();
     updatePdfMissionControl();
     updatePdfAgentTimeline();
+    updatePdfSelectionContext();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -4511,6 +4580,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         updatePdfPageContext();
         syncPdfPageAnnotations();
         syncPdfRuntimePagePulse();
+        window.peerassistUpdatePdfSelectionContext?.();
         window.peerassistUpdatePdfAgentContext?.();
       }}
 
@@ -6575,6 +6645,24 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
         <div>
           <div class="pdf-selection-meta" data-pdf-selection-meta>尚未选择 PDF 文字</div>
           <div class="pdf-selection-quote" data-pdf-selection-quote></div>
+        </div>
+        <div class="pdf-selection-context" aria-label="PDF 选区审稿上下文">
+          <div class="pdf-selection-signal">
+            <div class="pdf-selection-signal-label">页码</div>
+            <div class="pdf-selection-signal-value" data-pdf-selection-signal="page">未定位</div>
+          </div>
+          <div class="pdf-selection-signal">
+            <div class="pdf-selection-signal-label">选区</div>
+            <div class="pdf-selection-signal-value" data-pdf-selection-signal="chars">未选择</div>
+          </div>
+          <div class="pdf-selection-signal">
+            <div class="pdf-selection-signal-label">本页队列</div>
+            <div class="pdf-selection-signal-value" data-pdf-selection-signal="queue">等待页码</div>
+          </div>
+          <div class="pdf-selection-signal">
+            <div class="pdf-selection-signal-label">审稿模式</div>
+            <div class="pdf-selection-signal-value" data-pdf-selection-signal="mode">快速模式</div>
+          </div>
         </div>
         <div class="pdf-selection-actions">
           <button class="inline-button" type="button" data-pdf-selection-copy>复制选区</button>
