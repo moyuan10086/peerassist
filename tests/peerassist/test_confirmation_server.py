@@ -9,7 +9,11 @@ from pathlib import Path
 
 import peerassist.confirmation_server as confirmation_server
 from common.pipeline_context import init_full_pipeline_context, peerassist_stage_dir, write_json_file
-from peerassist.confirmation_server import create_confirmation_server, render_confirmation_page
+from peerassist.confirmation_server import (
+    create_confirmation_server,
+    render_confirmation_page,
+    render_workspace_app,
+)
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
 
@@ -180,6 +184,23 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
 
     assert "PeerAssist 论文审核辅助台" in html
     assert "data-peerassist-agent-console" in html
+    assert 'data-peerassist-window="paper"' in html
+    assert "data-peerassist-window-bar" in html
+    assert "PeerAssist 分窗口工作区" in html
+    assert "工作窗口" in html
+    assert 'data-peerassist-window-target="paper"' in html
+    assert 'data-peerassist-window-target="agent"' in html
+    assert 'data-peerassist-window-target="queue"' in html
+    assert 'data-peerassist-window-target="trace"' in html
+    assert 'data-peerassist-window-target="confirm"' in html
+    assert 'data-peerassist-window-target="artifacts"' in html
+    assert "论文阅读" in html
+    assert "智能审稿" in html
+    assert "产物导出" in html
+    assert "setPeerAssistWindow" in html
+    assert "peerassistSetWindow" in html
+    assert "revealWorkspacePanel" in html
+    assert 'body[data-peerassist-window="paper"]' in html
     assert 'data-panel="review-queue"' in html
     assert 'data-panel="paper-viewer"' in html
     assert 'data-panel="paper-review-stage"' in html
@@ -358,6 +379,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistUpdatePdfSelectionContext" in html
     assert "选区审稿上下文" in html
     assert "当前页待确认" in html
+    assert "fetch('/api/manual-concern'" in html
+    assert "peerassistSubmitManualConcern" in html
     assert "updatePdfToolTrace" in html
     assert "renderPdfToolTraceCard" in html
     assert "pdf-tool-trace-summary" in html
@@ -626,7 +649,28 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "PDF 选区审稿浮层" in html
     assert "选区证据" in html
     assert "基于选区审稿" in html
+    assert "data-pdf-selection-note" in html
+    assert "data-pdf-selection-manual" in html
+    assert "人工批注" in html
+    assert "加入队列" in html
     assert "inline-button primary" in html
+
+
+def test_render_workspace_app_uses_react_frontend_bootstrap(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _seed_peerassist_stage(run_dir)
+
+    html = render_workspace_app(run_dir=run_dir, paper_id="demo")
+
+    assert "PeerAssist 智能审稿工作台" in html
+    assert "peerassist-server-bootstrap" in html
+    assert '"paper_id": "demo"' in html
+    assert '"api_base": "/api"' in html
+    assert '"pdf_url": "/paper.pdf"' in html
+    assert '"legacy_url": "/legacy"' in html
+    assert '<div id="root"></div>' in html
+    assert 'type="module"' in html
+    assert "React" not in html
 
 
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:
@@ -642,6 +686,27 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
     thread.start()
     base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
     try:
+        with urllib.request.urlopen(f"{base_url}/paper", timeout=5) as response:
+            workspace_html = response.read().decode("utf-8")
+            workspace_content_type = response.headers["Content-Type"]
+        assert workspace_content_type.startswith("text/html")
+        assert "PeerAssist 智能审稿工作台" in workspace_html
+        assert "peerassist-server-bootstrap" in workspace_html
+
+        with urllib.request.urlopen(f"{base_url}/legacy", timeout=5) as response:
+            legacy_html = response.read().decode("utf-8")
+        assert "PeerAssist 论文审核辅助台" in legacy_html
+        assert "data-peerassist-agent-console" in legacy_html
+
+        with urllib.request.urlopen(f"{base_url}/api/bootstrap", timeout=5) as response:
+            bootstrap = json.loads(response.read().decode("utf-8"))
+        assert bootstrap["schema_version"] == "peerassist.workspace_bootstrap.v1"
+        assert bootstrap["paper_id"] == "demo"
+        assert bootstrap["assets"]["legacy_url"] == "/legacy"
+        assert bootstrap["windows"][0]["id"] == "paper"
+        assert bootstrap["state"]["pending_count"] == 1
+        assert bootstrap["model_config"]["model"] == "gpt-5.4"
+
         with urllib.request.urlopen(f"{base_url}/api/state", timeout=5) as response:
             state = json.loads(response.read().decode("utf-8"))
         assert state["pending_count"] == 1
@@ -696,6 +761,60 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
         else:  # pragma: no cover
             raise AssertionError("agent review should require a configured model key")
         assert "模型 API Key 未配置" in error_payload["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_manual_pdf_selection_concern_endpoint_writes_queue(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_peerassist_stage(run_dir)
+    server = create_confirmation_server(
+        run_dir=run_dir,
+        paper_id="demo",
+        host="127.0.0.1",
+        port=0,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    try:
+        payload = json.dumps(
+            {
+                "selected_text": "The paper claims a statistically significant reduction on page one.",
+                "page": 1,
+                "note": "请作者说明统计显著性检验、阈值和适用假设。",
+                "reviewer_id": "reviewer-1",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base_url}/api/manual-concern",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        assert result["schema_version"] == "peerassist.manual_concern_result.v1"
+        assert result["concern_id"] == "concern_manual_pdf_001"
+        assert result["evidence_id"] == "MANUAL-PDF-001"
+        assert result["queue_items"] == 2
+        ledger = json.loads((out_dir / "evidence_ledger.json").read_text(encoding="utf-8"))
+        manual_evidence = next(row for row in ledger["items"] if row["id"] == "MANUAL-PDF-001")
+        assert manual_evidence["page"] == 1
+        assert manual_evidence["metadata"]["source"] == "manual_pdf_selection"
+        assert "statistically significant" in manual_evidence["text"]
+        queue = json.loads((out_dir / "confirmation_review_queue.json").read_text(encoding="utf-8"))
+        manual_items = [row for row in queue["items"] if row["id"] == "concern_manual_pdf_001"]
+        assert len(manual_items) == 1
+        manual_item = manual_items[0]
+        assert manual_item["status"] == "pending_human_confirmation"
+        assert manual_item["category"] == "manual_annotation"
+        assert manual_item["evidence"][0]["id"] == "MANUAL-PDF-001"
+        assert manual_item["evidence"][0]["locator"] == "PDF 第 1 页人工选区"
     finally:
         server.shutdown()
         server.server_close()

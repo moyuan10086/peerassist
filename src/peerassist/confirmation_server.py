@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import mimetypes
 import os
 import re
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,10 @@ from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
+
+_FRONTEND_APP_ROOT = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace"
+_FRONTEND_DIST_ROOT = _FRONTEND_APP_ROOT / "dist"
+_WORKSPACE_ROUTES = {"/", "/paper", "/agent", "/queue", "/trace", "/confirm", "/artifacts"}
 
 
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
@@ -238,6 +244,62 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
     .workflow-title {{ font-weight: 820; font-size: 13px; }}
     .workflow-detail {{ color: var(--muted); font-size: 12px; margin-top: 2px; }}
+    .workspace-window-bar {{
+      position: sticky;
+      top: 69px;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      width: min(1760px, calc(100% - 36px));
+      margin: 12px auto 0;
+      border: 1px solid rgba(198, 220, 215, 0.72);
+      border-radius: 8px;
+      background: rgba(250, 253, 252, 0.94);
+      box-shadow: 0 16px 34px rgba(20, 35, 35, 0.12);
+      backdrop-filter: blur(14px);
+      padding: 8px;
+    }}
+    .workspace-window-title {{
+      color: #182723;
+      font-size: 12px;
+      font-weight: 920;
+      white-space: nowrap;
+      padding: 0 6px;
+    }}
+    .workspace-window-tabs {{
+      display: flex;
+      gap: 6px;
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }}
+    .workspace-window-tab {{
+      flex: 0 0 auto;
+      min-height: 32px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #fff;
+      color: #394340;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 860;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .workspace-window-tab[aria-pressed="true"] {{
+      border-color: #0f766e;
+      background: #12302b;
+      color: #d8fff5;
+      box-shadow: inset 0 -2px 0 #8bd8c8;
+    }}
+    .workspace-window-status {{
+      color: #66736f;
+      font-size: 11px;
+      font-weight: 820;
+      white-space: nowrap;
+    }}
     .agent-stage-board {{
       display: grid;
       grid-template-columns: repeat(8, minmax(118px, 1fr));
@@ -355,6 +417,70 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       grid-template-columns: minmax(0, 1fr) 390px;
       gap: 16px;
       min-height: calc(100vh - 68px);
+    }}
+    body[data-peerassist-window] .ops-strip,
+    body[data-peerassist-window] .workflow-band {{
+      display: none;
+    }}
+    body[data-peerassist-window] .console-shell {{
+      display: block;
+      width: min(1760px, 100%);
+      min-height: auto;
+    }}
+    body[data-peerassist-window] .rail,
+    body[data-peerassist-window] .paper-review-stage,
+    body[data-peerassist-window] .right-stack {{
+      display: grid;
+      gap: 14px;
+      max-height: none;
+      overflow: visible;
+    }}
+    body[data-peerassist-window] .rail {{
+      margin-bottom: 14px;
+    }}
+    body[data-peerassist-window] [data-panel="run-summary"],
+    body[data-peerassist-window] [data-panel="next-actions"],
+    body[data-peerassist-window] [data-panel="agent-runs"],
+    body[data-peerassist-window] [data-panel="paper-viewer"],
+    body[data-peerassist-window] [data-panel="evidence-chain-matrix"],
+    body[data-peerassist-window] [data-panel="review-queue"],
+    body[data-peerassist-window] [data-panel="model-entry"],
+    body[data-peerassist-window] [data-panel="review-inspector"],
+    body[data-peerassist-window] [data-panel="evidence-focus"],
+    body[data-peerassist-window] [data-panel="artifact-workspace"],
+    body[data-peerassist-window] [data-panel="tool-trace"],
+    body[data-peerassist-window] [data-panel="human-confirmation"] {{
+      display: none;
+    }}
+    body[data-peerassist-window="paper"] .console-shell {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 390px;
+      align-items: start;
+    }}
+    body[data-peerassist-window="paper"] [data-panel="paper-viewer"],
+    body[data-peerassist-window="paper"] [data-panel="review-inspector"] {{
+      display: block;
+    }}
+    body[data-peerassist-window="agent"] [data-panel="run-summary"],
+    body[data-peerassist-window="agent"] [data-panel="next-actions"],
+    body[data-peerassist-window="agent"] [data-panel="agent-runs"],
+    body[data-peerassist-window="agent"] [data-panel="model-entry"] {{
+      display: block;
+    }}
+    body[data-peerassist-window="queue"] [data-panel="evidence-chain-matrix"],
+    body[data-peerassist-window="queue"] [data-panel="review-queue"],
+    body[data-peerassist-window="queue"] [data-panel="evidence-focus"] {{
+      display: block;
+    }}
+    body[data-peerassist-window="trace"] [data-panel="tool-trace"] {{
+      display: block;
+    }}
+    body[data-peerassist-window="confirm"] [data-panel="human-confirmation"],
+    body[data-peerassist-window="confirm"] [data-panel="review-queue"] {{
+      display: block;
+    }}
+    body[data-peerassist-window="artifacts"] [data-panel="artifact-workspace"] {{
+      display: block;
     }}
     .panel {{
       background: var(--panel);
@@ -1997,7 +2123,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .pdf-annotation-empty[hidden] {{ display: none; }}
     .pdf-selection-tray {{
       display: grid;
-      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.85fr) auto;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.85fr) minmax(260px, 0.78fr) auto;
       gap: 10px;
       align-items: center;
       padding: 10px 12px;
@@ -2046,6 +2172,35 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }}
+    .pdf-selection-composer {{
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }}
+    .pdf-selection-composer-label {{
+      color: #0f766e;
+      font-size: 10px;
+      font-weight: 920;
+    }}
+    .pdf-selection-note {{
+      width: 100%;
+      min-height: 42px;
+      max-height: 88px;
+      resize: vertical;
+      border: 1px solid rgba(15, 118, 110, 0.22);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.82);
+      color: #25322f;
+      padding: 7px 8px;
+      font: inherit;
+      font-size: 12px;
+      line-height: 1.32;
+      outline: none;
+    }}
+    .pdf-selection-note:focus {{
+      border-color: #0f766e;
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
     }}
     .pdf-selection-actions {{
       display: inline-flex;
@@ -2907,6 +3062,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-review-command-strip {{ grid-template-columns: 1fr; }}
       .pdf-command-actions {{ justify-content: flex-start; }}
       .pdf-selection-context {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-selection-note {{ min-height: 58px; }}
       .pdf-mission-grid {{ grid-template-columns: 1fr 1fr; }}
       .pdf-mission-actions {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
@@ -2946,7 +3102,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }}
   </style>
 </head>
-<body data-peerassist-agent-console data-review-focus="false">
+<body data-peerassist-agent-console data-review-focus="false" data-peerassist-window="paper">
   <header class="topbar" data-stream-state="connecting">
     <div class="brand">
       <div class="mark">PA</div>
@@ -2961,6 +3117,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       <span id="runtime-status">{len(events)} 条追踪事件</span>
     </div>
   </header>
+  <nav class="workspace-window-bar" data-peerassist-window-bar aria-label="PeerAssist 分窗口工作区">
+    <div class="workspace-window-title">工作窗口</div>
+    <div class="workspace-window-tabs" role="tablist" aria-label="PeerAssist 审稿窗口">
+      <button class="workspace-window-tab" type="button" role="tab" data-peerassist-window-target="paper" aria-pressed="true">论文阅读</button>
+      <button class="workspace-window-tab" type="button" role="tab" data-peerassist-window-target="agent" aria-pressed="false">智能审稿</button>
+      <button class="workspace-window-tab" type="button" role="tab" data-peerassist-window-target="queue" aria-pressed="false">证据队列 {pending_count}</button>
+      <button class="workspace-window-tab" type="button" role="tab" data-peerassist-window-target="trace" aria-pressed="false">工具追踪 {len(events)}</button>
+      <button class="workspace-window-tab" type="button" role="tab" data-peerassist-window-target="confirm" aria-pressed="false">人工确认</button>
+      <button class="workspace-window-tab" type="button" role="tab" data-peerassist-window-target="artifacts" aria-pressed="false">产物导出</button>
+    </div>
+    <div class="workspace-window-status" data-peerassist-window-status>当前：论文阅读</div>
+  </nav>
   <section class="ops-strip" data-agent-ops-strip>
     <div class="ops-card primary">
       <div class="ops-kicker">运行态指挥条</div>
@@ -3214,6 +3382,42 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         toast.dataset.visible = 'false';
       }}, 2200);
     }}
+    function peerassistWindowLabel(name) {{
+      const labels = {{
+        paper: '论文阅读',
+        agent: '智能审稿',
+        queue: '证据队列',
+        trace: '工具追踪',
+        confirm: '人工确认',
+        artifacts: '产物导出'
+      }};
+      return labels[name] || labels.paper;
+    }}
+    function setPeerAssistWindow(name, options = {{}}) {{
+      const allowed = ['paper', 'agent', 'queue', 'trace', 'confirm', 'artifacts'];
+      const next = allowed.includes(name) ? name : 'paper';
+      document.body.dataset.peerassistWindow = next;
+      document.querySelectorAll('[data-peerassist-window-target]').forEach((button) => {{
+        button.setAttribute('aria-pressed', String(button.dataset.peerassistWindowTarget === next));
+      }});
+      const status = document.querySelector('[data-peerassist-window-status]');
+      if (status) status.textContent = `当前：${{peerassistWindowLabel(next)}}`;
+      if (!options.quiet) showToast(`已切换到${{peerassistWindowLabel(next)}}窗口`);
+      if (options.scroll !== false) {{
+        document.querySelector('[data-peerassist-window-bar]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+      }}
+      if (next === 'paper') {{
+        window.setTimeout(() => window.peerassistPdfRenderCurrentPage?.(), 120);
+      }}
+    }}
+    window.peerassistSetWindow = setPeerAssistWindow;
+    function revealWorkspacePanel(windowName, selector, toastMessage) {{
+      setPeerAssistWindow(windowName, {{quiet: true, scroll: false}});
+      window.setTimeout(() => {{
+        document.querySelector(selector)?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        if (toastMessage) showToast(toastMessage);
+      }}, 80);
+    }}
     async function copyText(value) {{
       if (navigator.clipboard && window.isSecureContext) {{
         await navigator.clipboard.writeText(value);
@@ -3241,11 +3445,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const popover = document.querySelector('[data-pdf-selection-popover]');
       const popoverQuote = document.querySelector('[data-pdf-selection-popover-quote]');
       const popoverMeta = document.querySelector('[data-pdf-selection-popover-meta]');
+      const note = document.querySelector('[data-pdf-selection-note]');
       window.peerassistSelectedEvidence = {{text, page: page > 0 ? page : null}};
       if (!text) {{
         if (tray) tray.hidden = true;
         if (quote) quote.textContent = '';
         if (meta) meta.textContent = '尚未选择 PDF 文字';
+        if (note) note.value = '';
         if (popover) {{
           popover.dataset.visible = 'false';
           popover.removeAttribute('style');
@@ -3761,6 +3967,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     function handlePdfReviewCommand(command) {{
       if (command === 'agent-review') {{
         setPdfAgentPhase('evidence', '正在组装全篇审稿上下文', 'agent');
+        setPeerAssistWindow('agent', {{quiet: true, scroll: false}});
         document.querySelector('[data-agent-review-start]')?.click();
         document.querySelector('[data-panel="model-entry"]')?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
         showToast('已从 PDF 命令条启动全篇审稿');
@@ -3872,6 +4079,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       if (chainRow) chainRow.dataset.active = 'true';
       const scrollTarget = target === 'queue' ? item : highlight || comment;
       if (scrollTarget) {{
+        setPeerAssistWindow(target === 'queue' ? 'queue' : 'paper', {{quiet: true, scroll: false}});
         scrollTarget.scrollIntoView({{behavior: 'smooth', block: 'center'}});
       }}
       const targetPage = Number(pdfPage || item?.dataset.pdfPage || comment?.dataset.pdfPage || 0);
@@ -3953,6 +4161,46 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         has_selection: Boolean(selectedEvidence.text)
       }};
     }}
+    function buildManualConcernPayload() {{
+      const selected = window.peerassistSelectedEvidence || {{}};
+      const note = document.querySelector('[data-pdf-selection-note]');
+      return {{
+        selected_text: String(selected.text || '').trim(),
+        page: Number(selected.page || 0),
+        note: String(note?.value || '').trim(),
+        reviewer_id: 'local-reviewer'
+      }};
+    }}
+    async function submitManualConcern(button) {{
+      const payload = buildManualConcernPayload();
+      if (!payload.selected_text) {{
+        showToast('请先在 PDF 中选择原文');
+        return;
+      }}
+      if (!payload.note) {{
+        showToast('请先写一条人工批注');
+        document.querySelector('[data-pdf-selection-note]')?.focus();
+        return;
+      }}
+      if (button) button.disabled = true;
+      try {{
+        const response = await fetch('/api/manual-concern', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify(payload)
+        }});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '人工批注入队失败');
+        appendPdfActivityLine('manual', `已加入人工批注：${{result.concern_id}}`);
+        showToast('人工批注已加入待确认队列');
+        window.setTimeout(() => window.location.reload(), 700);
+      }} catch (error) {{
+        showToast(`人工批注未保存：${{error.message}}`);
+      }} finally {{
+        if (button) button.disabled = false;
+      }}
+    }}
+    window.peerassistSubmitManualConcern = submitManualConcern;
     async function runAgentReview(button, payload = null) {{
       const stream = document.querySelector('[data-agent-review-stream]');
       const requestPayload = payload || buildAgentReviewPayload();
@@ -4087,7 +4335,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
           showToast('请先在 PDF 中选择文字');
           return;
         }}
-        document.querySelector('[data-panel="model-entry"]')?.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+        revealWorkspacePanel('agent', '[data-panel="model-entry"]', '已切换到智能审稿窗口');
         const startButton = document.querySelector('[data-agent-review-start]');
         if (startButton) {{
           startButton.click();
@@ -4096,6 +4344,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         }}
         showToast('已作为智能审稿关注文本');
       }});
+    }});
+    document.querySelectorAll('[data-pdf-selection-manual]').forEach((button) => {{
+      button.addEventListener('click', () => submitManualConcern(button));
     }});
     document.querySelectorAll('[data-pdf-selection-clear]').forEach((button) => {{
       button.addEventListener('click', () => {{
@@ -4122,8 +4373,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-pdf-page-filter-current]').forEach((button) => {{
       button.addEventListener('click', () => {{
         document.querySelector('[data-queue-filter="current-page"]')?.click();
-        document.querySelector('[data-panel="review-queue"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已切换到当前 PDF 页队列');
+        revealWorkspacePanel('queue', '[data-panel="review-queue"]', '已切换到当前 PDF 页队列');
       }});
     }});
     document.querySelectorAll('[data-pdf-page-next-pending]').forEach((button) => {{
@@ -4190,27 +4440,23 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     }});
     document.querySelectorAll('[data-pdf-recovery-trace]').forEach((button) => {{
       button.addEventListener('click', () => {{
-        document.querySelector('[data-panel="tool-trace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已定位到工具追踪');
+        revealWorkspacePanel('trace', '[data-panel="tool-trace"]', '已定位到工具追踪');
       }});
     }});
     document.querySelectorAll('[data-pdf-recovery-failed]').forEach((button) => {{
       button.addEventListener('click', () => {{
         applyTraceFilter('failed');
-        document.querySelector('[data-panel="tool-trace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已筛选失败工具事件');
+        revealWorkspacePanel('trace', '[data-panel="tool-trace"]', '已筛选失败工具事件');
       }});
     }});
     document.querySelectorAll('[data-pdf-recovery-artifacts]').forEach((button) => {{
       button.addEventListener('click', () => {{
-        document.querySelector('[data-panel="artifact-workspace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已定位到产物工作区');
+        revealWorkspacePanel('artifacts', '[data-panel="artifact-workspace"]', '已定位到产物工作区');
       }});
     }});
     document.querySelectorAll('[data-pdf-human-gate-open]').forEach((button) => {{
       button.addEventListener('click', () => {{
-        document.querySelector('[data-panel="human-confirmation"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已打开人工确认闸门');
+        revealWorkspacePanel('confirm', '[data-panel="human-confirmation"]', '已打开人工确认闸门');
       }});
     }});
     document.querySelectorAll('[data-pdf-human-gate-next]').forEach((button) => {{
@@ -4228,21 +4474,18 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-pdf-human-gate-queue]').forEach((button) => {{
       button.addEventListener('click', () => {{
         document.querySelector('[data-queue-filter="all"]')?.click();
-        document.querySelector('[data-panel="review-queue"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已定位到审稿队列清单');
+        revealWorkspacePanel('queue', '[data-panel="review-queue"]', '已定位到审稿队列清单');
       }});
     }});
     document.querySelectorAll('[data-pdf-evidence-gate-chain]').forEach((button) => {{
       button.addEventListener('click', () => {{
-        document.querySelector('[data-panel="evidence-chain-matrix"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已定位到证据链矩阵');
+        revealWorkspacePanel('queue', '[data-panel="evidence-chain-matrix"]', '已定位到证据链矩阵');
       }});
     }});
     document.querySelectorAll('[data-pdf-evidence-gate-pdf]').forEach((button) => {{
       button.addEventListener('click', () => {{
         document.querySelector('[data-queue-filter="pdf"]')?.click();
-        document.querySelector('[data-panel="review-queue"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        showToast('已筛选有 PDF 证据的关注点');
+        revealWorkspacePanel('queue', '[data-panel="review-queue"]', '已筛选有 PDF 证据的关注点');
       }});
     }});
     document.querySelectorAll('[data-pdf-evidence-gate-unbound]').forEach((button) => {{
@@ -4269,7 +4512,13 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         runAgentReview(button);
       }});
     }});
+    document.querySelectorAll('[data-peerassist-window-target]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        setPeerAssistWindow(button.dataset.peerassistWindowTarget || 'paper');
+      }});
+    }});
     setAgentReviewRunState('idle');
+    setPeerAssistWindow(document.body.dataset.peerassistWindow || 'paper', {{quiet: true, scroll: false}});
     updatePdfAgentContext();
     updatePdfRecoveryCheckpoint();
     updatePdfHumanGate();
@@ -5123,6 +5372,61 @@ def create_confirmation_server(
     return ThreadingHTTPServer((host, port), handler)
 
 
+def render_workspace_app(*, run_dir: Path, paper_id: str) -> str:
+    frontend_root = _frontend_root()
+    index_path = frontend_root / "index.html"
+    try:
+        document = index_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return render_confirmation_page(run_dir=run_dir, paper_id=paper_id)
+    bootstrap = {
+        "paper_id": paper_id,
+        "api_base": "/api",
+        "pdf_url": "/paper.pdf",
+        "legacy_url": "/legacy",
+        "workspace_routes": sorted(_WORKSPACE_ROUTES - {"/"}),
+    }
+    return document.replace(
+        "__PEERASSIST_BOOTSTRAP__",
+        html.escape(json.dumps(bootstrap, ensure_ascii=False), quote=False),
+    )
+
+
+def _frontend_root() -> Path:
+    return _FRONTEND_DIST_ROOT if (_FRONTEND_DIST_ROOT / "index.html").is_file() else _FRONTEND_APP_ROOT
+
+
+def _load_workspace_state(*, run_dir: Path, paper_id: str) -> dict[str, Any]:
+    state = load_confirmation_state(run_dir=run_dir)
+    paths = state.get("paths") if isinstance(state.get("paths"), dict) else {}
+    source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
+    if source_pdf_path is not None:
+        paths = {**paths, "source_pdf": str(source_pdf_path)}
+        state = {**state, "paths": paths}
+    return {
+        "schema_version": "peerassist.workspace_bootstrap.v1",
+        "paper_id": paper_id,
+        "state": state,
+        "model_config": _resolve_model_config(),
+        "assets": {
+            "pdf_url": "/paper.pdf" if source_pdf_path is not None else "",
+            "legacy_url": "/legacy",
+        },
+        "windows": [
+            {"id": "paper", "label": "论文阅读", "path": "/paper"},
+            {"id": "agent", "label": "智能审稿", "path": "/agent"},
+            {"id": "queue", "label": "证据队列", "path": "/queue"},
+            {"id": "trace", "label": "工具追踪", "path": "/trace"},
+            {"id": "confirm", "label": "人工确认", "path": "/confirm"},
+            {"id": "artifacts", "label": "产物导出", "path": "/artifacts"},
+        ],
+    }
+
+
+def _is_workspace_route(path: str) -> bool:
+    return path in _WORKSPACE_ROUTES
+
+
 def _discover_source_pdf(*, run_dir: Path, paper_id: str) -> Path | None:
     aliases = _paper_pdf_aliases(paper_id)
     candidates: list[Path] = []
@@ -5316,6 +5620,138 @@ def _persist_agent_review_concerns(
         "queue_path": str(queue_path),
         "bundle_path": str(bundle_path),
     }
+
+
+def _persist_manual_selection_concern(
+    *, run_dir: Path, paper_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    selected_text = _compact_manual_text(str(payload.get("selected_text") or ""), limit=2000)
+    note = _compact_manual_text(str(payload.get("note") or ""), limit=800)
+    if not selected_text:
+        raise ValueError("请先在 PDF 中选择原文。")
+    if not note:
+        raise ValueError("请填写人工批注。")
+    page = _safe_positive_int(payload.get("page"))
+    out_dir = peerassist_stage_dir(run_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).isoformat()
+    ledger_path = out_dir / "evidence_ledger.json"
+    ledger_payload = read_json_safely(ledger_path)
+    ledger_items = ledger_payload.get("items") if isinstance(ledger_payload.get("items"), list) else []
+    manual_index = _next_manual_index(ledger_items, prefix="MANUAL-PDF")
+    evidence_id = f"MANUAL-PDF-{manual_index:03d}"
+    locator = f"PDF 第 {page} 页人工选区" if page else "PDF 人工选区"
+    manual_evidence = {
+        "id": evidence_id,
+        "type": "text_span",
+        "page": page if page else None,
+        "section": "PDF 手动批注",
+        "locator": locator,
+        "text": selected_text,
+        "metadata": {
+            "source": "manual_pdf_selection",
+            "created_at": timestamp,
+            "reviewer_id": str(payload.get("reviewer_id") or "local-reviewer"),
+        },
+    }
+    all_evidence = [row for row in ledger_items if isinstance(row, dict)] + [manual_evidence]
+    write_json_file(
+        ledger_path,
+        {
+            **ledger_payload,
+            "schema_version": str(ledger_payload.get("schema_version") or "peerassist.evidence_ledger.v1"),
+            "paper_id": str(ledger_payload.get("paper_id") or paper_id),
+            "items": all_evidence,
+            "coverage": _evidence_coverage(all_evidence),
+        },
+    )
+
+    concerns_path = out_dir / "peerassist_concerns.json"
+    concerns_payload = read_json_safely(concerns_path)
+    existing = concerns_payload.get("concerns") if isinstance(concerns_payload.get("concerns"), list) else []
+    concern_index = _next_manual_index(existing, prefix="concern_manual_pdf")
+    concern = Concern(
+        id=f"concern_manual_pdf_{concern_index:03d}",
+        level=ConcernLevel.CLARIFICATION_NEEDED,
+        category="manual_annotation",
+        title=_manual_title_from_note(note),
+        evidence_ids=[evidence_id],
+        impact="审稿人从 PDF 原文选区直接提出人工关注点，需在最终报告前逐条确认。",
+        benign_explanation="该问题可能来自表述压缩、术语差异、排版位置或上下文尚未充分展开。",
+        author_action=note,
+        status=ConcernStatus.PENDING_HUMAN_CONFIRMATION,
+        source_agent_ids=["human_pdf_annotator"],
+        metadata={
+            "source": "manual_pdf_selection",
+            "selected_text": selected_text,
+            "page": page,
+            "created_at": timestamp,
+        },
+    )
+    all_concerns = [row for row in existing if isinstance(row, dict)] + [concern.model_dump(mode="json")]
+    write_json_file(
+        concerns_path,
+        {
+            "schema_version": "peerassist.concerns.v1",
+            "mode": str(concerns_payload.get("mode") or "fast"),
+            "paper_id": str(concerns_payload.get("paper_id") or paper_id),
+            "concerns": all_concerns,
+        },
+    )
+
+    evidence_lookup = _evidence_lookup_from_ledger(ledger_path)
+    typed_concerns = [Concern.model_validate(row) for row in all_concerns]
+    bundle = build_confirmation_bundle(concerns=typed_concerns, evidence_lookup=evidence_lookup)
+    bundle_path = out_dir / "confirmation_bundle.json"
+    queue_path = out_dir / "confirmation_review_queue.json"
+    write_json_file(bundle_path, bundle)
+    queue = build_confirmation_review_queue(bundle)
+    write_json_file(queue_path, queue)
+    return {
+        "schema_version": "peerassist.manual_concern_result.v1",
+        "concern_id": concern.id,
+        "evidence_id": evidence_id,
+        "queue_items": len(queue.get("items") if isinstance(queue.get("items"), list) else []),
+        "concerns_path": str(concerns_path),
+        "queue_path": str(queue_path),
+        "ledger_path": str(ledger_path),
+    }
+
+
+def _compact_manual_text(value: str, *, limit: int) -> str:
+    text = re.sub(r"\s+", " ", value).strip()
+    return text[:limit]
+
+
+def _safe_positive_int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def _next_manual_index(rows: list[Any], *, prefix: str) -> int:
+    count = 0
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("id") or "").startswith(prefix):
+            count += 1
+    return count + 1
+
+
+def _manual_title_from_note(note: str) -> str:
+    compact = note.strip()
+    if len(compact) <= 42:
+        return compact
+    return compact[:42].rstrip() + "..."
+
+
+def _evidence_coverage(rows: list[dict[str, Any]]) -> dict[str, int]:
+    coverage: dict[str, int] = {}
+    for row in rows:
+        item_type = str(row.get("type") or "unknown")
+        coverage[item_type] = coverage.get(item_type, 0) + 1
+    return coverage
 
 
 def _extract_agent_review_payload(text: str) -> dict[str, Any]:
@@ -5675,8 +6111,14 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
     class ConfirmationHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
-            if path == "/" or self.path.startswith("/?"):
+            if _is_workspace_route(path):
+                self._send_html(render_workspace_app(run_dir=run_dir, paper_id=paper_id))
+                return
+            if path == "/legacy":
                 self._send_html(render_confirmation_page(run_dir=run_dir, paper_id=paper_id))
+                return
+            if path.startswith("/workspace/"):
+                self._send_static_asset(path.removeprefix("/workspace/"))
                 return
             if path == "/paper.pdf":
                 source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
@@ -5685,11 +6127,14 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                     return
                 self._send_pdf(source_pdf_path)
                 return
+            if path == "/api/bootstrap":
+                self._send_json(_load_workspace_state(run_dir=run_dir, paper_id=paper_id))
+                return
             if path == "/api/state":
-                self._send_json(load_confirmation_state(run_dir=run_dir))
+                self._send_json(_load_workspace_state(run_dir=run_dir, paper_id=paper_id)["state"])
                 return
             if path == "/api/events":
-                self._send_sse_state(load_confirmation_state(run_dir=run_dir))
+                self._send_sse_state(_load_workspace_state(run_dir=run_dir, paper_id=paper_id)["state"])
                 return
             self.send_error(404, "not found")
 
@@ -5702,11 +6147,20 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                     return
                 self._send_pdf(source_pdf_path, head_only=True)
                 return
-            if path == "/" or self.path.startswith("/?"):
+            if _is_workspace_route(path):
+                self._send_html(
+                    render_workspace_app(run_dir=run_dir, paper_id=paper_id),
+                    head_only=True,
+                )
+                return
+            if path == "/legacy":
                 self._send_html(
                     render_confirmation_page(run_dir=run_dir, paper_id=paper_id),
                     head_only=True,
                 )
+                return
+            if path.startswith("/workspace/"):
+                self._send_static_asset(path.removeprefix("/workspace/"), head_only=True)
                 return
             self.send_error(404, "not found")
 
@@ -5721,6 +6175,19 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                         review_mode=str(payload.get("review_mode") or "fast"),
                         paper_id=paper_id,
                         state=state,
+                    )
+                except Exception as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                    return
+                self._send_json(result)
+                return
+            if self.path == "/api/manual-concern":
+                try:
+                    payload = self._read_json()
+                    result = _persist_manual_selection_concern(
+                        run_dir=run_dir,
+                        paper_id=paper_id,
+                        payload=payload,
                     )
                 except Exception as exc:
                     self._send_json({"error": str(exc)}, status=400)
@@ -5769,6 +6236,30 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             body = text.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if head_only:
+                return
+            self.wfile.write(body)
+
+        def _send_static_asset(self, relative_path: str, *, head_only: bool = False) -> None:
+            frontend_root = _frontend_root().resolve()
+            asset_path = (frontend_root / relative_path).resolve()
+            try:
+                asset_path.relative_to(frontend_root)
+            except ValueError:
+                self.send_error(404, "not found")
+                return
+            if not asset_path.is_file():
+                self.send_error(404, "not found")
+                return
+            body = asset_path.read_bytes()
+            content_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+            if asset_path.suffix == ".js":
+                content_type = "text/javascript"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if head_only:
@@ -6664,9 +7155,14 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
             <div class="pdf-selection-signal-value" data-pdf-selection-signal="mode">快速模式</div>
           </div>
         </div>
+        <div class="pdf-selection-composer">
+          <label class="pdf-selection-composer-label" for="pdf-selection-note">人工批注</label>
+          <textarea id="pdf-selection-note" class="pdf-selection-note" data-pdf-selection-note placeholder="写下这段原文需要作者澄清、补充或修改的地方"></textarea>
+        </div>
         <div class="pdf-selection-actions">
           <button class="inline-button" type="button" data-pdf-selection-copy>复制选区</button>
           <button class="inline-button primary" type="button" data-pdf-selection-use data-pdf-selection-review>基于选区审稿</button>
+          <button class="inline-button" type="button" data-pdf-selection-manual>加入队列</button>
           <button class="inline-button" type="button" data-pdf-selection-clear>清空</button>
         </div>
       </div>
@@ -6680,6 +7176,7 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
           <div class="pdf-selection-popover-actions">
             <button class="inline-button primary" type="button" data-pdf-selection-use>基于选区审稿</button>
             <button class="inline-button" type="button" data-pdf-selection-copy>复制</button>
+            <button class="inline-button" type="button" data-pdf-selection-manual>加入队列</button>
             <button class="inline-button" type="button" data-pdf-selection-clear>清空</button>
           </div>
         </div>

@@ -59,3 +59,9 @@ demos/**/execution/
 # Project
 refcopilot-out/
 tmp
+
+# Frontend workspace
+web/**/node_modules/
+web/**/tsconfig.tsbuildinfo
+!web/peerassist-workspace/dist/
+!web/peerassist-workspace/dist/**
