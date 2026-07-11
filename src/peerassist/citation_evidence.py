@@ -24,9 +24,10 @@ DOI_RE = re.compile(
 )
 YEAR_RE = re.compile(r"\b(?P<year>(?:19|20)\d{2})\b")
 CI_PREFIX_RE = re.compile(r"(?:\b\d+(?:\.\d+)?%\s*)?\bCI\s*$", re.I)
-NUMERIC_CITATION_SHAPED_RE = re.compile(r"\[\s*(?=[\d,\-\s]*\d)[\d,\-\s]+\]")
-NON_CITATION_CONTEXT_RE = re.compile(
-    r"\b(?:vector|array|interval|range|confidence\s+interval|ci|coordinates|index|indices|shape|tensor)\b",
+NUMERIC_CITATION_SHAPED_RE = re.compile(r"\[\s*(?=[^\]]*\d)(?:[\d,\-\s]+|[^\]]*-[^\]]*)\]")
+IMMEDIATE_NON_CITATION_CONTEXT_RE = re.compile(
+    r"(?:\bvector\s+is|\barray\s*=|\b(?:confidence\s+)?interval|\brange|\bCI|\bcoordinates|\bindices)"
+    r"[\s:;,=]*$",
     re.I,
 )
 APA_TITLE_RE = re.compile(
@@ -95,7 +96,7 @@ def _is_confidence_interval(text: str, start: int) -> bool:
 
 
 def _is_non_citation_context(text: str, start: int) -> bool:
-    return bool(NON_CITATION_CONTEXT_RE.search(text[max(0, start - 80) : start]))
+    return bool(IMMEDIATE_NON_CITATION_CONTEXT_RE.search(text[:start]))
 
 
 def _citation_mention(source: EvidenceItem, raw: str, start: int, end: int, number: int) -> EvidenceItem:

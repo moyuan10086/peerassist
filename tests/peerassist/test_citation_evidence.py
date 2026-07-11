@@ -101,6 +101,31 @@ def test_extract_ignores_non_numeric_and_statistical_brackets_but_keeps_body_cit
     assert result.warnings == []
 
 
+def test_extract_uses_only_immediate_non_citation_context_before_bracket() -> None:
+    vector = evidence("P02-L004", EvidenceType.TEXT_SPAN, "The vector is [1, 3].")
+    range = evidence("P02-L005", EvidenceType.TEXT_SPAN, "Across a broad range of methods, prior work [2].")
+    baseline = evidence("P02-L006", EvidenceType.TEXT_SPAN, "The vector baseline follows prior work [1].")
+
+    result = extract_citation_evidence(ledger_with(vector, range, baseline))
+
+    assert [mention.metadata["number"] for mention in result.mentions] == [2, 1]
+    assert result.unsupported_markers == []
+
+
+def test_extract_routes_mixed_hyphenated_numeric_markers_to_unsupported() -> None:
+    source = evidence("P02-L004", EvidenceType.TEXT_SPAN, "Broken [1-a] and [a-3].")
+
+    result = extract_citation_evidence(ledger_with(source))
+
+    assert result.mentions == []
+    assert result.links == []
+    assert [marker.raw for marker in result.unsupported_markers] == ["[1-a]", "[a-3]"]
+    assert [marker.error_code for marker in result.unsupported_markers] == [
+        "invalid_range_endpoint",
+        "invalid_range_endpoint",
+    ]
+
+
 def test_extract_ignores_non_citation_brackets_without_unsupported_warning() -> None:
     result = extract_citation_evidence(ledger_with(evidence("P02-L004", EvidenceType.TEXT_SPAN, "Use [default].")))
 
