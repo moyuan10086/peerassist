@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from peerassist.citation_artifacts import validate_response_artifact, write_response_artifact
+from peerassist.citation_artifacts import (
+    ArtifactWriteError,
+    validate_response_artifact,
+    write_response_artifact,
+)
 from peerassist.citation_metadata import (
     compare_reference_metadata,
     normalize_doi,
@@ -604,6 +608,42 @@ def test_artifact_publish_is_immutable_for_concurrent_same_attempt(tmp_path: Pat
     assert (tmp_path / artifact.path).read_bytes() == payload
 
 
+def test_artifact_directory_fd_survives_parent_symlink_swap_without_outside_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_dir = tmp_path / "citation_verifications"
+    artifact_dir.mkdir()
+    held_directory = tmp_path / "held-directory"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_link = os.link
+    swapped = False
+
+    def swap_then_link(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.rename(artifact_dir, held_directory)
+            os.symlink(outside, artifact_dir, target_is_directory=True)
+        original_link(*args, **kwargs)
+
+    monkeypatch.setattr(os, "link", swap_then_link)
+    artifact = write_response_artifact(tmp_path, "swap", b'{"inside":true}')
+
+    assert not list(outside.iterdir())
+    assert (held_directory / "attempt-swap.json").read_bytes() == b'{"inside":true}'
+    assert artifact.path == "citation_verifications/attempt-swap.json"
+
+
+def test_artifact_directory_symlink_is_rejected(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, tmp_path / "citation_verifications", target_is_directory=True)
+
+    with pytest.raises(ArtifactWriteError):
+        write_response_artifact(tmp_path, "directory-link", b"data")
+
+
 def test_artifact_serialization_and_write_failures_are_failed_verifications(tmp_path: Path) -> None:
     nonserializable = verify_reference(
         reference_record(),
@@ -625,7 +665,7 @@ def test_artifact_serialization_and_write_failures_are_failed_verifications(tmp_
 @pytest.mark.parametrize(
     "candidate",
     [
-        {"doi": "10.1000/example"},
+        {},
         {"id": object(), "doi": "10.1000/example"},
         {"id": "external-1", "doi": "10.1000/example", "nested": {"bad": object()}},
     ],
@@ -651,6 +691,21 @@ def test_whitespace_only_dois_are_not_exact_matches(tmp_path: Path) -> None:
     )
 
     assert verification.status is VerificationStatus.NOT_FOUND
+
+
+def test_candidate_without_id_gets_stable_fallback_and_retains_metadata_differences(tmp_path: Path) -> None:
+    candidate = {"doi": "10.1000/example", "title": "Different Study", "year": 2023}
+    first = verify_reference(reference_record(), OfflineMetadataVerifier([candidate]), artifact_dir=tmp_path)
+    second = verify_reference(reference_record(), OfflineMetadataVerifier([candidate]), artifact_dir=tmp_path)
+
+    assert first.status is VerificationStatus.COMPLETED
+    assert second.status is VerificationStatus.COMPLETED
+    assert first.match is not None and second.match is not None
+    assert first.match.selected_candidate_id == second.match.selected_candidate_id
+    assert {difference.field for difference in first.field_differences if difference.comparison.value == "mismatch"} >= {
+        "title",
+        "year",
+    }
 
 
 def test_non_integral_year_does_not_match_manuscript_year() -> None:

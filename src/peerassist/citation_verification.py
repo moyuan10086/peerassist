@@ -298,11 +298,28 @@ def _is_valid_candidate(candidate: object) -> bool:
     if not isinstance(candidate, Mapping) or not _is_json_compatible(dict(candidate)):
         return False
     candidate_id = candidate.get("id")
-    if not isinstance(candidate_id, str) or not candidate_id.strip():
+    if candidate_id is not None and (not isinstance(candidate_id, str) or not candidate_id.strip()):
         return False
     if any(key in candidate and not isinstance(candidate[key], str) for key in ("doi", "title", "url")):
         return False
-    return all(_valid_year(candidate[key]) is not None for key in ("year", "online_year", "print_year") if key in candidate)
+    if not all(_valid_year(candidate[key]) is not None for key in ("year", "online_year", "print_year") if key in candidate):
+        return False
+    return bool(normalize_doi(candidate.get("doi")) or normalize_title(candidate.get("title")))
+
+
+def _canonicalize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    canonical = dict(candidate)
+    if isinstance(canonical.get("id"), str) and canonical["id"].strip():
+        return canonical
+    doi = normalize_doi(canonical.get("doi"))
+    if doi:
+        material = f"doi:{doi}"
+    else:
+        title = normalize_title(canonical.get("title"))
+        year = _valid_year(canonical.get("year"))
+        material = f"title-year:{title}:{year}" if title and year is not None else _canonical_json_bytes(canonical).decode("utf-8")
+    canonical["id"] = f"candidate-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:12]}"
+    return canonical
 
 
 def normalize_query(record: ReferenceRecord) -> dict[str, Any]:
@@ -462,7 +479,7 @@ def verify_reference(
     if not isinstance(result.candidates, list) or not all(_is_valid_candidate(candidate) for candidate in result.candidates):
         return _failed_verification(record, adapter, attempt_id, attempt_number, "adapter_schema_error", artifact)
 
-    candidates = [dict(candidate) for candidate in result.candidates]
+    candidates = [_canonicalize_candidate(candidate) for candidate in result.candidates]
     selected, method, matching_candidates = _select_candidate(record, candidates)
     candidate_ids = [_candidate_id(candidate) for candidate in matching_candidates]
     if method == "no_candidates":

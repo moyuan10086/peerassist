@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from schemas.citation import RawResponseArtifact
 
 _ATTEMPT_ID_RE = re.compile(r"[A-Za-z0-9_-]+$")
-_ARTIFACT_PREFIX = Path("citation_verifications")
+_ARTIFACT_DIRECTORY = "citation_verifications"
 
 
 class ArtifactSerializationError(Exception):
@@ -41,108 +42,146 @@ def response_bytes(raw_response: Any) -> bytes:
         raise ArtifactSerializationError("raw response is not JSON-serializable") from exc
 
 
-def _resolved_root(artifact_root: str | Path) -> Path:
+def expected_response_artifact_path(attempt_id: str) -> str:
+    """Return the only valid indexed path for an immutable attempt response."""
+    return f"{_ARTIFACT_DIRECTORY}/{_artifact_filename(attempt_id)}"
+
+
+def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_response: Any) -> RawResponseArtifact:
+    """Publish immutable bytes using only root- and directory-fd-relative operations."""
+    encoded = response_bytes(raw_response)
+    filename = _artifact_filename(attempt_id)
+    root_fd = _open_root_fd(artifact_root, create=True)
+    artifact_fd = -1
+    temporary_name = ""
+    try:
+        artifact_fd = _open_artifact_directory_fd(root_fd, create=True)
+        temporary_name, temporary_fd = _create_temporary_file(artifact_fd)
+        try:
+            _write_and_sync(temporary_fd, encoded)
+        finally:
+            os.close(temporary_fd)
+        os.link(
+            temporary_name,
+            filename,
+            src_dir_fd=artifact_fd,
+            dst_dir_fd=artifact_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(artifact_fd)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        raise ArtifactWriteError("unable to publish immutable response artifact") from exc
+    finally:
+        if temporary_name and artifact_fd >= 0:
+            try:
+                os.unlink(temporary_name, dir_fd=artifact_fd)
+            except FileNotFoundError:
+                pass
+        if artifact_fd >= 0:
+            os.close(artifact_fd)
+        os.close(root_fd)
+    return RawResponseArtifact(path=expected_response_artifact_path(attempt_id), sha256=hashlib.sha256(encoded).hexdigest())
+
+
+def validate_response_artifact(artifact_root: str | Path, artifact: RawResponseArtifact) -> bool:
+    """Hash a regular response file through one no-follow descriptor open."""
+    try:
+        filename = _artifact_filename_from_path(artifact.path)
+        root_fd = _open_root_fd(artifact_root, create=False)
+    except (ArtifactWriteError, ValueError):
+        return False
+    artifact_fd = -1
+    try:
+        artifact_fd = _open_artifact_directory_fd(root_fd, create=False)
+        digest = _descriptor_sha256(artifact_fd, filename)
+    except (ArtifactWriteError, OSError):
+        return False
+    finally:
+        if artifact_fd >= 0:
+            os.close(artifact_fd)
+        os.close(root_fd)
+    return digest == artifact.sha256
+
+
+def _artifact_filename(attempt_id: str) -> str:
+    if not _ATTEMPT_ID_RE.fullmatch(attempt_id):
+        raise ValueError("attempt_id must contain only letters, digits, underscores, and hyphens")
+    return f"attempt-{attempt_id}.json"
+
+
+def _artifact_filename_from_path(path: str) -> str:
+    expected_prefix = f"{_ARTIFACT_DIRECTORY}/"
+    if not path.startswith(expected_prefix):
+        raise ValueError("artifact path is not in the citation verification directory")
+    filename = path.removeprefix(expected_prefix)
+    if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+        raise ValueError("artifact filename is invalid")
+    return filename
+
+
+def _directory_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_root_fd(artifact_root: str | Path, *, create: bool) -> int:
     root = Path(artifact_root)
     try:
-        root.mkdir(parents=True, exist_ok=True)
-        return root.resolve(strict=True)
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+        return os.open(root, _directory_flags())
     except OSError as exc:
         raise ArtifactWriteError("artifact root is unavailable") from exc
 
 
-def _is_within(path: Path, root: Path) -> bool:
+def _open_artifact_directory_fd(root_fd: int, *, create: bool) -> int:
     try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
-def _relative_artifact_path(path: str | Path) -> Path:
-    relative = Path(path)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError("artifact path must be relative and confined to artifact_root")
-    return relative
-
-
-def _confined_destination(root: Path, relative: Path) -> Path:
-    candidate = root / relative
-    try:
-        parent = candidate.parent.resolve(strict=False)
-    except OSError as exc:
-        raise ArtifactWriteError("artifact directory cannot be resolved") from exc
-    if not _is_within(parent, root):
-        raise ValueError("artifact path escapes artifact_root")
-    return candidate
-
-
-def _artifact_relative_path(attempt_id: str) -> Path:
-    if not _ATTEMPT_ID_RE.fullmatch(attempt_id):
-        raise ValueError("attempt_id must contain only letters, digits, underscores, and hyphens")
-    return _ARTIFACT_PREFIX / f"attempt-{attempt_id}.json"
-
-
-def expected_response_artifact_path(attempt_id: str) -> str:
-    """Return the only valid indexed path for an immutable attempt response."""
-    return _artifact_relative_path(attempt_id).as_posix()
-
-
-def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_response: Any) -> RawResponseArtifact:
-    """Publish an immutable raw response without replacing an existing attempt."""
-    encoded = response_bytes(raw_response)
-    root = _resolved_root(artifact_root)
-    relative = _artifact_relative_path(attempt_id)
-    destination = _confined_destination(root, relative)
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not _is_within(destination.parent.resolve(strict=True), root):
-            raise ValueError("artifact path escapes artifact_root")
-        file_descriptor, temp_name = tempfile.mkstemp(prefix=".attempt-", suffix=".tmp", dir=destination.parent)
-        temporary = Path(temp_name)
+        return os.open(_ARTIFACT_DIRECTORY, _directory_flags(), dir_fd=root_fd)
+    except FileNotFoundError:
+        if not create:
+            raise ArtifactWriteError("artifact directory is unavailable") from None
         try:
-            with os.fdopen(file_descriptor, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.link(temporary, destination)
-            _fsync_directory(destination.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
-    except FileExistsError:
-        raise
-    except ValueError:
-        raise
+            os.mkdir(_ARTIFACT_DIRECTORY, mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        try:
+            return os.open(_ARTIFACT_DIRECTORY, _directory_flags(), dir_fd=root_fd)
+        except OSError as exc:
+            raise ArtifactWriteError("artifact directory is unavailable") from exc
     except OSError as exc:
-        raise ArtifactWriteError("unable to publish immutable response artifact") from exc
-    return RawResponseArtifact(path=relative.as_posix(), sha256=hashlib.sha256(encoded).hexdigest())
+        raise ArtifactWriteError("artifact directory is unavailable") from exc
 
 
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+def _create_temporary_file(directory_fd: int) -> tuple[str, int]:
+    for _ in range(64):
+        filename = f".attempt-{secrets.token_hex(16)}.tmp"
+        try:
+            descriptor = os.open(
+                filename,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            return filename, descriptor
+        except FileExistsError:
+            continue
+    raise ArtifactWriteError("unable to allocate unique artifact temporary file")
 
 
-def validate_response_artifact(artifact_root: str | Path, artifact: RawResponseArtifact) -> bool:
-    """Return whether an indexed artifact is confined, regular, and hash-valid."""
-    try:
-        root = Path(artifact_root).resolve(strict=True)
-        relative = _relative_artifact_path(artifact.path)
-        candidate = _confined_destination(root, relative)
-        digest = _descriptor_sha256(candidate)
-    except (OSError, ValueError):
-        return False
-    return digest == artifact.sha256
+def _write_and_sync(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        written += os.write(descriptor, view[written:])
+    os.fsync(descriptor)
 
 
-def _descriptor_sha256(path: Path) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+def _descriptor_sha256(directory_fd: int, filename: str) -> str:
+    descriptor = os.open(filename, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError("artifact is not a regular file")
+            raise OSError(errno.EINVAL, "artifact is not a regular file")
         digest = hashlib.sha256()
         while block := os.read(descriptor, 1024 * 1024):
             digest.update(block)
