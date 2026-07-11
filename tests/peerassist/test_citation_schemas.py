@@ -350,6 +350,13 @@ def test_completed_doi_exact_is_accepted() -> None:
     assert verification.match.method == "doi_exact"
 
 
+def test_completed_requires_source_record_to_match_selected_candidate() -> None:
+    payload = verification_payload("completed")
+    payload["source_record"]["id"] = "different-external-record"
+    with pytest.raises(ValidationError, match="completed"):
+        CitationVerification.model_validate(payload)
+
+
 def test_completed_verification_does_not_require_candidate_summary_ids() -> None:
     payload = verification_payload("completed")
     payload["match"]["candidate_ids"] = []
@@ -374,6 +381,33 @@ def test_non_completed_verification_may_omit_observed_metadata(status: str) -> N
     payload = verification_payload(status)
     del payload["observed_metadata"]
     assert CitationVerification.model_validate(payload).observed_metadata == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("observed_metadata", {"title": "Unexpected response data"}),
+        (
+            "field_differences",
+            [
+                {
+                    "field": "title",
+                    "manuscript_value": "A",
+                    "external_value": "B",
+                    "normalized_manuscript_value": "a",
+                    "normalized_external_value": "b",
+                    "comparison": "mismatch",
+                    "rule": "normalized_title_exact",
+                }
+            ],
+        ),
+    ],
+)
+def test_unavailable_verification_forbids_observed_response_data(field: str, value: Any) -> None:
+    payload = verification_payload("unavailable")
+    payload[field] = value
+    with pytest.raises(ValidationError, match="unavailable"):
+        CitationVerification.model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -583,6 +617,14 @@ def test_citation_link_enforces_record_cardinality(status: str, reference_count:
         CitationLink.model_validate(payload)
 
 
+@pytest.mark.parametrize(("status", "reference_count"), [("linked", 1), ("ambiguous", 2)])
+def test_resolved_citation_link_requires_reference_evidence(status: str, reference_count: int) -> None:
+    payload = link_payload(status, reference_count=reference_count)
+    payload["reference_evidence_ids"] = []
+    with pytest.raises(ValidationError, match=status):
+        CitationLink.model_validate(payload)
+
+
 @pytest.mark.parametrize("reference_number", [0, -1])
 def test_citation_link_reference_number_must_be_positive(reference_number: int) -> None:
     payload = link_payload()
@@ -629,6 +671,13 @@ def test_citation_evidence_result_accepts_evidence_items() -> None:
     result = CitationEvidenceResult.model_validate(evidence_result_payload())
     assert result.mentions[0].type is EvidenceType.CITATION
     assert result.unsupported_markers == []
+
+
+def test_citation_evidence_result_rejects_non_citation_mentions() -> None:
+    payload = evidence_result_payload()
+    payload["mentions"][0]["type"] = "text_span"
+    with pytest.raises(ValidationError, match="citation"):
+        CitationEvidenceResult.model_validate(payload)
 
 
 @pytest.mark.parametrize("field", ["mentions", "references", "links"])

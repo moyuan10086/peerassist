@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
-from schemas.peerassist import EvidenceItem
+from schemas.peerassist import EvidenceItem, EvidenceType
 
 
 class CitationLinkStatus(StrEnum):
@@ -82,8 +82,12 @@ class CitationLink(BaseModel):
             )
         if self.status is CitationLinkStatus.LINKED and record_count != 1:
             raise ValueError("linked citation link requires exactly one reference record")
+        if self.status is CitationLinkStatus.LINKED and not self.reference_evidence_ids:
+            raise ValueError("linked citation link requires reference evidence")
         if self.status is CitationLinkStatus.AMBIGUOUS and record_count < 2:
             raise ValueError("ambiguous citation link requires at least two reference records")
+        if self.status is CitationLinkStatus.AMBIGUOUS and not self.reference_evidence_ids:
+            raise ValueError("ambiguous citation link requires reference evidence")
         if self.status is CitationLinkStatus.MISSING_REFERENCE and (
             self.reference_record_ids or self.reference_evidence_ids
         ):
@@ -170,6 +174,8 @@ class CitationVerification(BaseModel):
                 )
             if "observed_metadata" not in self.model_fields_set:
                 raise ValueError("completed verification requires explicit observed_metadata")
+            if self.source_record.id != self.match.selected_candidate_id:
+                raise ValueError("completed verification source record must match selected candidate")
             if (
                 self.match.method.startswith("title_similarity")
                 and self.match.method != "title_similarity_unique"
@@ -216,6 +222,8 @@ class CitationVerification(BaseModel):
                 )
             ):
                 raise ValueError("unavailable verification forbids response, match, and source record")
+            if self.observed_metadata or self.field_differences:
+                raise ValueError("unavailable verification forbids observed metadata and field differences")
         elif status is VerificationStatus.FAILED:
             if not self.error_code:
                 raise ValueError("failed verification requires error_code")
@@ -326,6 +334,12 @@ class CitationEvidenceResult(BaseModel):
     links: list[CitationLink]
     unsupported_markers: list[UnsupportedCitationMarker] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_mention_types(self) -> CitationEvidenceResult:
+        if any(mention.type is not EvidenceType.CITATION for mention in self.mentions):
+            raise ValueError("citation evidence result mentions must use citation evidence type")
+        return self
 
 
 class CitationAudit(BaseModel):
