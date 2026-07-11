@@ -200,3 +200,21 @@ def build_evidence_ledger(
         coverage=_coverage(items),
         metadata=metadata,
     )
+
+
+def with_citation_evidence(ledger: EvidenceLedger) -> EvidenceLedger:
+    """Return a copied ledger augmented with extracted citation mention evidence."""
+    from peerassist.citation_evidence import extract_citation_evidence
+
+    result = extract_citation_evidence(ledger)
+    items = [*ledger.items, *result.mentions]
+    metadata = dict(ledger.metadata)
+    metadata["citation_warnings"] = list(result.warnings)
+    return EvidenceLedger(
+        schema_version=ledger.schema_version,
+        paper_id=ledger.paper_id,
+        source_sha256=ledger.source_sha256,
+        items=items,
+        coverage=_coverage(items),
+        metadata=metadata,
+    )
