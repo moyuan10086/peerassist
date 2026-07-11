@@ -13,7 +13,7 @@ from typing import Any, Never
 from pydantic import ValidationError
 
 from peerassist.citation_artifacts import expected_response_artifact_path, validate_response_artifact
-from peerassist.citation_metadata import normalize_doi, normalize_title
+from peerassist.citation_metadata import normalize_doi, normalize_title, title_similarity
 from schemas.citation import (
     CitationAudit,
     CitationAuditFinding,
@@ -79,7 +79,12 @@ def finding_status_for(
     differences = verification.field_differences
     if any(item.comparison is CitationFieldComparison.MISMATCH for item in differences):
         return CitationFindingStatus.METADATA_MISMATCH
-    if len(differences) < 2:
+    comparable_fields = {
+        item.field
+        for item in differences
+        if item.comparison in {CitationFieldComparison.MATCH, CitationFieldComparison.MISMATCH}
+    }
+    if len(comparable_fields) < 2:
         return CitationFindingStatus.INSUFFICIENT_EVIDENCE
     return CitationFindingStatus.VERIFIED
 
@@ -121,13 +126,7 @@ def build_citation_audit(
         links=ordered_links,
         verifications=ordered_verifications,
         findings=findings,
-        coverage={
-            "mentions": sum(item.type is EvidenceType.CITATION for item in ledger.items),
-            "references": len(ordered_records),
-            "links": len(ordered_links),
-            "verifications": len(ordered_verifications),
-            "findings": len(findings),
-        },
+        coverage=_coverage(ledger, ordered_records, ordered_links, ordered_verifications, findings),
         warnings=list(warnings),
     )
 
@@ -173,6 +172,7 @@ def validate_citation_audit(
         if set(citation_link.reference_evidence_ids) != linked_evidence_ids:
             _fail("inconsistent_link_chain")
 
+    _validate_verification_provenance_uniqueness(audit.verifications)
     for verification in audit.verifications:
         if verification.reference_record_id not in records_by_id:
             _fail("dangling_reference_id")
@@ -188,6 +188,7 @@ def validate_citation_audit(
             links_by_id=links_by_id,
             verifications_by_id=verifications_by_id,
         )
+    _validate_coverage(audit, ledger)
 
 
 def write_citation_audit_atomic(
@@ -204,22 +205,29 @@ def write_citation_audit_atomic(
         audit.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     temporary_path: Path | None = None
+    backup_path: Path | None = None
+    replaced = False
+    retain_backup = False
     try:
-        with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent, prefix=f".{target.name}.", delete=False) as handle:
-            temporary_path = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        temporary_path = _write_temporary_bytes(target.parent, f".{target.name}.new.", payload)
+        if target.exists():
+            backup_path = _write_temporary_bytes(target.parent, f".{target.name}.backup.", target.read_bytes())
         os.replace(temporary_path, target)
+        temporary_path = None
+        replaced = True
         _fsync_directory(target.parent)
     except OSError as exc:
+        if replaced:
+            if _restore_previous_index(target, backup_path):
+                backup_path = None
+            else:
+                retain_backup = backup_path is not None
+            raise CitationAuditIntegrityError("index_publish_failed") from exc
         raise CitationAuditIntegrityError("audit_write_failed") from exc
     finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
+        _best_effort_unlink(temporary_path)
+        if not retain_backup:
+            _best_effort_unlink(backup_path)
     return target
 
 
@@ -295,8 +303,20 @@ def _reference_only_findings(
         if doi:
             duplicate_groups.setdefault(("doi", doi), []).append(record)
         title = normalize_title(record.title)
-        if title and record.year is not None:
+        if title and _valid_reference_year(record.year):
             duplicate_groups.setdefault(("title_year", title, str(record.year)), []).append(record)
+    for index, record in enumerate(records):
+        if not (normalize_title(record.title) and _valid_reference_year(record.year)):
+            continue
+        for candidate in records[index + 1 :]:
+            if (
+                candidate.year == record.year
+                and _valid_reference_year(candidate.year)
+                and title_similarity(record.title, candidate.title) >= 0.95
+            ):
+                duplicate_groups.setdefault(("similarity", record.id, candidate.id), []).extend(
+                    [record, candidate]
+                )
     emitted_members: set[tuple[str, ...]] = set()
     for group in duplicate_groups.values():
         member_ids = tuple(sorted(record.id for record in group))
@@ -389,6 +409,56 @@ def _reference_evidence_ids(records: Iterable[ReferenceRecord]) -> set[str]:
     return {evidence_id for record in records for evidence_id in record.source_evidence_ids}
 
 
+def _valid_reference_year(year: int | None) -> bool:
+    return year is not None and 0 < year < 10000
+
+
+def _coverage(
+    ledger: EvidenceLedger,
+    records: Sequence[ReferenceRecord],
+    links: Sequence[CitationLink],
+    verifications: Sequence[CitationVerification],
+    findings: Sequence[CitationAuditFinding],
+) -> dict[str, int]:
+    coverage = {
+        "records": len(records),
+        "mentions": sum(item.type is EvidenceType.CITATION for item in ledger.items),
+        "reference_evidence": sum(item.type is EvidenceType.REFERENCE for item in ledger.items),
+        "links": len(links),
+        "verifications": len(verifications),
+        "findings": len(findings),
+    }
+    coverage.update({f"links.{status.value}": 0 for status in CitationLinkStatus if status is not CitationLinkStatus.UNSUPPORTED_SYNTAX})
+    coverage.update({f"verifications.{status.value}": 0 for status in VerificationStatus})
+    coverage.update({f"findings.{status.value}": 0 for status in CitationFindingStatus})
+    for citation_link in links:
+        coverage[f"links.{citation_link.status.value}"] += 1
+    for verification in verifications:
+        coverage[f"verifications.{verification.status.value}"] += 1
+    for finding in findings:
+        coverage[f"findings.{finding.status.value}"] += 1
+    return coverage
+
+
+def _validate_coverage(audit: CitationAudit, ledger: EvidenceLedger) -> None:
+    if audit.coverage != _coverage(ledger, audit.records, audit.links, audit.verifications, audit.findings):
+        _fail("coverage_mismatch")
+
+
+def _validate_verification_provenance_uniqueness(verifications: Iterable[CitationVerification]) -> None:
+    attempt_ids: set[str] = set()
+    artifact_paths: set[str] = set()
+    for verification in verifications:
+        if verification.attempt_id in attempt_ids:
+            _fail("duplicate_attempt_id")
+        attempt_ids.add(verification.attempt_id)
+        if verification.raw_response_artifact is None:
+            continue
+        if verification.raw_response_artifact.path in artifact_paths:
+            _fail("duplicate_response_artifact_path")
+        artifact_paths.add(verification.raw_response_artifact.path)
+
+
 def _validate_response_artifact(verification: CitationVerification, artifact_root: str | Path) -> None:
     artifact = verification.raw_response_artifact
     if artifact is None:
@@ -424,13 +494,16 @@ def _validate_finding(
         linked_mentions = {link.mention_evidence_id for link in linked}
         if set(finding.mention_evidence_ids) != linked_mentions:
             _fail("inconsistent_finding_chain")
+        _validate_finding_status(finding, linked, verifications_by_id)
+        _validate_finding_provenance(finding, verifications_by_id)
         _validate_finding_id(finding, verifications_by_id)
         return
     if finding.status in _REFERENCE_ONLY_STATUSES:
-        if set(finding.reference_evidence_ids) != _reference_evidence_ids(
-            records_by_id[record_id] for record_id in finding.reference_record_ids
-        ):
+        records = [records_by_id[record_id] for record_id in finding.reference_record_ids]
+        if set(finding.reference_evidence_ids) != _reference_evidence_ids(records):
             _fail("inconsistent_finding_chain")
+        _validate_reference_only_finding_status(finding, records_by_id, links_by_id)
+        _validate_finding_provenance(finding, verifications_by_id)
         _validate_finding_id(finding, verifications_by_id)
         return
 
@@ -446,6 +519,8 @@ def _validate_finding(
     for verification_id in finding.verification_ids:
         if verifications_by_id[verification_id].reference_record_id not in finding.reference_record_ids:
             _fail("inconsistent_finding_chain")
+    _validate_finding_status(finding, linked_records, verifications_by_id)
+    _validate_finding_provenance(finding, verifications_by_id)
     _validate_finding_id(finding, verifications_by_id)
 
 
@@ -475,6 +550,68 @@ def _validate_finding_id(
         _fail("finding_id_mismatch")
 
 
+def _validate_finding_status(
+    finding: CitationAuditFinding,
+    citation_links: Sequence[CitationLink],
+    verifications_by_id: Mapping[str, CitationVerification],
+) -> None:
+    expected_statuses: set[CitationFindingStatus] = set()
+    for citation_link in citation_links:
+        verifications = [
+            verifications_by_id[verification_id]
+            for verification_id in finding.verification_ids
+            if verifications_by_id[verification_id].reference_record_id in citation_link.reference_record_ids
+        ]
+        if len(verifications) > 1:
+            _fail("inconsistent_finding_chain")
+        expected_statuses.add(finding_status_for(citation_link, verifications[0] if verifications else None))
+    if expected_statuses != {finding.status}:
+        _fail("finding_status_mismatch")
+
+
+def _validate_reference_only_finding_status(
+    finding: CitationAuditFinding,
+    records_by_id: Mapping[str, ReferenceRecord],
+    links_by_id: Mapping[str, CitationLink],
+) -> None:
+    expected = _reference_only_findings(
+        sorted(records_by_id.values(), key=lambda record: record.id),
+        sorted(links_by_id.values(), key=lambda citation_link: citation_link.id),
+    )
+    same_trace = [
+        candidate
+        for candidate in expected
+        if set(candidate.reference_record_ids) == set(finding.reference_record_ids)
+        and set(candidate.reference_evidence_ids) == set(finding.reference_evidence_ids)
+    ]
+    if not same_trace:
+        _fail("inconsistent_finding_chain")
+    if all(candidate.status is not finding.status for candidate in same_trace):
+        _fail("finding_status_mismatch")
+
+
+def _validate_finding_provenance(
+    finding: CitationAuditFinding, verifications_by_id: Mapping[str, CitationVerification]
+) -> None:
+    verifications = [verifications_by_id[verification_id] for verification_id in finding.verification_ids]
+    if not verifications and finding.status in _REFERENCE_ONLY_STATUSES:
+        if finding.metadata != {}:
+            _fail("finding_provenance_mismatch")
+        return
+    expected: dict[str, Any] = {
+        "difference_fields": sorted({difference.field for verification in verifications for difference in verification.field_differences}),
+        "difference_rules": sorted({difference.rule for verification in verifications for difference in verification.field_differences}),
+    }
+    if len(verifications) == 1:
+        verification = verifications[0]
+        expected["attempt_id"] = verification.attempt_id
+        expected["error_code"] = verification.error_code
+        if verification.raw_response_artifact is not None:
+            expected["raw_response_artifact"] = verification.raw_response_artifact.model_dump(mode="json")
+    if finding.metadata != expected:
+        _fail("finding_provenance_mismatch")
+
+
 def _validate_schema(audit: CitationAudit) -> None:
     try:
         CitationAudit.model_validate(audit.model_dump(mode="json"))
@@ -488,6 +625,44 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _write_temporary_bytes(directory: Path, prefix: str, payload: bytes) -> Path:
+    with tempfile.NamedTemporaryFile(mode="wb", dir=directory, prefix=prefix, delete=False) as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return Path(handle.name)
+
+
+def _restore_previous_index(target: Path, backup_path: Path | None) -> bool:
+    try:
+        if backup_path is None:
+            target.unlink(missing_ok=True)
+        else:
+            os.replace(backup_path, target)
+    except OSError:
+        return False
+    _best_effort_fsync_directory(target.parent)
+    return True
+
+
+def _best_effort_fsync_directory(path: Path) -> None:
+    try:
+        _fsync_directory(path)
+    except OSError:
+        pass
+
+
+def _best_effort_unlink(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 def _fail(error_code: str) -> Never:

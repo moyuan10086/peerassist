@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import peerassist.citation_audit as citation_audit
 from peerassist.citation_artifacts import write_response_artifact
 from peerassist.citation_audit import (
     CitationAuditIntegrityError,
@@ -246,6 +247,30 @@ def test_duplicate_reference_metadata_uses_title_year_when_dois_differ() -> None
     assert duplicate.reference_record_ids == ["R-1", "R-2"]
 
 
+def test_duplicate_reference_metadata_uses_high_similarity_title_and_year() -> None:
+    shared_tokens = [f"term{index}" for index in range(40)]
+    audit = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[
+            record(record_id="R-1", doi="10.1000/one", title=" ".join(shared_tokens)),
+            record(
+                record_id="R-2",
+                reference_number=2,
+                doi="10.1000/two",
+                title=" ".join([*shared_tokens[:-1], "replacement"]),
+            ),
+        ],
+        links=[],
+        selected_verifications=[],
+    )
+    duplicate = next(
+        finding for finding in audit.findings if finding.status is CitationFindingStatus.DUPLICATE_REFERENCE_METADATA
+    )
+    assert duplicate.reference_record_ids == ["R-1", "R-2"]
+
+
 def valid_audit(tmp_path: Path):
     selected = verification(tmp_path)
     return build_citation_audit(
@@ -317,6 +342,116 @@ def test_rejects_finding_id_and_status_that_do_not_match_the_trace(tmp_path: Pat
         validate_citation_audit(audit, ledger(), tmp_path / "status")
 
 
+def test_recomputes_link_and_reference_only_finding_statuses(tmp_path: Path) -> None:
+    audit = valid_audit(tmp_path)
+    audit.findings[0].status = CitationFindingStatus.METADATA_MISMATCH
+    audit.findings[0].requires_human_review = True
+    with pytest.raises(CitationAuditIntegrityError, match="finding_status_mismatch"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+    reference_only = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record()],
+        links=[],
+        selected_verifications=[],
+    )
+    uncited = next(finding for finding in reference_only.findings if finding.status is CitationFindingStatus.UNCITED_REFERENCE)
+    uncited.status = CitationFindingStatus.MALFORMED_REFERENCE
+    with pytest.raises(CitationAuditIntegrityError, match="finding_status_mismatch"):
+        validate_citation_audit(reference_only, ledger(), tmp_path)
+
+
+def test_rejects_tampered_finding_provenance_metadata(tmp_path: Path) -> None:
+    audit = valid_audit(tmp_path)
+    audit.findings[0].metadata.pop("raw_response_artifact")
+    with pytest.raises(CitationAuditIntegrityError, match="finding_provenance_mismatch"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+    audit = valid_audit(tmp_path / "artifact")
+    audit.findings[0].metadata["raw_response_artifact"]["sha256"] = "0" * 64
+    with pytest.raises(CitationAuditIntegrityError, match="finding_provenance_mismatch"):
+        validate_citation_audit(audit, ledger(), tmp_path / "artifact")
+
+    failed = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record()],
+        links=[link()],
+        selected_verifications=[verification(tmp_path / "failed", status=VerificationStatus.FAILED)],
+    )
+    failed.findings[0].metadata["error_code"] = "altered"
+    with pytest.raises(CitationAuditIntegrityError, match="finding_provenance_mismatch"):
+        validate_citation_audit(failed, ledger(), tmp_path / "failed")
+
+
+def test_comparable_fields_require_distinct_names(tmp_path: Path) -> None:
+    completed = verification(tmp_path)
+    completed.field_differences = [difference(0, mismatch=False), difference(0, mismatch=False)]
+    assert finding_status_for(link(), completed) is CitationFindingStatus.INSUFFICIENT_EVIDENCE
+
+
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        {"records": -1},
+        {"unexpected": 1},
+        {},
+    ],
+)
+def test_rejects_noncanonical_coverage(tmp_path: Path, coverage: dict[str, int]) -> None:
+    audit = valid_audit(tmp_path)
+    assert audit.coverage == {
+        "records": 1,
+        "mentions": 1,
+        "reference_evidence": 1,
+        "links": 1,
+        "links.linked": 1,
+        "links.missing_reference": 0,
+        "links.ambiguous": 0,
+        "verifications": 1,
+        "verifications.completed": 1,
+        "verifications.not_found": 0,
+        "verifications.ambiguous": 0,
+        "verifications.unavailable": 0,
+        "verifications.failed": 0,
+        "findings": 1,
+        "findings.verified": 1,
+        "findings.metadata_mismatch": 0,
+        "findings.missing_reference": 0,
+        "findings.ambiguous": 0,
+        "findings.not_found": 0,
+        "findings.insufficient_evidence": 0,
+        "findings.verification_failed": 0,
+        "findings.uncited_reference": 0,
+        "findings.malformed_reference": 0,
+        "findings.duplicate_reference_metadata": 0,
+    }
+    audit.coverage = coverage
+    with pytest.raises(CitationAuditIntegrityError, match="coverage_mismatch"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("second_attempt", "error_code"),
+    [("attempt-1", "duplicate_attempt_id"), ("attempt-2", "duplicate_response_artifact_path")],
+)
+def test_rejects_duplicate_attempt_and_response_artifact_provenance(
+    tmp_path: Path, second_attempt: str, error_code: str
+) -> None:
+    audit = valid_audit(tmp_path)
+    audit.records.append(record(record_id="R-2", reference_number=2))
+    audit.verifications.append(
+        audit.verifications[0].model_copy(
+            update={"id": "V-2", "reference_record_id": "R-2", "attempt_id": second_attempt}
+        )
+    )
+    with pytest.raises(CitationAuditIntegrityError, match=error_code):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+
 def test_atomic_write_preserves_previous_file_and_publishes_valid(tmp_path: Path) -> None:
     index = tmp_path / "citation_audit.json"
     index.write_bytes(b'{"previous":true}')
@@ -332,3 +467,21 @@ def test_atomic_write_preserves_previous_file_and_publishes_valid(tmp_path: Path
     assert output == index
     assert hashlib.sha256(index.read_bytes()).hexdigest()
     assert b'"schema_version":"peerassist.citation_audit.v1"' in index.read_bytes()
+
+
+def test_atomic_write_restores_previous_index_when_post_replace_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = tmp_path / "citation_audit.json"
+    previous = b'{"previous":"preserve exactly"}'
+    index.write_bytes(previous)
+    audit = valid_audit(tmp_path)
+
+    def fail_directory_fsync(path: Path) -> None:
+        del path
+        raise OSError("injected directory fsync failure")
+
+    monkeypatch.setattr(citation_audit, "_fsync_directory", fail_directory_fsync)
+    with pytest.raises(CitationAuditIntegrityError, match="index_publish_failed"):
+        write_citation_audit_atomic(index, audit, ledger(), tmp_path)
+    assert index.read_bytes() == previous
