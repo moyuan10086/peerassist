@@ -1256,6 +1256,113 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     .pdf-agent-phase-step[data-phase-state="active"] .pdf-agent-phase-copy {{
       color: #d8fff5;
     }}
+    .pdf-agent-timeline {{
+      grid-column: 1 / -1;
+      display: grid;
+      gap: 8px;
+      border: 1px solid #cbdcd7;
+      border-radius: 8px;
+      background:
+        linear-gradient(90deg, rgba(15, 118, 110, 0.055), transparent 52%),
+        #fff;
+      padding: 9px;
+    }}
+    .pdf-agent-timeline-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: #182723;
+      font-size: 11px;
+      font-weight: 920;
+    }}
+    .pdf-agent-timeline-copy {{
+      color: #66736f;
+      font-size: 10px;
+      font-weight: 800;
+      text-align: right;
+    }}
+    .pdf-agent-timeline-track {{
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 6px;
+    }}
+    .pdf-agent-timeline-step {{
+      position: relative;
+      min-width: 0;
+      min-height: 74px;
+      border: 1px solid #d7e4df;
+      border-radius: 8px;
+      background: #f8fbfa;
+      padding: 7px 8px;
+      overflow: hidden;
+    }}
+    .pdf-agent-timeline-step::before {{
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: #b7bfc0;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="completed"] {{
+      border-color: #b8d8cf;
+      background: #eef8f4;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="completed"]::before {{ background: #0f766e; }}
+    .pdf-agent-timeline-step[data-timeline-state="active"] {{
+      border-color: #0f766e;
+      background: #12302b;
+      color: #fff;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="active"]::before {{ background: #8bd8c8; }}
+    .pdf-agent-timeline-step[data-timeline-state="blocked"] {{
+      border-color: #f0d2a6;
+      background: #fff8ea;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="blocked"]::before {{ background: #a33a3a; }}
+    .pdf-agent-timeline-index {{
+      color: #0f766e;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 9px;
+      font-weight: 920;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="active"] .pdf-agent-timeline-index {{
+      color: #9df2de;
+    }}
+    .pdf-agent-timeline-title {{
+      margin-top: 4px;
+      color: inherit;
+      font-size: 11px;
+      font-weight: 920;
+      white-space: nowrap;
+    }}
+    .pdf-agent-timeline-status {{
+      margin-top: 2px;
+      color: #66736f;
+      font-size: 9px;
+      font-weight: 900;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="active"] .pdf-agent-timeline-status {{
+      color: #d8fff5;
+    }}
+    .pdf-agent-timeline-detail {{
+      margin-top: 4px;
+      color: #66736f;
+      font-size: 9px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }}
+    .pdf-agent-timeline-step[data-timeline-state="active"] .pdf-agent-timeline-detail {{
+      color: #d8fff5;
+    }}
+    .pdf-agent-timeline-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+    }}
     .pdf-runtime-pulse {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2709,6 +2816,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-agent-dock {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-card:first-child {{ grid-column: 1 / -1; }}
       .pdf-agent-context-list {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+      .pdf-agent-timeline-track {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
       .right-stack {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 760px) {{
@@ -2732,6 +2840,10 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       .pdf-agent-dock {{ grid-template-columns: 1fr; }}
       .pdf-agent-phase-rail {{ grid-template-columns: 1fr 1fr; }}
       .pdf-agent-context-list {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-agent-timeline-track {{ grid-template-columns: 1fr 1fr; }}
+      .pdf-agent-timeline-head {{ display: grid; }}
+      .pdf-agent-timeline-copy {{ text-align: left; }}
+      .pdf-agent-timeline-actions {{ justify-content: flex-start; }}
       .pdf-tool-trace-list {{ grid-template-columns: 1fr; }}
       .pdf-recovery-strip {{ grid-template-columns: 1fr; }}
       .pdf-recovery-actions {{ justify-content: flex-start; flex-wrap: wrap; }}
@@ -3402,6 +3514,60 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       }}
     }}
     window.peerassistUpdatePdfMissionControl = updatePdfMissionControl;
+    function eventMatchesNeedle(event, needles) {{
+      const haystack = [
+        event?.tool,
+        event?.call_id,
+        event?.capability_name,
+        event?.input_summary,
+        event?.output_summary,
+        event?.artifact_ids
+      ].flat().join(' ').toLowerCase();
+      return needles.some((needle) => haystack.includes(needle));
+    }}
+    function updatePdfAgentTimeline(state = null) {{
+      const timeline = document.querySelector('[data-pdf-agent-timeline]');
+      if (!timeline) return;
+      const events = Array.isArray(state?.tool_trace?.events)
+        ? state.tool_trace.events.filter((event) => event && typeof event === 'object')
+        : [];
+      const queueItems = Array.from(document.querySelectorAll('.queue-body .item[data-concern-id]'));
+      const total = queueItems.length;
+      const resolved = queueItems.filter((item) => isHumanResolvedQueueStatus(item.dataset.concernStatus)).length;
+      const pending = Number(state?.pending_count ?? Math.max(0, total - resolved));
+      const runtime = state?.runtime || {{}};
+      const agentCount = Number(runtime.agent_count || 0);
+      const hasFailed = events.some((event) => String(event?.status || '').replace(/\\s+/g, '_').toLowerCase() === 'failed');
+      const hasParse = events.some((event) => eventMatchesNeedle(event, ['parse', 'mineru', 'resolve_parse_provider']));
+      const hasLedger = events.some((event) => eventMatchesNeedle(event, ['ledger', 'build_evidence_ledger', 'evidence_ledger']));
+      const hasChecks = events.some((event) => eventMatchesNeedle(event, ['deterministic', 'consistency_checks', 'statistic']));
+      const hasAgents = agentCount > 0 || events.some((event) => eventMatchesNeedle(event, ['agent', 'peerassist_local_agents']));
+      const hasTools = events.length > 0;
+      const setStep = (key, timelineState, status, detail) => {{
+        const step = timeline.querySelector(`[data-pdf-agent-timeline-step="${{CSS.escape(key)}}"]`);
+        if (!step) return;
+        step.dataset.timelineState = timelineState;
+        const statusEl = step.querySelector('[data-pdf-agent-timeline-status]');
+        const detailEl = step.querySelector('[data-pdf-agent-timeline-detail]');
+        if (statusEl) statusEl.textContent = status;
+        if (detailEl) detailEl.textContent = detail;
+      }};
+      setStep('queued', 'completed', '已就绪', '审稿任务进入本地工作台');
+      setStep('parse', hasParse ? 'completed' : 'active', hasParse ? '已完成' : '运行中', hasParse ? 'PDF 解析事件已记录' : '等待解析事件或 PDF 渲染');
+      setStep('ledger', hasLedger ? 'completed' : hasParse ? 'active' : 'waiting', hasLedger ? '已完成' : hasParse ? '运行中' : '等待', hasLedger ? '证据台账已写入' : '等待原文证据锚点入账');
+      setStep('checks', hasChecks ? 'completed' : hasLedger ? 'active' : 'waiting', hasChecks ? '已完成' : hasLedger ? '运行中' : '等待', hasChecks ? '确定性核查事件已记录' : '等待数值、统计和引用线索');
+      setStep('agents', hasAgents ? 'completed' : hasChecks ? 'active' : 'waiting', hasAgents ? '已完成' : hasChecks ? '运行中' : '等待', hasAgents ? `${{agentCount || 1}} 个代理结果可复盘` : '等待多代理评审整合');
+      setStep('tools', hasFailed ? 'blocked' : hasTools ? 'completed' : 'waiting', hasFailed ? '需恢复' : hasTools ? '已记录' : '等待', hasFailed ? '存在失败调用，需从检查点复核' : `${{events.length}} 条工具事件可追溯`);
+      setStep('human', pending > 0 ? 'active' : total > 0 ? 'completed' : 'waiting', pending > 0 ? '待确认' : total > 0 ? '已处理' : '等待', total > 0 ? `${{pending}} / ${{total}} 条仍需人工处理` : '等待审稿队列生成');
+      setStep('report', total > 0 && pending <= 0 ? 'active' : 'waiting', total > 0 && pending <= 0 ? '可导出' : '等待', total > 0 && pending <= 0 ? '可进入报告产物区复核' : '确认完成后再导出报告');
+      const copy = timeline.querySelector('[data-pdf-agent-timeline-copy]');
+      if (copy) {{
+        copy.textContent = hasFailed
+          ? '存在失败调用：先查看工具追踪与恢复点，失败结果不会被模型自动补全。'
+          : `${{events.length}} 条事件 · ${{pending}} 条待确认 · 页面刷新后从已保存检查点恢复`;
+      }}
+    }}
+    window.peerassistUpdatePdfAgentTimeline = updatePdfAgentTimeline;
     function updatePdfRuntimePulse(state, source) {{
       const pulse = document.querySelector('[data-pdf-runtime-pulse]');
       if (!pulse) return;
@@ -3418,6 +3584,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       updatePdfHumanGate(state);
       updatePdfEvidenceGate();
       updatePdfMissionControl(state);
+      updatePdfAgentTimeline(state);
     }}
     window.peerassistUpdatePdfRuntimePulse = updatePdfRuntimePulse;
     function reviewModeLabel(mode) {{
@@ -3444,6 +3611,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
         appendPdfActivityLine(kind, detail);
       }}
       updatePdfMissionControl();
+      updatePdfAgentTimeline();
     }}
     window.peerassistSetPdfAgentPhase = setPdfAgentPhase;
     function setPdfAgentReviewMode(mode, quiet = false) {{
@@ -3875,6 +4043,15 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     document.querySelectorAll('[data-pdf-mission-evidence]').forEach((button) => {{
       button.addEventListener('click', () => document.querySelector('[data-pdf-evidence-gate-chain]')?.click());
     }});
+    document.querySelectorAll('[data-pdf-agent-timeline-trace]').forEach((button) => {{
+      button.addEventListener('click', () => document.querySelector('[data-pdf-recovery-trace]')?.click());
+    }});
+    document.querySelectorAll('[data-pdf-agent-timeline-human]').forEach((button) => {{
+      button.addEventListener('click', () => document.querySelector('[data-pdf-human-gate-open]')?.click());
+    }});
+    document.querySelectorAll('[data-pdf-agent-timeline-report]').forEach((button) => {{
+      button.addEventListener('click', () => document.querySelector('[data-pdf-recovery-artifacts]')?.click());
+    }});
     document.querySelectorAll('[data-pdf-recovery-trace]').forEach((button) => {{
       button.addEventListener('click', () => {{
         document.querySelector('[data-panel="tool-trace"]')?.scrollIntoView({{behavior: 'smooth', block: 'start'}});
@@ -3962,6 +4139,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     updatePdfHumanGate();
     updatePdfEvidenceGate();
     updatePdfMissionControl();
+    updatePdfAgentTimeline();
     applyTraceFilter('all');
     applyQueueFilter('all');
     connectEventStream();
@@ -6112,6 +6290,67 @@ def _render_source_pdf_viewer(events: list[Any] | None = None) -> str:
             <div class="pdf-agent-phase-copy" data-pdf-agent-phase-copy>逐条处理</div>
           </div>
         </div>
+        <section class="pdf-agent-timeline" data-pdf-agent-timeline aria-label="PDF 智能体事件时间线">
+          <div class="pdf-agent-timeline-head">
+            <span>智能体事件时间线</span>
+            <span class="pdf-agent-timeline-copy" data-pdf-agent-timeline-copy>等待事件流同步；页面刷新后会从检查点恢复。</span>
+          </div>
+          <div class="pdf-agent-timeline-track" data-pdf-agent-timeline-track>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="queued" data-timeline-state="completed">
+              <div class="pdf-agent-timeline-index">01</div>
+              <div class="pdf-agent-timeline-title">排队</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>已就绪</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>审稿任务进入本地工作台</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="parse" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">02</div>
+              <div class="pdf-agent-timeline-title">解析论文</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>PDF、章节与页码定位</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="ledger" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">03</div>
+              <div class="pdf-agent-timeline-title">证据台账</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>原文证据锚点入账</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="checks" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">04</div>
+              <div class="pdf-agent-timeline-title">确定性核查</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>数值、统计和引用线索</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="agents" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">05</div>
+              <div class="pdf-agent-timeline-title">多代理评审</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>结构、统计、图表与反证整合</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="tools" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">06</div>
+              <div class="pdf-agent-timeline-title">MCP/Skills</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>工具调用、产物和错误可追溯</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="human" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">07</div>
+              <div class="pdf-agent-timeline-title">人工确认</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>逐条确认、改写、降级或删除</div>
+            </div>
+            <div class="pdf-agent-timeline-step" data-pdf-agent-timeline-step="report" data-timeline-state="waiting">
+              <div class="pdf-agent-timeline-index">08</div>
+              <div class="pdf-agent-timeline-title">报告导出</div>
+              <div class="pdf-agent-timeline-status" data-pdf-agent-timeline-status>等待</div>
+              <div class="pdf-agent-timeline-detail" data-pdf-agent-timeline-detail>只保留已确认且有证据的意见</div>
+            </div>
+          </div>
+          <div class="pdf-agent-timeline-actions">
+            <button class="inline-button" type="button" data-pdf-agent-timeline-trace>工具追踪</button>
+            <button class="inline-button" type="button" data-pdf-agent-timeline-human>人工确认</button>
+            <button class="inline-button" type="button" data-pdf-agent-timeline-report>报告产物</button>
+          </div>
+        </section>
       </section>
       {_render_pdf_tool_trace_strip(events or [])}
       <section class="pdf-recovery-strip" data-pdf-recovery-strip data-recovery-state="idle" aria-label="PDF 智能审稿检查点与恢复">

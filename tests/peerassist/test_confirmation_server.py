@@ -271,6 +271,10 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "peerassistUpdatePdfMissionControl" in html
     assert "updatePdfMissionControl(state)" in html
     assert "data-pdf-mission-control" in html
+    assert "peerassistUpdatePdfAgentTimeline" in html
+    assert "updatePdfAgentTimeline(state)" in html
+    assert "data-pdf-agent-timeline" in html
+    assert "eventMatchesNeedle" in html
     assert "peerassistUpdatePdfAgentContext" in html
     assert "peerassistUpdatePdfRecoveryCheckpoint" in html
     assert "updatePdfRecoveryCheckpoint(state)" in html
@@ -481,6 +485,26 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "PDF 智能体审稿操作坞" in html
     assert "data-pdf-agent-phase-rail" in html
     assert "PDF 智能审稿任务阶段" in html
+    assert "data-pdf-agent-timeline" in html
+    assert "PDF 智能体事件时间线" in html
+    assert "智能体事件时间线" in html
+    assert 'data-pdf-agent-timeline-step="queued"' in html
+    assert 'data-pdf-agent-timeline-step="parse"' in html
+    assert 'data-pdf-agent-timeline-step="ledger"' in html
+    assert 'data-pdf-agent-timeline-step="checks"' in html
+    assert 'data-pdf-agent-timeline-step="agents"' in html
+    assert 'data-pdf-agent-timeline-step="tools"' in html
+    assert 'data-pdf-agent-timeline-step="human"' in html
+    assert 'data-pdf-agent-timeline-step="report"' in html
+    assert "排队" in html
+    assert "解析论文" in html
+    assert "证据台账" in html
+    assert "多代理评审" in html
+    assert "MCP/Skills" in html
+    assert "报告产物" in html
+    assert "data-pdf-agent-timeline-trace" in html
+    assert "data-pdf-agent-timeline-human" in html
+    assert "data-pdf-agent-timeline-report" in html
     assert 'data-pdf-agent-phase="prepare"' in html
     assert 'data-pdf-agent-phase="evidence"' in html
     assert 'data-pdf-agent-phase="model"' in html
