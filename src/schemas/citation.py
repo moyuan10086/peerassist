@@ -125,7 +125,6 @@ class CitationMatch(BaseModel):
     selected_candidate_id: str | None
     selection_reason: str
     candidate_ids: list[str]
-    match_score: float | None = Field(default=None, ge=0, le=1)
 
 
 class RawResponseArtifact(BaseModel):
@@ -171,10 +170,13 @@ class CitationVerification(BaseModel):
                 )
             if "observed_metadata" not in self.model_fields_set:
                 raise ValueError("completed verification requires explicit observed_metadata")
-            if self.match.method == "title_similarity" and (
-                self.match.match_score is None or self.match.match_score < 0.95
+            if (
+                self.match.method.startswith("title_similarity")
+                and self.match.method != "title_similarity_unique"
             ):
-                raise ValueError("completed title_similarity verification requires match_score >= 0.95")
+                raise ValueError(
+                    "completed title similarity verification requires title_similarity_unique method"
+                )
         elif status is VerificationStatus.NOT_FOUND:
             if (
                 self.raw_response_artifact is None
@@ -198,13 +200,9 @@ class CitationVerification(BaseModel):
                 raise ValueError(
                     "ambiguous verification requires candidate evidence and raw response without authoritative selected/source record"
                 )
-            if self.match.candidate_count == 1 and (
-                self.match.method != "title_similarity"
-                or self.match.match_score is None
-                or not 0.85 <= self.match.match_score < 0.95
-            ):
+            if self.match.candidate_count == 1 and (self.match.method != "title_similarity_ambiguous"):
                 raise ValueError(
-                    "ambiguous one-candidate verification requires title_similarity with 0.85 <= match_score < 0.95"
+                    "ambiguous one-candidate verification requires title_similarity_ambiguous method"
                 )
         elif status is VerificationStatus.UNAVAILABLE:
             if not self.error_code:
