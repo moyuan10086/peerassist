@@ -76,7 +76,7 @@ def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_resp
         published = True
         os.fsync(artifact_fd)
         if not _binding_matches(artifact_root, root_fd, artifact_fd):
-            _unlink_published_artifact(artifact_fd, filename)
+            _cleanup_published_artifact(artifact_fd, filename)
             published = False
             raise ArtifactPathError("artifact directory binding changed during publication")
         published = False
@@ -89,15 +89,12 @@ def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_resp
     finally:
         if published and artifact_fd >= 0:
             # This is only reached when an exception occurred after publication.
-            _unlink_published_artifact(artifact_fd, filename)
+            _cleanup_published_artifact(artifact_fd, filename)
         if temporary_name and artifact_fd >= 0:
-            try:
-                os.unlink(temporary_name, dir_fd=artifact_fd)
-            except FileNotFoundError:
-                pass
+            _best_effort_unlink(artifact_fd, temporary_name)
         if artifact_fd >= 0:
-            os.close(artifact_fd)
-        os.close(root_fd)
+            _best_effort_close(artifact_fd)
+        _best_effort_close(root_fd)
     return RawResponseArtifact(path=expected_response_artifact_path(attempt_id), sha256=hashlib.sha256(encoded).hexdigest())
 
 
@@ -233,9 +230,31 @@ def _directory_identity(descriptor: int) -> tuple[int, int]:
     return file_stat.st_dev, file_stat.st_ino
 
 
-def _unlink_published_artifact(directory_fd: int, filename: str) -> None:
+def _cleanup_published_artifact(directory_fd: int, filename: str) -> None:
+    """Best-effort removal and durability sync that cannot replace a primary failure."""
+    if _best_effort_unlink(directory_fd, filename):
+        _best_effort_fsync(directory_fd)
+
+
+def _best_effort_unlink(directory_fd: int, filename: str) -> bool:
     try:
         os.unlink(filename, dir_fd=directory_fd)
-        os.fsync(directory_fd)
     except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _best_effort_fsync(descriptor: int) -> None:
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+
+
+def _best_effort_close(descriptor: int) -> None:
+    try:
+        os.close(descriptor)
+    except OSError:
         pass

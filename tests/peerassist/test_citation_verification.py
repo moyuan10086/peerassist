@@ -670,6 +670,95 @@ def test_rebound_artifact_directory_degrades_verification_without_artifact(
     assert not list(held_directory.iterdir())
 
 
+def test_rebound_artifact_cleanup_failures_do_not_escape_classified_verification_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_dir = tmp_path / "citation_verifications"
+    artifact_dir.mkdir()
+    held_directory = tmp_path / "held-directory"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_link = os.link
+    original_unlink = os.unlink
+    original_fsync = os.fsync
+    swapped = False
+    fsync_calls = 0
+
+    def swap_then_link(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.rename(artifact_dir, held_directory)
+            os.symlink(outside, artifact_dir, target_is_directory=True)
+        original_link(*args, **kwargs)
+
+    def fail_final_unlink(path: object, *args: object, **kwargs: object) -> None:
+        if str(path).startswith("attempt-"):
+            raise OSError("injected final cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    def fail_cleanup_fsync(descriptor: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls >= 2:
+            raise OSError("injected directory cleanup fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(os, "link", swap_then_link)
+    monkeypatch.setattr(os, "unlink", fail_final_unlink)
+    monkeypatch.setattr(os, "fsync", fail_cleanup_fsync)
+    verification = verify_reference(
+        reference_record(),
+        OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}]),
+        artifact_dir=tmp_path,
+    )
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "artifact_write_error"
+    assert verification.raw_response_artifact is None
+    assert not list(outside.iterdir())
+    assert not list(held_directory.glob("*.tmp"))
+
+
+def test_rebound_artifact_temp_cleanup_failure_does_not_escape_verification_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_dir = tmp_path / "citation_verifications"
+    artifact_dir.mkdir()
+    held_directory = tmp_path / "held-directory"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_link = os.link
+    original_unlink = os.unlink
+    swapped = False
+
+    def swap_then_link(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.rename(artifact_dir, held_directory)
+            os.symlink(outside, artifact_dir, target_is_directory=True)
+        original_link(*args, **kwargs)
+
+    def fail_temp_unlink(path: object, *args: object, **kwargs: object) -> None:
+        if str(path).startswith(".attempt-"):
+            raise OSError("injected temp cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", swap_then_link)
+    monkeypatch.setattr(os, "unlink", fail_temp_unlink)
+    verification = verify_reference(
+        reference_record(),
+        OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}]),
+        artifact_dir=tmp_path,
+    )
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "artifact_write_error"
+    assert verification.raw_response_artifact is None
+    assert not list(outside.iterdir())
+
+
 def test_artifact_directory_symlink_is_rejected(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
