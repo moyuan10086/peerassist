@@ -28,6 +28,7 @@ from schemas.citation import (
 )
 
 _RETRYABLE_CODES = frozenset({"timeout", "rate_limit", "transient_5xx"})
+_NO_RESPONSE = object()
 _REFCHECK_LIST_FIELDS = frozenset({"issues", "error_details", "warning_details", "unverified_details"})
 _REFCHECK_INTEGER_FIELDS = frozenset({"total_refs", "errors", "warnings", "unverified"})
 _TERMINAL_STATUSES = frozenset(
@@ -49,10 +50,18 @@ class MetadataLookupResult:
 class CitationAdapterError(Exception):
     """A classified adapter error that is safe for deterministic retry policy."""
 
-    def __init__(self, error_code: str, *, retryable: bool = False, message: str = "") -> None:
+    def __init__(
+        self,
+        error_code: str,
+        *,
+        retryable: bool = False,
+        message: str = "",
+        raw_response: Any = _NO_RESPONSE,
+    ) -> None:
         super().__init__(message or error_code)
         self.error_code = error_code
         self.retryable = retryable
+        self.raw_response = raw_response
 
 
 class CitationMetadataAdapter(Protocol):
@@ -105,7 +114,7 @@ class ExistingRefcheckAdapter:
     def lookup(self, record: ReferenceRecord) -> MetadataLookupResult:
         payload = self._load_payload()
         if not _is_refcheck_payload(payload):
-            raise CitationAdapterError("adapter_schema_error")
+            raise CitationAdapterError("adapter_schema_error", raw_response=payload)
         issues = payload.get("issues")
         if not payload["ok"]:
             raise CitationAdapterError("adapter_unavailable", message=str(payload.get("error_message") or ""))
@@ -128,8 +137,10 @@ class ExistingRefcheckAdapter:
             return dict(self._payload_source)
         try:
             return json.loads(Path(self._payload_source).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except OSError as exc:
             raise CitationAdapterError("adapter_schema_error") from exc
+        except json.JSONDecodeError as exc:
+            raise CitationAdapterError("adapter_schema_error", raw_response=exc.doc) from exc
 
     @staticmethod
     def _matches_reference(issue: Mapping[str, Any], record: ReferenceRecord) -> bool:
@@ -240,18 +251,23 @@ def _build_verification(
     )
 
 
-def _unavailable_verification(record: ReferenceRecord, adapter: CitationMetadataAdapter | None, attempt_number: int) -> CitationVerification:
+def _unavailable_verification(
+    record: ReferenceRecord,
+    adapter: CitationMetadataAdapter | None,
+    attempt_number: int,
+    *,
+    attempt_id: str | None = None,
+) -> CitationVerification:
     adapter_name = adapter.name if adapter is not None else "unavailable"
     adapter_version = adapter.version if adapter is not None else "1"
-    error_code = "input_unavailable" if not normalize_query(record) else "adapter_unavailable"
     return _build_verification(
         record=record,
         adapter_name=adapter_name,
         adapter_version=adapter_version,
         status=VerificationStatus.UNAVAILABLE,
-        attempt_id=f"unavailable-{uuid4().hex}",
+        attempt_id=attempt_id or f"unavailable-{uuid4().hex}",
         attempt_number=attempt_number,
-        error_code=error_code,
+        error_code="adapter_unavailable",
     )
 
 
@@ -269,19 +285,21 @@ def verify_reference(
 
     attempt_id = attempt_id or uuid4().hex
     artifact_root = Path(artifact_dir)
+    received_raw: Any = _NO_RESPONSE
     try:
         result = adapter.lookup(record)
+        if isinstance(result, MetadataLookupResult):
+            received_raw = result.raw_response
         if not isinstance(result, MetadataLookupResult) or not isinstance(result.candidates, list):
             raise CitationAdapterError("adapter_schema_error")
         if not all(isinstance(candidate, Mapping) for candidate in result.candidates):
             raise CitationAdapterError("adapter_schema_error")
-        artifact = _write_artifact(artifact_root, attempt_id, result.raw_response)
+        artifact = _write_artifact(artifact_root, attempt_id, received_raw)
     except CitationAdapterError as exc:
-        artifact = _write_artifact(
-            artifact_root,
-            attempt_id,
-            {"error_code": exc.error_code, "message": str(exc)},
-        )
+        if exc.error_code == "adapter_unavailable":
+            return _unavailable_verification(record, adapter, attempt_number, attempt_id=attempt_id)
+        raw_response = exc.raw_response if exc.raw_response is not _NO_RESPONSE else received_raw
+        artifact = _write_artifact(artifact_root, attempt_id, raw_response) if raw_response is not _NO_RESPONSE else None
         return _build_verification(
             record=record,
             adapter_name=adapter.name,
@@ -292,12 +310,8 @@ def verify_reference(
             raw_response_artifact=artifact,
             error_code=exc.error_code,
         )
-    except Exception as exc:  # Adapters must not leak unclassified failures into the audit run.
-        artifact = _write_artifact(
-            artifact_root,
-            attempt_id,
-            {"error_code": "adapter_error", "message": str(exc)},
-        )
+    except Exception:  # Adapters must not leak unclassified failures into the audit run.
+        artifact = _write_artifact(artifact_root, attempt_id, received_raw) if received_raw is not _NO_RESPONSE else None
         return _build_verification(
             record=record,
             adapter_name=adapter.name,
@@ -447,20 +461,19 @@ def verify_reference_with_retries(
         return verification
 
     expected_id = verification_id(record, adapter.name, adapter.version)
-    for existing in all_attempts:
-        if (
-            existing.id == expected_id
-            and existing.status is VerificationStatus.COMPLETED
-            and _valid_completed_artifact(existing, Path(artifact_dir))
-        ):
-            return existing
+    retained_attempts = [attempt for attempt in all_attempts if attempt.id == expected_id]
+    authoritative = select_authoritative_verification(retained_attempts, artifact_dir=artifact_dir)
+    if authoritative is not None and authoritative.status in _TERMINAL_STATUSES:
+        return authoritative
 
-    next_attempt = max((attempt.attempt_number for attempt in all_attempts if attempt.id == expected_id), default=0) + 1
+    next_attempt = max((attempt.attempt_number for attempt in retained_attempts), default=0) + 1
+    if next_attempt > max_attempts:
+        return select_authoritative_verification(retained_attempts)
+
     last: CitationVerification | None = None
-    for _ in range(max_attempts):
-        last = verify_reference(record, adapter, artifact_dir=artifact_dir, attempt_number=next_attempt)
+    for attempt_number in range(next_attempt, max_attempts + 1):
+        last = verify_reference(record, adapter, artifact_dir=artifact_dir, attempt_number=attempt_number)
         all_attempts.append(last)
         if last.status is not VerificationStatus.FAILED or last.error_code not in _RETRYABLE_CODES:
             return last
-        next_attempt += 1
     return last

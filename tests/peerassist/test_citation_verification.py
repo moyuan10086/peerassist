@@ -132,20 +132,57 @@ def test_no_and_multiple_candidates_have_explicit_statuses(tmp_path: Path) -> No
     assert ambiguous.match is not None and ambiguous.match.candidate_count == 2
 
 
-def test_missing_adapter_or_usable_input_is_unavailable(tmp_path: Path) -> None:
-    assert verify_reference(reference_record(doi="", title="", year=None), None, artifact_dir=tmp_path).status is (
-        VerificationStatus.UNAVAILABLE
-    )
-    assert verify_reference(reference_record(), None, artifact_dir=tmp_path).error_code == "adapter_unavailable"
+def test_missing_adapter_or_usable_input_is_unavailable_without_response_data(tmp_path: Path) -> None:
+    missing_input = verify_reference(reference_record(doi="", title="", year=None), None, artifact_dir=tmp_path)
+    missing_adapter = verify_reference(reference_record(), None, artifact_dir=tmp_path)
+
+    for verification in (missing_input, missing_adapter):
+        assert verification.status is VerificationStatus.UNAVAILABLE
+        assert verification.error_code == "adapter_unavailable"
+        assert verification.raw_response_artifact is None
+        assert verification.match is None
+        assert verification.source_record is None
+        assert verification.observed_metadata == {}
+        assert verification.field_differences == []
 
 
 def test_existing_refcheck_rejects_malformed_schema_without_retry(tmp_path: Path) -> None:
-    adapter = ExistingRefcheckAdapter({"ok": True, "issues": "not-a-list"})
+    raw_response = {"ok": True, "issues": "not-a-list"}
+    adapter = ExistingRefcheckAdapter(raw_response)
     verification = verify_reference_with_retries(reference_record(), adapter, artifact_dir=tmp_path)
 
     assert verification.status is VerificationStatus.FAILED
     assert verification.error_code == "adapter_schema_error"
     assert verification.attempt_number == 1
+    assert verification.raw_response_artifact is not None
+    artifact = tmp_path / verification.raw_response_artifact.path
+    assert json.loads(artifact.read_text(encoding="utf-8")) == raw_response
+
+
+def test_malformed_received_response_is_preserved_unchanged_in_failed_artifact(tmp_path: Path) -> None:
+    raw_response = {"received": ["this", "payload"], "candidates": "not-a-list"}
+    adapter = SequencedAdapter([MetadataLookupResult(candidates="not-a-list", raw_response=raw_response)])  # type: ignore[arg-type]
+
+    verification = verify_reference(reference_record(), adapter, artifact_dir=tmp_path)
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "adapter_schema_error"
+    assert verification.raw_response_artifact is not None
+    artifact = tmp_path / verification.raw_response_artifact.path
+    assert json.loads(artifact.read_text(encoding="utf-8")) == raw_response
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == verification.raw_response_artifact.sha256
+
+
+def test_no_received_response_has_no_artifact(tmp_path: Path) -> None:
+    verification = verify_reference(
+        reference_record(),
+        SequencedAdapter([CitationAdapterError("timeout", retryable=True)]),
+        artifact_dir=tmp_path,
+    )
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.raw_response_artifact is None
+    assert not (tmp_path / "citation_verifications").exists()
 
 
 def test_raw_response_is_atomic_immutable_and_hashed(tmp_path: Path) -> None:
@@ -198,7 +235,7 @@ def test_timeout_then_success_keeps_all_attempts(tmp_path: Path) -> None:
 
     assert verification.status is VerificationStatus.COMPLETED
     assert [attempt.attempt_number for attempt in attempts] == [1, 2]
-    assert len(list((tmp_path / "citation_verifications").glob("attempt-*.json"))) == 2
+    assert len(list((tmp_path / "citation_verifications").glob("attempt-*.json"))) == 1
 
 
 def test_retries_stop_after_three_timeouts_and_retain_failed_artifacts(tmp_path: Path) -> None:
@@ -208,7 +245,57 @@ def test_retries_stop_after_three_timeouts_and_retain_failed_artifacts(tmp_path:
 
     assert verification.status is VerificationStatus.FAILED
     assert [attempt.attempt_number for attempt in attempts] == [1, 2, 3]
-    assert len(list((tmp_path / "citation_verifications").glob("attempt-*.json"))) == 3
+    assert not (tmp_path / "citation_verifications").exists()
+
+
+def test_retained_failed_attempts_count_toward_max_attempts(tmp_path: Path) -> None:
+    existing_adapter = SequencedAdapter([CitationAdapterError("timeout", retryable=True) for _ in range(2)])
+    attempts = [
+        verify_reference(reference_record(), existing_adapter, artifact_dir=tmp_path, attempt_number=1),
+        verify_reference(reference_record(), existing_adapter, artifact_dir=tmp_path, attempt_number=2),
+    ]
+    adapter = SequencedAdapter([CitationAdapterError("timeout", retryable=True), CitationAdapterError("timeout", retryable=True)])
+
+    verification = verify_reference_with_retries(
+        reference_record(), adapter, artifact_dir=tmp_path, attempts=attempts, max_attempts=3
+    )
+
+    assert verification.status is VerificationStatus.FAILED
+    assert adapter.calls == 1
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2, 3]
+
+
+def test_retained_attempt_at_max_prevents_new_adapter_call(tmp_path: Path) -> None:
+    existing_adapter = SequencedAdapter([CitationAdapterError("timeout", retryable=True) for _ in range(3)])
+    attempts = [
+        verify_reference(reference_record(), existing_adapter, artifact_dir=tmp_path, attempt_number=number)
+        for number in (1, 2, 3)
+    ]
+    adapter = SequencedAdapter([result({"id": "external-1", "doi": "10.1000/example"})])
+
+    verification = verify_reference_with_retries(
+        reference_record(), adapter, artifact_dir=tmp_path, attempts=attempts, max_attempts=3
+    )
+
+    assert verification == attempts[-1]
+    assert adapter.calls == 0
+
+
+def test_adapter_unavailable_is_terminal_without_retry_or_response_data(tmp_path: Path) -> None:
+    adapter = SequencedAdapter([CitationAdapterError("adapter_unavailable"), result()])
+    attempts: list = []
+
+    verification = verify_reference_with_retries(reference_record(), adapter, artifact_dir=tmp_path, attempts=attempts)
+
+    assert verification.status is VerificationStatus.UNAVAILABLE
+    assert verification.error_code == "adapter_unavailable"
+    assert verification.raw_response_artifact is None
+    assert verification.match is None
+    assert verification.source_record is None
+    assert verification.observed_metadata == {}
+    assert verification.field_differences == []
+    assert adapter.calls == 1
+    assert attempts == [verification]
 
 
 def test_not_found_does_not_retry(tmp_path: Path) -> None:
