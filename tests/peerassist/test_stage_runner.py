@@ -4,9 +4,133 @@ import json
 import sys
 from pathlib import Path
 
-from common.pipeline_context import init_full_pipeline_context, parse_stage_dir
-from common.pipeline_context import write_json_file
+from common.pipeline_context import (
+    init_full_pipeline_context,
+    parse_stage_dir,
+    refcheck_stage_dir,
+    write_json_file,
+)
 from peerassist.stage_runner import run_peerassist_stage
+
+
+def _stage_fixture(tmp_path: Path, markdown_text: str) -> tuple[Path, Path, Path]:
+    run_dir = tmp_path / "run"
+    init_full_pipeline_context(run_dir=run_dir)
+    source_pdf = tmp_path / "paper.pdf"
+    source_pdf.write_bytes(b"%PDF demo")
+    markdown = tmp_path / "mineru_full.md"
+    markdown.write_text(markdown_text, encoding="utf-8")
+    write_json_file(
+        parse_stage_dir(run_dir) / "paper.json",
+        {
+            "source_pdf": str(source_pdf),
+            "mineru_markdown_path": str(markdown),
+            "mineru_content_list_path": "",
+        },
+    )
+    return run_dir, source_pdf, markdown
+
+
+def test_run_peerassist_stage_writes_traceable_citation_audit(tmp_path: Path) -> None:
+    run_dir, source_pdf, _markdown = _stage_fixture(
+        tmp_path,
+        "Prior work supports this finding [1].\n\n## References\n[1] A Study. 2024. doi:10.1000/a.\n",
+    )
+    write_json_file(
+        refcheck_stage_dir(run_dir) / "reference_check.json",
+        {
+            "ok": True,
+            "total_refs": 1,
+            "errors": 0,
+            "warnings": 1,
+            "unverified": 0,
+            "error_message": "",
+            "issues": [
+                {
+                    "severity": "warning",
+                    "type": "incomplete::missing_doi",
+                    "reference_title": "A Study",
+                    "reference_year": "2024",
+                    "cited_url": "",
+                    "verified_url": "https://records.example/a",
+                    "details": "metadata correction",
+                    "raw_reference": "[1] A Study. 2024. doi:10.1000/a.",
+                    "corrected_bibtex": "@article{a, title = {Different Study}, year = {2024}, doi = {10.1000/a}}",
+                }
+            ],
+            "error_details": [],
+            "warning_details": [],
+            "unverified_details": [],
+            "report_file": "",
+        },
+    )
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(),
+        run_dir=run_dir,
+        paper_key="demo",
+        paper_pdf=source_pdf,
+        mode="fast",
+    )
+
+    assert result.status == "ok"
+    assert Path(result.outputs["citation_audit"]).exists()
+    ledger = json.loads(Path(result.outputs["evidence_ledger"]).read_text(encoding="utf-8"))
+    assert any(item["type"] == "citation" and item["text"] == "[1]" for item in ledger["items"])
+    audit = json.loads(Path(result.outputs["citation_audit"]).read_text(encoding="utf-8"))
+    assert audit["findings"]
+    assert audit["verifications"][0]["raw_response_artifact"] is not None
+    artifact = Path(result.outputs["citation_audit"]).parent / audit["verifications"][0]["raw_response_artifact"]["path"]
+    assert artifact.exists()
+    concerns = json.loads(Path(result.outputs["concerns"]).read_text(encoding="utf-8"))["concerns"]
+    citation_concerns = [concern for concern in concerns if concern["category"] == "citation"]
+    assert citation_concerns
+    assert len({concern["id"] for concern in concerns}) == len(concerns)
+    trace = [json.loads(line) for line in Path(result.outputs["tool_trace"]).read_text(encoding="utf-8").splitlines()]
+    assert {"citation_extraction", "citation_linking", "citation_verification", "citation_audit"} <= {
+        row["call_id"] for row in trace
+    }
+    assert any(row["status"] == "artifact_created" for row in trace)
+
+
+def test_run_peerassist_stage_missing_refcheck_remains_ok_with_insufficient_evidence(tmp_path: Path) -> None:
+    run_dir, source_pdf, _markdown = _stage_fixture(
+        tmp_path,
+        "Prior work supports this finding [1].\n\n## References\n[1] A Study. 2024.\n",
+    )
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(), run_dir=run_dir, paper_key="demo", paper_pdf=source_pdf, mode="fast"
+    )
+
+    assert result.status == "ok"
+    audit = json.loads(Path(result.outputs["citation_audit"]).read_text(encoding="utf-8"))
+    assert any(verification["status"] == "unavailable" for verification in audit["verifications"])
+    assert any(finding["status"] == "insufficient_evidence" for finding in audit["findings"])
+
+
+def test_run_peerassist_stage_malformed_refcheck_remains_ok_with_pending_failure(tmp_path: Path) -> None:
+    run_dir, source_pdf, _markdown = _stage_fixture(
+        tmp_path,
+        "Prior work supports this finding [1].\n\n## References\n[1] A Study. 2024.\n",
+    )
+    refcheck_path = refcheck_stage_dir(run_dir) / "reference_check.json"
+    refcheck_path.parent.mkdir(parents=True)
+    refcheck_path.write_text('{"ok": true, broken', encoding="utf-8")
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(), run_dir=run_dir, paper_key="demo", paper_pdf=source_pdf, mode="fast"
+    )
+
+    assert result.status == "ok"
+    audit = json.loads(Path(result.outputs["citation_audit"]).read_text(encoding="utf-8"))
+    assert any(verification["error_code"] == "adapter_schema_error" for verification in audit["verifications"])
+    assert any(finding["status"] == "verification_failed" for finding in audit["findings"])
+    concerns = json.loads(Path(result.outputs["concerns"]).read_text(encoding="utf-8"))["concerns"]
+    assert any(
+        concern["category"] == "citation" and concern["status"] == "pending_human_confirmation"
+        for concern in concerns
+    )
 
 
 def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:

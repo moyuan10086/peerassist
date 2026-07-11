@@ -16,10 +16,12 @@ from common.pipeline_context import (
 )
 from peerassist.agents import integrate_agent_results, run_peerassist_agents
 from peerassist.capabilities import default_capability_registry
+from peerassist.citation_pipeline import run_citation_pipeline
 from peerassist.confirmations import (
     apply_confirmations,
     build_confirmation_bundle,
     build_confirmation_review_queue,
+    reconcile_citation_confirmations,
 )
 from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
@@ -174,6 +176,16 @@ def run_peerassist_stage(
         output_summary=f"{len(ledger.items)} evidence items",
         artifact_ids=["evidence_ledger"],
     )
+    citation_result = run_citation_pipeline(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        paper_key=paper_key,
+        ledger=ledger,
+        trace=trace,
+        mode=normalized_mode,
+    )
+    ledger = citation_result.augmented_ledger
+    write_json_file(ledger_path, ledger.model_dump(mode="json"))
 
     registry = default_capability_registry()
     handlers = {
@@ -298,7 +310,12 @@ def run_peerassist_stage(
         },
     )
 
-    concerns = integrate_agent_results(agent_results)
+    agent_concerns = [
+        concern for concern in integrate_agent_results(agent_results) if concern.category != "citation"
+    ]
+    concerns = [*agent_concerns, *citation_result.concerns]
+    if len({concern.id for concern in concerns}) != len(concerns):
+        raise ValueError("citation pipeline produced duplicate concern identifiers")
     concerns_path = out_dir / "peerassist_concerns.json"
     write_json_file(
         concerns_path,
@@ -315,20 +332,26 @@ def run_peerassist_stage(
             confirmations_path,
             {"schema_version": "peerassist.human_confirmations.v1", "actions": []},
         )
+    confirmation_actions = _load_confirmations(confirmations_path)
+    reconciliation = reconcile_citation_confirmations(concerns, confirmation_actions, citation_result.audit)
     evidence_lookup = _evidence_lookup([item.model_dump(mode="json") for item in ledger.items])
     confirmation_bundle_path = out_dir / "confirmation_bundle.json"
     confirmation_bundle = build_confirmation_bundle(concerns=concerns, evidence_lookup=evidence_lookup)
+    confirmation_bundle["metadata"] = {
+        "needs_reconciliation": reconciliation.concern_ids_needing_reconciliation,
+    }
     write_json_file(
         confirmation_bundle_path,
         confirmation_bundle,
     )
     confirmation_review_queue_path = out_dir / "confirmation_review_queue.json"
-    write_json_file(
-        confirmation_review_queue_path,
-        build_confirmation_review_queue(confirmation_bundle),
-    )
+    confirmation_queue = build_confirmation_review_queue(confirmation_bundle)
+    confirmation_queue["metadata"] = {
+        "needs_reconciliation": reconciliation.concern_ids_needing_reconciliation,
+    }
+    write_json_file(confirmation_review_queue_path, confirmation_queue)
 
-    confirmed_concerns = apply_confirmations(concerns, _load_confirmations(confirmations_path))
+    confirmed_concerns = apply_confirmations(concerns, reconciliation.replayable_actions)
     report_md, report_payload = export_peerassist_report(
         paper_id=paper_key,
         concerns=confirmed_concerns,
@@ -391,6 +414,7 @@ def run_peerassist_stage(
         status="ok",
         outputs={
             "evidence_ledger": str(ledger_path),
+            "citation_audit": str(citation_result.audit_path),
             "deterministic_checks": str(checks_path),
             "capability_invocations": str(capability_invocations_path),
             "agent_results": str(agent_results_path),
