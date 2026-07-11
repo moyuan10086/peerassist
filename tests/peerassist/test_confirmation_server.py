@@ -673,6 +673,20 @@ def test_render_workspace_app_uses_react_frontend_bootstrap(tmp_path: Path) -> N
     assert "React" not in html
 
 
+def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
+    workspace_dir = Path(__file__).parents[2] / "web" / "peerassist-workspace"
+    package_json = json.loads((workspace_dir / "package.json").read_text(encoding="utf-8"))
+    source = (workspace_dir / "src" / "main.tsx").read_text(encoding="utf-8")
+
+    assert package_json["dependencies"]["react"].startswith("^18")
+    assert "pdfjs-dist" in package_json["dependencies"]
+    assert "function PdfReviewReader" in source
+    assert "pdfjsLib.getDocument" in source
+    assert "pdf-text-layer" in source
+    assert "onSelection({ text, page: pageNumber })" in source
+    assert "粘贴 PDF 选中的原文" in source
+
+
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     out_dir = _seed_peerassist_stage(run_dir)

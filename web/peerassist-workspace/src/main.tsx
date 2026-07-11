@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import * as pdfjsLib from "pdfjs-dist";
 import {
   Bot,
   CheckCircle2,
@@ -15,6 +16,11 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import "./styles.css";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.mjs",
+  import.meta.url,
+).toString();
 
 type WorkspaceWindow = {
   id: WindowId;
@@ -107,6 +113,19 @@ type Bootstrap = {
   windows: WorkspaceWindow[];
 };
 
+type PdfDocumentProxy = Awaited<ReturnType<typeof pdfjsLib.getDocument>> extends {
+  promise: Promise<infer T>;
+}
+  ? T
+  : never;
+
+type PdfTextItem = {
+  str: string;
+  transform: number[];
+  width?: number;
+  height?: number;
+};
+
 const fallbackBootstrap: Bootstrap = {
   paper_id: "unknown",
   state: {},
@@ -148,6 +167,7 @@ function App() {
   const [bootstrap, setBootstrap] = useState<Bootstrap>(initial as Bootstrap);
   const [activeWindow, setActiveWindow] = useState<WindowId>(currentWindowFromPath());
   const [streamLines, setStreamLines] = useState<string[]>(["等待 PeerAssist 运行态事件流"]);
+  const [lastReviewDraft, setLastReviewDraft] = useState("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -205,6 +225,7 @@ function App() {
 
   async function runAgentReview(selectedText = "", reviewMode = "fast") {
     setBusy(true);
+    setLastReviewDraft("");
     setStreamLines((lines) => [...lines.slice(-80), `agent: 以 ${reviewMode} 模式启动智能审稿`]);
     try {
       const response = await fetch("/api/agent-review", {
@@ -214,8 +235,15 @@ function App() {
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "智能审稿失败");
-      showToast(`已写入 ${payload.structured_concern_count || 0} 条结构化意见`);
-      setStreamLines((lines) => [...lines.slice(-80), `agent: ${payload.suggestion || "审稿完成"}`]);
+      const structuredCount = Number(payload.structured_concern_count || 0);
+      const queueItems = Number(payload.queue_items || 0);
+      const suggestion = String(payload.suggestion || "");
+      showToast(`已写入 ${structuredCount} 条结构化意见`);
+      setLastReviewDraft(suggestion);
+      setStreamLines((lines) => [
+        ...lines.slice(-80),
+        `agent: 审稿完成，新增 ${structuredCount} 条结构化意见，当前队列 ${queueItems} 条`,
+      ]);
       await refresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : "智能审稿失败";
@@ -339,6 +367,7 @@ function App() {
             baseUrl={bootstrap.model_config.base_url || ""}
             agentRuns={agentRuns}
             streamLines={streamLines}
+            lastReviewDraft={lastReviewDraft}
             onRunReview={runAgentReview}
           />
         )}
@@ -389,15 +418,19 @@ function PaperWindow({
   const [selectedText, setSelectedText] = useState("");
   const [note, setNote] = useState("");
   const [page, setPage] = useState("1");
+  const handlePdfSelection = useCallback((payload: { text: string; page: number }) => {
+    setSelectedText(payload.text);
+    setPage(String(payload.page));
+  }, []);
   return (
     <section className="paper-grid">
       <div className="panel pdf-panel">
         <div className="panel-head">
           <h2>原文 PDF</h2>
-          <span className="tag good">优先阅读</span>
+          <span className="tag good">可选中文字</span>
         </div>
         {pdfUrl ? (
-          <iframe className="pdf-frame" title="PeerAssist 原文 PDF" src={pdfUrl} />
+          <PdfReviewReader pdfUrl={pdfUrl} onSelection={handlePdfSelection} />
         ) : (
           <div className="empty-pdf">当前运行目录没有发现原始 PDF。</div>
         )}
@@ -439,12 +472,145 @@ function PaperWindow({
   );
 }
 
+function PdfReviewReader({
+  pdfUrl,
+  onSelection,
+}: {
+  pdfUrl: string;
+  onSelection: (payload: { text: string; page: number }) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const textLayerRef = useRef<HTMLDivElement | null>(null);
+  const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [pageCount, setPageCount] = useState(0);
+  const [scale, setScale] = useState(1.18);
+  const [status, setStatus] = useState("正在加载 PDF");
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("正在加载 PDF");
+    const loadingTask = pdfjsLib.getDocument({ url: pdfUrl });
+    loadingTask.promise
+      .then((document) => {
+        if (cancelled) return;
+        setPdfDoc(document);
+        setPageCount(document.numPages);
+        setPageNumber(1);
+        setStatus(`已载入 ${document.numPages} 页`);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setStatus(error instanceof Error ? `PDF 加载失败：${error.message}` : "PDF 加载失败");
+      });
+    return () => {
+      cancelled = true;
+      loadingTask.destroy();
+    };
+  }, [pdfUrl]);
+
+  useEffect(() => {
+    if (!pdfDoc || !canvasRef.current || !textLayerRef.current) return;
+    let cancelled = false;
+    const canvas = canvasRef.current;
+    const textLayer = textLayerRef.current;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    textLayer.replaceChildren();
+    setStatus(`正在渲染第 ${pageNumber} 页`);
+    pdfDoc
+      .getPage(pageNumber)
+      .then(async (page) => {
+        if (cancelled) return;
+        const viewport = page.getViewport({ scale });
+        const pixelRatio = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(viewport.width * pixelRatio);
+        canvas.height = Math.floor(viewport.height * pixelRatio);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        textLayer.style.width = `${viewport.width}px`;
+        textLayer.style.height = `${viewport.height}px`;
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        await page.render({ canvas, canvasContext: context, viewport }).promise;
+        const textContent = await page.getTextContent();
+        if (cancelled) return;
+        textLayer.replaceChildren();
+        for (const rawItem of textContent.items) {
+          if (!("str" in rawItem) || !rawItem.str.trim()) continue;
+          const item = rawItem as PdfTextItem;
+          const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
+          const textNode = document.createElement("span");
+          textNode.className = "pdf-text-item";
+          textNode.textContent = item.str;
+          textNode.style.left = `${transform[4]}px`;
+          textNode.style.top = `${transform[5]}px`;
+          textNode.style.fontSize = `${Math.max(8, Math.hypot(transform[2], transform[3]))}px`;
+          textNode.style.transform = "translateY(-100%)";
+          if (item.width) textNode.style.width = `${item.width * scale}px`;
+          textLayer.appendChild(textNode);
+        }
+        setStatus(`第 ${pageNumber} / ${pdfDoc.numPages} 页`);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setStatus(error instanceof Error ? `PDF 渲染失败：${error.message}` : "PDF 渲染失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfDoc, pageNumber, scale]);
+
+  const captureSelection = () => {
+    const selection = window.getSelection();
+    const text = selection?.toString().replace(/\s+/g, " ").trim() || "";
+    if (!text || !textLayerRef.current || !selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    if (!textLayerRef.current.contains(range.commonAncestorContainer)) return;
+    onSelection({ text, page: pageNumber });
+  };
+
+  const goToPage = (nextPage: number) => {
+    setPageNumber(Math.max(1, Math.min(pageCount || 1, nextPage)));
+  };
+
+  return (
+    <div className="pdf-reader">
+      <div className="pdf-toolbar">
+        <div className="button-row">
+          <button className="ghost-button" type="button" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
+            上一页
+          </button>
+          <button className="ghost-button" type="button" disabled={pageNumber >= pageCount} onClick={() => goToPage(pageNumber + 1)}>
+            下一页
+          </button>
+        </div>
+        <span className="pdf-status">{status}</span>
+        <div className="button-row">
+          <button className="ghost-button" type="button" onClick={() => setScale((value) => Math.max(0.72, value - 0.12))}>
+            缩小
+          </button>
+          <button className="ghost-button" type="button" onClick={() => setScale((value) => Math.min(2.2, value + 0.12))}>
+            放大
+          </button>
+        </div>
+      </div>
+      <div className="pdf-scroll">
+        <div className="pdf-page-shell" onMouseUp={captureSelection}>
+          <canvas ref={canvasRef} className="pdf-canvas" />
+          <div ref={textLayerRef} className="pdf-text-layer" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentWindow({
   busy,
   model,
   baseUrl,
   agentRuns,
   streamLines,
+  lastReviewDraft,
   onRunReview,
 }: {
   busy: boolean;
@@ -452,6 +618,7 @@ function AgentWindow({
   baseUrl: string;
   agentRuns: AgentRun[];
   streamLines: string[];
+  lastReviewDraft: string;
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
 }) {
   const [mode, setMode] = useState("fast");
@@ -488,10 +655,17 @@ function AgentWindow({
           {streamLines.slice(-40).map((line, index) => (
             <div className="stream-line" key={`${line}-${index}`}>
               <span className="stream-kind">{line.split(":")[0]}</span>
-              <span>{line.includes(":") ? line.slice(line.indexOf(":") + 1).trim() : line}</span>
+              <span className="stream-message">{line.includes(":") ? line.slice(line.indexOf(":") + 1).trim() : line}</span>
             </div>
           ))}
         </div>
+      </div>
+      <div className="panel full-span">
+        <div className="panel-head">
+          <h2>审稿草稿预览</h2>
+          <span className="tag">模型输出</span>
+        </div>
+        <ReviewDraftPreview draft={lastReviewDraft} />
       </div>
       <div className="panel full-span">
         <div className="panel-head">
@@ -512,6 +686,29 @@ function AgentWindow({
         </div>
       </div>
     </section>
+  );
+}
+
+function ReviewDraftPreview({ draft }: { draft: string }) {
+  const cleanDraft = draft.trim();
+  if (!cleanDraft) {
+    return (
+      <div className="panel-body draft-empty">
+        启动智能审稿后，完整草稿会显示在这里；实时数据流只保留状态事件和简短摘要。
+      </div>
+    );
+  }
+  return (
+    <div className="draft-preview">
+      {cleanDraft.split(/\n{2,}/).map((block, index) => {
+        const normalized = block.trim();
+        if (!normalized) return null;
+        if (normalized.startsWith("#")) {
+          return <h3 key={`${normalized}-${index}`}>{normalized.replace(/^#+\s*/, "")}</h3>;
+        }
+        return <p key={`${normalized}-${index}`}>{normalized.replace(/^[-*]\s*/, "")}</p>;
+      })}
+    </div>
   );
 }
 
