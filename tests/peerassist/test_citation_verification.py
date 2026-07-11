@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from peerassist.citation_artifacts import (
+    ArtifactPathError,
     ArtifactWriteError,
     validate_response_artifact,
     write_response_artifact,
@@ -606,9 +607,10 @@ def test_artifact_publish_is_immutable_for_concurrent_same_attempt(tmp_path: Pat
     artifact = next(outcome for outcome in outcomes if outcome != "exists")
     assert isinstance(artifact, RawResponseArtifact)
     assert (tmp_path / artifact.path).read_bytes() == payload
+    assert validate_response_artifact(tmp_path, artifact)
 
 
-def test_artifact_directory_fd_survives_parent_symlink_swap_without_outside_write(
+def test_artifact_directory_rebinding_cleans_published_file_and_fails_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact_dir = tmp_path / "citation_verifications"
@@ -628,11 +630,44 @@ def test_artifact_directory_fd_survives_parent_symlink_swap_without_outside_writ
         original_link(*args, **kwargs)
 
     monkeypatch.setattr(os, "link", swap_then_link)
-    artifact = write_response_artifact(tmp_path, "swap", b'{"inside":true}')
+    with pytest.raises(ArtifactPathError):
+        write_response_artifact(tmp_path, "swap", b'{"inside":true}')
 
     assert not list(outside.iterdir())
-    assert (held_directory / "attempt-swap.json").read_bytes() == b'{"inside":true}'
-    assert artifact.path == "citation_verifications/attempt-swap.json"
+    assert not list(held_directory.iterdir())
+
+
+def test_rebound_artifact_directory_degrades_verification_without_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_dir = tmp_path / "citation_verifications"
+    artifact_dir.mkdir()
+    held_directory = tmp_path / "held-directory"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_link = os.link
+    swapped = False
+
+    def swap_then_link(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.rename(artifact_dir, held_directory)
+            os.symlink(outside, artifact_dir, target_is_directory=True)
+        original_link(*args, **kwargs)
+
+    monkeypatch.setattr(os, "link", swap_then_link)
+    verification = verify_reference(
+        reference_record(),
+        OfflineMetadataVerifier([{"id": "external-1", "doi": "10.1000/example"}]),
+        artifact_dir=tmp_path,
+    )
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "artifact_write_error"
+    assert verification.raw_response_artifact is None
+    assert not list(outside.iterdir())
+    assert not list(held_directory.iterdir())
 
 
 def test_artifact_directory_symlink_is_rejected(tmp_path: Path) -> None:

@@ -26,6 +26,10 @@ class ArtifactWriteError(Exception):
     """The immutable response could not be safely published."""
 
 
+class ArtifactPathError(ArtifactWriteError):
+    """The artifact path no longer names the directories held during publication."""
+
+
 def response_bytes(raw_response: Any) -> bytes:
     """Preserve supplied bytes or encode JSON values in deterministic canonical form."""
     if isinstance(raw_response, bytes):
@@ -54,6 +58,7 @@ def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_resp
     root_fd = _open_root_fd(artifact_root, create=True)
     artifact_fd = -1
     temporary_name = ""
+    published = False
     try:
         artifact_fd = _open_artifact_directory_fd(root_fd, create=True)
         temporary_name, temporary_fd = _create_temporary_file(artifact_fd)
@@ -68,12 +73,23 @@ def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_resp
             dst_dir_fd=artifact_fd,
             follow_symlinks=False,
         )
+        published = True
         os.fsync(artifact_fd)
+        if not _binding_matches(artifact_root, root_fd, artifact_fd):
+            _unlink_published_artifact(artifact_fd, filename)
+            published = False
+            raise ArtifactPathError("artifact directory binding changed during publication")
+        published = False
     except FileExistsError:
+        raise
+    except ArtifactPathError:
         raise
     except OSError as exc:
         raise ArtifactWriteError("unable to publish immutable response artifact") from exc
     finally:
+        if published and artifact_fd >= 0:
+            # This is only reached when an exception occurred after publication.
+            _unlink_published_artifact(artifact_fd, filename)
         if temporary_name and artifact_fd >= 0:
             try:
                 os.unlink(temporary_name, dir_fd=artifact_fd)
@@ -95,7 +111,11 @@ def validate_response_artifact(artifact_root: str | Path, artifact: RawResponseA
     artifact_fd = -1
     try:
         artifact_fd = _open_artifact_directory_fd(root_fd, create=False)
+        if not _binding_matches(artifact_root, root_fd, artifact_fd):
+            return False
         digest = _descriptor_sha256(artifact_fd, filename)
+        if not _binding_matches(artifact_root, root_fd, artifact_fd):
+            return False
     except (ArtifactWriteError, OSError):
         return False
     finally:
@@ -188,3 +208,34 @@ def _descriptor_sha256(directory_fd: int, filename: str) -> str:
         return digest.hexdigest()
     finally:
         os.close(descriptor)
+
+
+def _binding_matches(artifact_root: str | Path, root_fd: int, artifact_fd: int) -> bool:
+    fresh_root_fd = -1
+    fresh_artifact_fd = -1
+    try:
+        fresh_root_fd = _open_root_fd(artifact_root, create=False)
+        if _directory_identity(fresh_root_fd) != _directory_identity(root_fd):
+            return False
+        fresh_artifact_fd = _open_artifact_directory_fd(fresh_root_fd, create=False)
+        return _directory_identity(fresh_artifact_fd) == _directory_identity(artifact_fd)
+    except ArtifactWriteError:
+        return False
+    finally:
+        if fresh_artifact_fd >= 0:
+            os.close(fresh_artifact_fd)
+        if fresh_root_fd >= 0:
+            os.close(fresh_root_fd)
+
+
+def _directory_identity(descriptor: int) -> tuple[int, int]:
+    file_stat = os.fstat(descriptor)
+    return file_stat.st_dev, file_stat.st_ino
+
+
+def _unlink_published_artifact(directory_fd: int, filename: str) -> None:
+    try:
+        os.unlink(filename, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except FileNotFoundError:
+        pass
