@@ -1,345 +1,204 @@
-# FactReview <a href="https://arxiv.org/abs/2604.04074"><img src="https://img.shields.io/badge/arXiv-2604.04074-b31b1b.svg" alt="Paper"></a> <img src="https://img.shields.io/badge/license-AGPL--3.0-green.svg" alt="License">
+# PeerAssist 论文审核辅助系统
 
-<p align="center">
-  <img src="demos/Graph/compgcn/teaser_figure.png" alt="A FactReview output for the CompGCN paper: technical positioning, claim verdicts, reproduced experimental numbers, strengths and weaknesses — all on one page." width="900">
-</p>
+PeerAssist 是以 [DEFENSE-SEU/FactReview](https://github.com/DEFENSE-SEU/FactReview) 为代码底座构建的论文审核辅助系统，目标是把论文原文浏览、证据审稿、确定性核查、多代理评审、可追溯 MCP/Skills 调用和人工逐条确认放到同一个审稿工作台里，帮助审稿人更快定位证据、发现机械性错误，并保留真正有价值的审稿意见。
 
-<p align="center"><strong>Evidence-grounded reviews for ML papers — every claim traced back to the literature, the paper, or actually running the code.</strong></p>
+当前系统已完成一个可运行的 MVP：前端采用 React、TypeScript、Vite、PDF.js 和 lucide-react，后端由 Python 提供审稿状态、PDF、模型调用、人工确认和产物导出 API。界面语言以中文为主，证据原文保留论文原语言，避免误译影响审稿判断。
 
-You give FactReview a paper PDF (or an arXiv URL). It returns a Markdown + PDF review where every major claim is tagged with one of four verdicts and linked to a paper section, a literature neighbor, or a number it reproduced by running the paper's code. The image above is a real FactReview output for [CompGCN](https://arxiv.org/abs/1911.03082) — design-axis positioning, color-coded verdicts, paper-vs-reproduced numbers with Δ, and auto-synthesized strengths and weaknesses, on one page. It is **deliberately designed as a one-minute review aid**: as ML submission volumes outrun reviewer capacity and per-paper attention shrinks, the bottleneck is no longer "can a reviewer read the paper" but "can they triage ten of them this week."
+## 在线访问
 
-> **Two tools in this repo.**
-> **[FactReview](#quick-start--factreview)** takes a paper and returns a full evidence-grounded review.
-> **[RefCopilot](#quick-start--refcopilot)** takes any bibliography (`.bib`, PDF, or URL) and returns a list of fabricated, retracted, outdated, or incomplete citations — plus copy-paste-ready BibTeX corrections. They share infrastructure but run independently.
+- 公网服务：<http://101.47.158.17:8766/>
+- 默认入口：PDF 原文阅读与智能审稿工作台
+- 旧版兜底界面：<http://101.47.158.17:8766/legacy>
+- 当前演示论文 PDF：<http://101.47.158.17:8766/paper.pdf>
 
-## Why FactReview
+## 核心能力
 
-Generic LLM reviewers — pasting a PDF into ChatGPT, Gemini, or Claude — fail in five predictable ways. FactReview is built around fixing each of them.
+| 能力 | 说明 |
+| --- | --- |
+| PDF 原文审稿 | 基于 PDF.js 渲染原始论文，支持翻页、缩放、文字选择和原文定位 |
+| 证据审稿队列 | 将模型/规则发现的 concerns 汇入人工确认队列，逐条处理 |
+| 确定性核查 | 检查统计显著性、数值一致性、百分比/符号/表述冲突等机械错误 |
+| 多代理评审 | 汇总证据、确定性核查和代理结果，生成可追溯审稿草稿 |
+| MCP/Skills 追踪 | 记录工具调用、状态、产物 ID 和失败事件，便于复盘 |
+| 人工逐条确认 | 支持确认、改写、降级、删除和标记待定，避免无证据事实进入最终意见 |
+| 中文工作台 | 导航、按钮、状态、操作提示和操作手册均为中文 |
 
-| Generic LLM reviewer | FactReview |
-|---|---|
-| **Hallucinates citations** ("As shown by Smith et al., 2021…" — no such paper). | Every reference is verified in parallel against arXiv, Semantic Scholar, OpenReview, and (optional) OpenAlex. Fabrications, retractions, and arXiv withdrawals are flagged. See [RefCopilot](#what-refcopilot-produces). |
-| **Calls Δ = 0.3% a "significant improvement"** because the paper said so. | The claim-audit pass auto-downgrades comparative claims when Δ < 2σ and flags missing ablations. See [`src/review/report/claim_audit.py`](src/review/report/claim_audit.py). |
-| **Faults the paper for not citing related work that was published after it.** | When the input is an arXiv URL, FactReview derives a publication-date cutoff from the arXiv ID and applies it to retrieval (server-side at Semantic Scholar and client-side in the agent's `paper_search`). |
-| **Cannot verify a single reported number.** | Optional Docker-based execution stage runs the paper's repository on its claimed benchmarks via a `prepare → plan → run → judge → fix → finalize` loop, then reports paper-vs-reproduced deltas. See [`src/fact_generation/execution/stage_runner.py`](src/fact_generation/execution/stage_runner.py). |
-| **Returns a wall of prose** that a tired reviewer still has to read end-to-end before they can decide if the paper is worth deeper attention. | A fixed-layout **one-page teaser figure** (the hero image above) lets a reviewer or area chair triage a paper in roughly a minute — positioning, verdicts, paper-vs-reproduced numbers, and weaknesses always in the same on-screen regions. The full review is one click away when the teaser raises a question. Increasingly the deciding factor as ML submission volumes outrun reviewer capacity. |
+## 仓库结构
 
-## See it in Action
+| 路径 | 说明 |
+| --- | --- |
+| `src/peerassist/confirmation_server.py` | PeerAssist 后端服务，提供页面、PDF、API、SSE、模型调用 |
+| `src/peerassist/confirmation_cli.py` | 人工确认命令行工具 |
+| `web/peerassist-workspace` | React/Vite 前端源码 |
+| `web/peerassist-workspace/dist` | 前端生产构建产物，由后端挂载到 `/workspace/` |
+| `docs/peerassist_operation_manual.md` | 中文操作手册 |
+| `docs/peerassist_lark_sync.md` | 飞书同步文档固定入口和本地同步记录 |
+| `deploy/nginx/peerassist-subdomains.conf` | 子域名/前后端分离部署参考 |
+| `eval/PeerAssist-Eval-v1` | 冻结测试集与评测骨架 |
+| `RefCopilot` | 原 FactReview 生态中的参考文献核查工具 |
 
-The hero image is FactReview's most condensed deliverable: a one-page **teaser** purpose-built for triage. The layout is fixed — verdicts and positioning in the top half, reproduced numbers and synthesized strengths/weaknesses in the bottom half — so a reviewer's eye lands on the same regions across every paper, and the whole thing is legible without scrolling. Each panel earns its place:
+前端源码已上传到 `web/peerassist-workspace`。如果 GitHub 右侧语言统计暂时显示 Python 占比很高，是语言统计和文件体积规则导致的，不代表没有前端代码。
 
-- **Technical Positioning** (top-left) — The paper is placed against neighbor methods on a small set of design axes pulled from related-work retrieval. Reviewers can see at a glance which dimensions the paper actually innovates on.
-- **Claims** (top-center) — Every major claim the paper makes is tagged with a verdict (✓ Supported, ⚠ Partially supported, ✗ In conflict, ? Inconclusive) and linked back to the section it came from.
-- **Experiment / Ablation** (bottom-left) — Paper-reported numbers and FactReview's reproduced numbers are shown side by side with Δ. The CompGCN demo includes a row where the paper's "outperforms baselines" claim is downgraded — PACHYSAN actually beats CompGCN 92.6% vs 89.0% on Graph Classification (MUTAG).
-- **Summary / Strengths / Weaknesses** (right) — Auto-synthesized, including weaknesses the paper itself does not own up to (e.g., "random seeds and significance testing not reported").
+## 快速启动后端
 
-For the full review behind that image, open [`demos/Graph/compgcn/report.pdf`](demos/Graph/compgcn/report.pdf).
-
-**More demos** (each contains the full run artifacts and rendered review):
-
-| Domain | Papers |
-|---|---|
-| Graph | [CompGCN](demos/Graph/compgcn) · [Graphormer](demos/Graph/graphormer) · [SACN](demos/Graph/sacn) |
-| Image | [BEiT](demos/Image/beit) · [FixMatch](demos/Image/fixmatch) · [LRCN](demos/Image/lrcn) · [UDA](demos/Image/uda) |
-| Text | [BERT](demos/Text/bert) · [Prefix-Tuning](demos/Text/Prefix-Tuning) |
-
-> The teaser figure is the format we recommend for first-pass triage; the full Markdown + PDF review at `final_review.{md,pdf}` is what reviewers should open when a teaser raises questions. Rendering the figure itself requires Gemini (or pasting the saved prompt into the Gemini web app — FactReview writes the prompt to disk and copies it to your clipboard if no key is set). The Markdown + PDF review is generated unconditionally; only the teaser figure is gated on Gemini. See [Configuration](#configuration).
-
-## Quick Start — FactReview
-
-Requirements: Python 3.11+, a local Codex login. Docker is only needed if you enable code execution.
+从仓库根目录运行：
 
 ```bash
-git clone https://github.com/DEFENSE-SEU/FactReview.git && cd FactReview
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
-pip install -e ".[runtime]"
-codex login                                          # ChatGPT sign-in flow
-cp .env.example .env                                 # then set MINERU_API_TOKEN
-python scripts/execute_review_pipeline.py demos/Graph/compgcn/paper.pdf
+PYTHONPATH=src \
+PEERASSIST_OPENAI_API_KEY="<your-runtime-key>" \
+PEERASSIST_OPENAI_BASE_URL="https://deepkey.top/v1" \
+PEERASSIST_OPENAI_MODEL="gpt-5.4" \
+PEERASSIST_OPENAI_TIMEOUT_SECONDS="240" \
+.venv/bin/python -m peerassist.confirmation_server \
+  --run-dir runs/arxiv_real_data/runs/arxiv_2607_08522_v1 \
+  --paper-id arxiv_2607_08522_v1 \
+  --host 0.0.0.0 \
+  --port 8766
 ```
 
-When the run finishes, open the headline output:
-
-```
-runs/<paper_key>_<timestamp>/stages/review/report/final_review.pdf
-```
-
-That is your review. To run on your own paper:
-
-**Template** — replace the path and key with your own:
-```bash
-python scripts/execute_review_pipeline.py path/to/paper.pdf --paper-key my_paper
-```
-
-**Example** — fetch directly from arXiv:
-```bash
-python scripts/execute_review_pipeline.py https://arxiv.org/abs/1911.03082
-```
-
-If `codex` is not on your PATH, install OpenAI's Codex CLI (`npm install -g @openai/codex`) and rerun `codex login`. Get a free MinerU token from <https://mineru.net> (the free tier covers most papers). For all other configuration knobs, see [Configuration](#configuration). For all CLI flags and single-stage reruns, see [CLI Reference](#cli-reference).
-
-## Quick Start — RefCopilot
-
-RefCopilot stands alone — no PDF parsing, no Docker, no MinerU token. Give it a `.bib`, a PDF, an arXiv URL, or a plain-text bibliography:
+检查服务：
 
 ```bash
-pip install -e "./RefCopilot[dev]"
-codex login                                          # if you have not already
-refcopilot check path/to/paper.pdf                   # or .bib, arXiv URL, plain text
+curl -I http://127.0.0.1:8766/
+curl -I http://127.0.0.1:8766/paper.pdf
+curl http://127.0.0.1:8766/api/state
 ```
 
-You get a Markdown + JSON report listing fabricated, retracted, outdated, and incomplete citations, with a copy-paste-ready corrected BibTeX entry for each fixable warning. See [`RefCopilot/README.md`](RefCopilot/README.md) for the full library API, cache management, and all flags.
+不要把真实 API Key 写入 README、`.env`、提交信息、飞书文档或 Git remote URL。密钥只允许通过运行时环境变量注入。
 
-## What FactReview Produces
-
-Every major claim in the paper is tagged with one of four verdicts:
-
-| Verdict | What it means | From the CompGCN demo |
-|---|---|---|
-| **✓ Supported** | Independent literature evidence (or a reproduced number) agrees with the claim. | *"Scales with relations via basis decomposition"* — verified that performance is stable while parameter count scales linearly with `B` (Section 6.3, Figure 3). |
-| **⚠ Partially supported** | Evidence agrees with part of the claim and disagrees with or fails to address the rest. | *"Outperforms baselines in Link Prediction, Node Classification, and Graph Classification"* — verified on the first two; on Graph Classification, PACHYSAN beats CompGCN 92.6% vs 89.0% (Tables 3 and 5). |
-| **✗ In conflict** | Independent evidence directly contradicts the claim. | — |
-| **? Inconclusive** | Neither external nor in-paper evidence is sufficient to judge. | — |
-
-What makes the report distinctive (beyond the verdicts):
-
-- **Design-axis positioning matrix** — neighbor papers retrieved from Semantic Scholar (and optional OpenAlex) are placed on a small set of design dimensions specific to the paper's domain, so reviewers can see which dimensions the paper genuinely innovates on. See [`src/fact_generation/positioning/stage_runner.py`](src/fact_generation/positioning/stage_runner.py).
-- **Statistical-rigor downgrades** — comparative claims with Δ < 2σ are auto-downgraded; missing ablations are flagged. See [`src/review/report/claim_audit.py`](src/review/report/claim_audit.py).
-- **Publication-date cutoff** — when the input is an arXiv URL or ID, FactReview derives a `YYYY-MM` cutoff from the arXiv identifier so the manuscript is not penalized for missing citations to work that was published after it. Override with `--cutoff-date` or disable with `--no-cutoff`.
-- **Optional code execution** — the execution stage runs a bounded `prepare → plan → run → judge → fix → finalize` Docker loop (default `--max-attempts 5`) and writes its verdict into `stages/fact_generation/execution/execution.json`. See [`src/fact_generation/execution/stage_runner.py`](src/fact_generation/execution/stage_runner.py).
-- **One-page teaser figure for triage** — alongside the Markdown + PDF, FactReview generates a layout-constrained one-page figure (the hero image of this README) that compresses the positioning matrix, claim verdicts, paper-vs-reproduced numbers, and strengths/weaknesses into a single screen. The layout is fixed across every paper so a reviewer's eye lands on the same regions every time — designed for the realistic per-paper budget reviewers and area chairs actually have.
-
-## What RefCopilot Produces
-
-RefCopilot extracts every reference from the input and verifies it in parallel against arXiv, Semantic Scholar, OpenReview, and (optionally) OpenAlex. Each finding falls into one of these buckets:
-
-| Severity | Type | What it means |
-|---|---|---|
-| **Error** | `fake / no_match` | No matching record on any backend. Likely fabricated. |
-| **Error** | `retracted` | Publisher retraction (via OpenAlex `is_retracted` + Retraction Watch) or arXiv author-withdrawn preprint. |
-| **Warning** | `outdated / arxiv_published` | Cited as an arXiv preprint, but a published version exists at a venue. |
-| **Warning** | `outdated / arxiv_version` | An older arXiv version is cited; a newer revision exists. |
-| **Warning** | `outdated / workshop_to_full` | Cited as a workshop paper, but a full-conference version exists. |
-| **Warning** | `incomplete` | Missing DOI / arXiv ID / venue / year, truncated authors, abbreviated venue name. |
-| **Warning** | `non_academic_downgrade` | Title-mismatch heuristic flagged it, but LLM verification recognised it as a system card / blog post / dataset / standard / white paper — downgraded from error. |
-
-For each fixable warning, RefCopilot emits a corrected BibTeX entry with a leading provenance comment listing **which backend supplied each field**, and the lookup URL — so a reviewer can audit any fix in one click:
-
-```bibtex
-% Suggested by RefCopilot. Field provenance:
-%   semantic_scholar: title, authors, year, journal, doi — https://api.semanticscholar.org/...
-%   arxiv: arxiv_id — https://arxiv.org/abs/...
-@article{Smith2017Real,
-  title   = {Real: A Title},
-  author  = {Smith, John and Jones, Jane},
-  year    = {2017},
-  journal = {NeurIPS 2017},
-  doi     = {10.1234/example},
-}
-```
-
-What's behind the accuracy:
-
-- **Four-backend parallel lookup** — arXiv, Semantic Scholar, OpenReview, and (when `OPENALEX_API_KEY` is set) OpenAlex are queried concurrently; results are merged with per-field provenance. See [`RefCopilot/src/refcopilot/pipeline.py`](RefCopilot/src/refcopilot/pipeline.py).
-- **Two-stage hallucination detection** — a fast offline heuristic (title similarity + author overlap + OCR-garbled-title detection) handles the easy cases; the LLM is only invoked on the ambiguous ones. Saves tokens, raises precision.
-- **"Second-chance" lookup** — if no backend matches but the LLM judges the paper as real, RefCopilot asks the LLM for canonical metadata (corrected title, DOI, arXiv ID) and retries all four backends once with the suggested values.
-- **Retraction detection** — unified `is_retracted` signal from OpenAlex (publisher retractions + Retraction Watch) plus arXiv withdrawn-preprint notices. See [`RefCopilot/src/refcopilot/verify/retraction.py`](RefCopilot/src/refcopilot/verify/retraction.py).
-
-When RefCopilot is invoked from FactReview's pipeline (`--enable-refcheck`), the full result is written to `stages/fact_generation/refcheck/reference_check.json` and a fabricated-references summary is appended to `final_review.md`.
-
-## Configuration
-
-FactReview keeps routine configuration in two places: `.env` for secrets and runtime choices, CLI flags for one-off overrides. The four settings most users touch:
-
-**LLM backend (default: Codex login).** `.env.example` ships with `MODEL_PROVIDER=openai-codex` and the Codex model alias pre-filled — copy to `.env` and run `codex login` once. The Codex model alias is *not* a public OpenAI Platform model id; do not try to use it with `OPENAI_API_KEY` against `api.openai.com`.
-
-**MinerU PDF parsing (required).** `MINERU_API_TOKEN` must be set. FactReview uses MinerU's cloud API by default — free tier, no local CUDA / GPU / model download. Get a token at <https://mineru.net>. You can also pass `--mineru-api-token` per-run.
-
-**Gemini teaser figure (optional).** If `GEMINI_API_KEY` is empty, FactReview writes the prompt to `teaser_figure_prompt.txt`, copies it to your clipboard, and tells you to paste it into the Gemini web app. If `GEMINI_API_KEY` is set, FactReview uses it automatically. Force prompt-only with `--teaser-mode prompt` or `TEASER_USE_GEMINI=false`.
-
-<details>
-<summary><strong>Prompt-only Gemini workflow (manual upload)</strong></summary>
-
-The prompt refers to "the attached reference image" — when you paste it into Gemini / ChatGPT / any image-model web UI, **also upload a layout reference image in the same message**. The recommended reference is `demos/Graph/compgcn/teaser_figure.png`, which the prompt's geometry constraints are written against. Without this image the model has nothing to anchor the layout to and tends to leave panels empty. Override which file is used with `TEASER_TEMPLATE_REFERENCE_PNG=path/to/your_template.png` in `.env`.
-
-</details>
-
-**Semantic Scholar related-work retrieval (on by default).** The positioning stage uses Semantic Scholar for objective related-work neighbors unless `SEMANTIC_SCHOLAR_ENABLED=false` is set. Set `SEMANTIC_SCHOLAR_API_KEY` to avoid rate limits during positioning retrieval. Free key at <https://www.semanticscholar.org/product/api>. Disable it for one run with `--disable-semantic-scholar`.
-
-**Agent `paper_search/read_paper` tools (on by default).** FactReview lets the review agent run claim-driven literature searches and requires a `read_paper` deep-read pass after effective search results before writing Technical Positioning. Set `PAPER_SEARCH_ENABLED=false` for manuscript/Semantic-Scholar-only runs. Available providers include `arxiv` (no key), `semantic_scholar`, `openalex`, and `remote`. The `semantic_scholar` provider reuses `SEMANTIC_SCHOLAR_API_KEY`, and `openalex` can use `OPENALEX_API_KEY` if set. `remote` keeps compatibility with advanced `/pasa/search` services. When `read_paper` is called without `PAPER_READ_BASE_URL`, FactReview uses a built-in arXiv PDF full-text fallback; set `PAPER_READ_BASE_URL` only if you run a stronger compatible reader service.
-
-For OpenAlex, local MinerU fallback, agent-tracing knobs, and other rarely-touched variables see [Advanced Configuration](#advanced-configuration).
-
-## CLI Reference
-
-Full default pipeline on a local PDF:
+## 前端开发
 
 ```bash
-python scripts/execute_review_pipeline.py path/to/paper.pdf --paper-key my_paper
+cd web/peerassist-workspace
+npm install
+npm run dev
 ```
 
-You can also pass an arXiv URL — abstract links are normalized to the PDF download:
+Vite 开发服务会代理以下路径到 `http://127.0.0.1:8766`：
+
+- `/api`
+- `/paper.pdf`
+- `/legacy`
+
+生产构建：
 
 ```bash
-python scripts/execute_review_pipeline.py https://arxiv.org/abs/1911.03082 --paper-key compgcn
+cd web/peerassist-workspace
+npm run build
 ```
 
-When the input is an arXiv link, FactReview auto-derives a publication-date cutoff (`YYYY-MM`) from the arXiv identifier so positioning retrieval only considers prior work. Override with `--cutoff-date YYYY[-MM[-DD]]`, or disable entirely with `--no-cutoff`. Local PDFs default to no cutoff unless `--cutoff-date` is supplied.
+构建产物写入 `web/peerassist-workspace/dist`。后端服务会将这些文件以 `/workspace/` 静态路径提供，访问 `/`、`/paper`、`/agent` 等路径时加载同一个前端应用。
 
-`refcheck` and `execution` are off by default. Enable code execution (Docker daemon required, no extra Python deps):
+## 审稿流程
+
+1. 打开公网服务或本地服务，进入“论文阅读”窗口。
+2. 在 PDF 中阅读原文，使用缩放、翻页和文字选择定位需要审稿的段落。
+3. 选择 PDF 文字后，可提交为人工关注点，也可作为“全篇审稿”的额外上下文。
+4. 点击“全篇审稿”，系统读取证据台账、确定性核查、多代理结果和选中文本，调用模型生成审稿草稿。
+5. 在“审稿草稿预览”查看模型生成内容；实时数据流只显示阶段状态。
+6. 在“证据队列”逐条检查 concern、证据来源、严重度和建议动作。
+7. 在“人工确认”里确认、改写、降级、删除或标记待定。
+8. 在“工具追踪”查看 MCP/Skills/确定性核查/代理调用记录。
+9. 在“产物导出”复制报告、队列、追踪日志等产物路径。
+
+## API 速查
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/bootstrap` | 前端启动所需完整状态 |
+| `GET` | `/api/state` | 当前确认队列、追踪事件、产物路径和统计信息 |
+| `GET` | `/api/events` | SSE 事件流，包含 state、heartbeat、done |
+| `POST` | `/api/agent-review` | 触发智能审稿 |
+| `POST` | `/api/manual-concern` | 将 PDF 选中文本保存为人工 concern |
+| `POST` | `/api/decision` | 写入人工确认动作 |
+| `GET` | `/paper.pdf` | 返回当前 run 的原始 PDF |
+
+## 人工确认 CLI
+
+查看确认状态：
 
 ```bash
-python scripts/execute_review_pipeline.py path/to/paper.pdf --run-execution
+PYTHONPATH=src .venv/bin/python -m peerassist.confirmation_cli \
+  --run-dir runs/arxiv_real_data/runs/arxiv_2607_08522_v1 \
+  --state
 ```
 
-Enable RefCopilot inside the pipeline:
+提交确认动作：
 
 ```bash
-pip install -e ".[refcheck]"
-python scripts/execute_review_pipeline.py path/to/paper.pdf --enable-refcheck
+PYTHONPATH=src .venv/bin/python -m peerassist.confirmation_cli \
+  --run-dir runs/arxiv_real_data/runs/arxiv_2607_08522_v1 \
+  --paper-id arxiv_2607_08522_v1 \
+  --concern-id "<concern-id>" \
+  --action confirm \
+  --timestamp "2026-07-11T12:00:00+08:00" \
+  --reviewer-id "local-reviewer"
 ```
 
-Or globally via `FACTREVIEW_ENABLE_REFCHECK=true`. The full result lands in `stages/fact_generation/refcheck/reference_check.json`; the Markdown summary appended to `final_review.md` lists fabricated references only. For the complete breakdown, run RefCopilot's standalone CLI or read the JSON directly. The report sub-stage also writes `final_review_clean.md` (without the refcheck section) for the teaser sub-stage.
+可用动作：
 
-### Flags
+| action | 含义 |
+| --- | --- |
+| `confirm` | 接受该 concern |
+| `rewrite` | 人工改写 concern |
+| `downgrade` | 降低严重度或降为次要建议 |
+| `delete` | 删除不成立或无证据支撑的 concern |
+| `mark_pending` | 暂不决定，后续复核 |
 
-| Flag | Default | Notes |
-|---|---|---|
-| `--llm-provider` | `openai-codex` | Switches the LLM provider. Mirrors to `MODEL_PROVIDER`. |
-| `--llm-model` | provider default | Mirrors to `AGENT_MODEL`, `EXECUTION_OPENAI_MODEL`, and `OPENAI_CODEX_MODEL` (when the provider is Codex). |
-| `--mineru-api-token` | from `.env` | One-off override for `MINERU_API_TOKEN`. |
-| `--gemini-api-key` | from `.env` | One-off override for `GEMINI_API_KEY`. |
-| `--teaser-mode` | `auto` | `auto` = use Gemini when `GEMINI_API_KEY` is set, otherwise prompt-only. `prompt` = always prompt-only. `api` = always attempt the Gemini image API. |
-| `--disable-semantic-scholar` | off | Disable Semantic Scholar objective related-work retrieval for this run. Equivalent to setting `SEMANTIC_SCHOLAR_ENABLED=false` before loading settings. |
-| `--enable-refcheck` | off | Run RefCopilot as the refcheck stage. |
-| `--run-execution` | off | Enables the code-execution stage. Requires Docker. |
-| `--max-attempts` | `5` | Max iterations of the execution stage's `judge → fix` loop. |
-| `--no-pdf-extract` | off | Skip MinerU re-extraction inside the execution `prepare` node when the parse stage already produced the snapshot. |
-| `--reuse-job-id` | – | Reuse a prior agent-runtime job, skipping the parse-stage agent run. Accepts either an absolute path to a `runtime/jobs/<id>` directory (taken as-is) or a bare job id (looked up under the current run dir, then under `<run-root>/**/runtime/jobs/<id>`). Useful for re-rendering the report after a downstream-stage tweak without paying the parse cost again. |
-| `--run-root` | `runs` | Override the root output directory. |
-| `--cutoff-date` | auto | Inclusive publication-date cutoff for positioning retrieval, as `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`. When omitted, an arXiv URL/ID is used to auto-derive `YYYY-MM` from the arXiv identifier; for non-arXiv inputs no cutoff is applied. Both Semantic Scholar (server-side `year=` filter) and the agent's `paper_search` calls (client-side filter) are constrained to papers at or before the cutoff, so the agent does not penalise the manuscript for not citing later work. |
-| `--no-cutoff` | off | Disable the publication-date cutoff entirely (overrides `--cutoff-date` and arXiv auto-derivation). Useful for analysing how the paper compares against later work. |
+## 产物位置
 
-### Single-Stage Reruns
-
-Each stage has a standalone script that reads the same per-run layout. `parse` takes the original PDF (because the bridge state may not exist yet); the rest work off the run dir alone:
-
-```bash
-python scripts/execute_stage_parse.py          path/to/paper.pdf --run-dir runs/<run>
-python scripts/execute_stage_refcheck.py       --run-dir runs/<run>
-python scripts/execute_stage_positioning.py    --run-dir runs/<run>
-python scripts/execute_stage_execution.py      --run-dir runs/<run>
-python scripts/execute_stage_report.py         --run-dir runs/<run>
-python scripts/execute_stage_teaser.py         --run-dir runs/<run>
-```
-
-### Outputs
-
-Each run writes to `runs/<paper_key>_<timestamp>/`. Primary artifacts:
-
-- `full_pipeline_summary.json` — per-stage status, error reasons, and output paths.
-- `inputs/source_pdf/` — copy of the input paper PDF.
-- `runtime/jobs/<job_id>/` — raw runtime job state, MinerU output, prompts, and agent traces.
-- `stages/preprocessing/parse/paper.json` — parse-stage outputs and bridge state.
-- `stages/fact_generation/refcheck/` — reference check report (only when `--enable-refcheck`).
-- `stages/fact_generation/positioning/` — literature neighbours and design-axis table.
-- `stages/fact_generation/execution/current/` — in-place workspace for the latest execution attempt; the prior attempt is archived alongside as `current.<timestamp>` (only when `--run-execution`).
-- `stages/fact_generation/execution/history/` — per-attempt orchestrator outputs (only when `--run-execution`).
-- `stages/review/report/final_review.{json,md,pdf}` — **the headline review.**
-- `stages/review/report/final_review_clean.md` — same review without the refcheck section, used by the teaser.
-- `stages/review/teaser/teaser_figure_prompt.txt` — teaser figure prompt.
-- `stages/review/teaser/teaser_figure.png` — teaser image (only when Gemini is enabled).
-
-`workspace/`, `logs/`, and `debug/` are intermediate; you usually do not need to look at them.
-
-## Pipeline Architecture
-
-<p align="center">
-  <img src="overview.png" alt="FactReview pipeline overview" width="800">
-</p>
-
-The pipeline runs six sub-stages, grouped into three phases. `refcheck` and `execution` are skipped by default.
+当前演示 run 的 PeerAssist 产物位于：
 
 ```text
-preprocessing                fact_generation                        review
-parse → refcheck? → positioning → execution? → report → teaser
+runs/arxiv_real_data/runs/arxiv_2607_08522_v1/stages/peerassist/
 ```
 
-- **parse** — PDF → structured `Paper` (MinerU cloud).
-- **refcheck** — bibliography validation via [RefCopilot](RefCopilot/) (off by default; `--enable-refcheck`).
-- **positioning** — neighbour papers, design axes, novelty verdict.
-- **execution** — optional Docker-based code-running stage (off by default; `--run-execution`).
-- **report** — synthesises the final review Markdown / PDF, extracts reviewer-salient claims, and runs the claim audit.
-- **teaser** — teaser figure prompt and (optionally) image.
+常用文件：
 
-## Troubleshooting
+| 文件 | 说明 |
+| --- | --- |
+| `evidence_ledger.json` | 证据台账 |
+| `deterministic_checks.json` | 确定性核查结果 |
+| `agent_results.json` | 多代理审稿结果 |
+| `peerassist_concerns.json` | 系统生成的审稿关注点 |
+| `confirmation_review_queue.json` | 待人工确认队列 |
+| `human_confirmations.json` | 人工确认动作 |
+| `tool_trace.jsonl` | 工具调用追踪 |
+| `agent_review_draft.md` | 模型生成的审稿草稿 |
+| `peerassist_report.zh.md` | 中文审稿报告 |
 
-- **`codex login` fails or is not on PATH** — install OpenAI's Codex CLI (`npm install -g @openai/codex`), then rerun `codex login` and pick the ChatGPT sign-in flow.
-- **`MINERU_API_TOKEN` missing** — the parse stage will raise on the first run. Get a token from <https://mineru.net> (free tier is sufficient for most papers) and set it in `.env` or pass `--mineru-api-token`.
-- **`--enable-refcheck` errors with missing deps** — install with `pip install -e ".[refcheck]"`.
-- **Positioning stage is slow or returns sparse results** — unauthenticated Semantic Scholar requests are rate-limited. Set `SEMANTIC_SCHOLAR_API_KEY` in `.env` (free key from <https://www.semanticscholar.org/product/api>).
-- **Teaser stage skips silently / no `teaser_figure.png`** — `GEMINI_API_KEY` is unset (this is the default). The prompt is still written to `stages/review/teaser/teaser_figure_prompt.txt` and copied to your clipboard; paste it into the Gemini web app to generate the image manually.
+## 飞书同步
 
-## Advanced Configuration
+飞书同步文档固定在：
 
-Less common environment variables — set in `.env` or via the shell. `.env.example` is the authoritative list; the table below covers the ones most users will touch.
+- <https://my.feishu.cn/docx/XuVIdkaGgoykehxox9Kc3Qnhnw2>
 
-| Variable | Purpose |
-|---|---|
-| `FACTREVIEW_ENABLE_REFCHECK` | Enable reference checking globally (equivalent to the `--enable-refcheck` flag). |
-| `FACTREVIEW_EXECUTION_ENABLE_REFCHECK` | Enable a refcheck sweep *inside* the execution stage's refcheck node. Independent from the global gate above. |
-| `OPENALEX_API_KEY` | Optional OpenAlex API key. When set, OpenAlex is queried as a fourth cross-check signal in RefCopilot and used by `PAPER_SEARCH_PROVIDER=openalex`; when empty, OpenAlex paper search still works unauthenticated. Free key at <https://openalex.org/settings/api>. |
-| `MINERU_BASE_URL` | Override the MinerU cloud API endpoint (default: `https://mineru.net/api/v4`). |
-| `MINERU_ALLOW_LOCAL_FALLBACK` | Set to `true` to let the execution stage's `prepare` node fall back to the local `mineru` CLI when the cloud snapshot is unavailable. |
-| `MINERU_LOCAL_BACKEND` / `MINERU_LOCAL_DEVICE` / `MINERU_LOCAL_SOURCE` | Tune the local `mineru` CLI's pipeline backend, device, and source mirror. Only consulted when `MINERU_ALLOW_LOCAL_FALLBACK=true` and a local MinerU install is present. |
-| `OPENAI_AGENTS_DISABLE_TRACING` | Set to `0` to enable the openai-agents SDK trace exporter. Disabled (`1`) by default to avoid POSTing traces to the Agents tracing endpoint. |
-| `TEASER_USE_GEMINI` | Force prompt-only teaser output (`false`) even when a Gemini key is configured. Equivalent to `--teaser-mode prompt`. |
-| `OPENAI_CODEX_BASE_URL` | Point Codex at a different Codex-compatible endpoint (default: `https://chatgpt.com/backend-api/codex`). |
-| `SEMANTIC_SCHOLAR_ENABLED` | Enable or disable Semantic Scholar objective related-work retrieval. Defaults to `true`; set `false` to skip it persistently. |
-| `SEMANTIC_SCHOLAR_API_KEY` | Recommended. Free API key from [Semantic Scholar](https://www.semanticscholar.org/product/api) for the positioning stage and `PAPER_SEARCH_PROVIDER=semantic_scholar`. Without it, unauthenticated requests may be rate-limited. |
-| `PAPER_SEARCH_ENABLED` | Enable the agent `paper_search` tool. Defaults to `true`; set `false` to force manuscript/Semantic-Scholar-only runs. |
-| `PAPER_SEARCH_PROVIDER` | Retrieval backend for `paper_search`: `arxiv` (zero-key), `semantic_scholar`, `openalex`, or `remote`. |
-| `PAPER_SEARCH_BASE_URL` / `PAPER_SEARCH_ENDPOINT` | Only needed for `PAPER_SEARCH_PROVIDER=remote`; points to a compatible `/pasa/search` service. |
-| `PAPER_SEARCH_API_KEY` / `PAPER_SEARCH_HEALTH_ENDPOINT` | Optional bearer token and health endpoint for `remote` paper search. Default health endpoint: `/health`. |
-| `PAPER_READ_BASE_URL` / `PAPER_READ_ENDPOINT` | Optional external `read_paper` service URL and endpoint. Leave base URL empty to use the built-in arXiv PDF full-text fallback when `read_paper` is called. Default endpoint: `/read`. |
-| `PAPER_READ_API_KEY` | Optional bearer token for the external `read_paper` service. |
+本地固定记录见 `docs/peerassist_lark_sync.md`。同步时只追加新章节，不覆盖整篇文档；不要写入 API Key、GitHub token、模型 key 或审稿私密材料。
 
-## Development
+## GitHub 作者说明
+
+如果 GitHub 页面显示早期提交作者为 `Codex`，原因是当时本机 git author 配置为 `Codex <codex@local>`。仓库已将后续提交作者配置为：
 
 ```bash
-pip install -e ".[runtime,dev]"
-
-ruff check .
-ruff format --check .
-# Narrow CI smoke check (the contracts most likely to break consumers). For a
-# full pass, run `mypy` with no args — it picks up the broader package list
-# from pyproject.toml's [tool.mypy] section.
-mypy src/schemas src/util src/common
-pytest                          # default: ~50 fast tests, gated markers off
-pytest -m e2e                   # report-audit + teaser tail integration
-pytest -m requires_docker       # execution stage (needs Docker daemon)
-pytest -m ""                    # full set, including all gated tests
+git config user.name "moyuan10086"
+git config user.email "moyuan10086@users.noreply.github.com"
 ```
 
-## Paper
+历史提交作者不会自动改变，除非明确进行历史重写。后续新提交会使用上面的 GitHub 用户身份。
 
-Read the paper on <https://arxiv.org/abs/2604.04074> or from the local PDF at [`factreview.pdf`](factreview.pdf).
+## 安全与质量规则
 
-If FactReview helped your work, please ⭐ the repo and cite:
+- 不在代码、文档、飞书、提交信息或 Git remote 中保存真实密钥。
+- 模型输出必须经过人工逐条确认后才能进入最终审稿意见。
+- 无证据新增事实必须删除、改写或标记待定。
+- 审稿意见需要绑定 PDF 原文、证据台账、确定性核查或工具追踪。
+- 只把系统作为审稿辅助，不替代审稿人的最终判断。
 
-```bibtex
-@article{yue2026factreview,
-  title={FactReview: Evidence-Grounded Peer Review with Execution-Based Claim Verification},
-  author={Yue, Ling and Ouyang, Chaoqian and Xu, Hang and Huang, Ruijun and Liu, Yuchen and Zheng, Libin and Liu, Wei and Pan, Shaowu and Di, Shimin and Zhang, Min-Ling},
-  journal={arXiv preprint arXiv:2604.04074},
-  year={2026}
-}
-```
+## 代码底座
 
-## Star History
+PeerAssist 基于 FactReview 扩展。FactReview 原始目标是为机器学习论文生成 evidence-grounded review，并提供参考文献核查、claim audit、实验复现与报告生成能力。PeerAssist 在此基础上增加了中文审稿工作台、PDF-first 交互、多代理审稿入口、人工确认队列和可追溯工具调用记录。
 
-[![Star History Chart](https://api.star-history.com/svg?repos=defense-seu/factreview&type=timeline&legend=top-left)](https://www.star-history.com/#defense-seu/factreview&type=timeline&legend=top-left)
+原始项目与论文：
 
-## License
-
-AGPL-3.0-only.
+- FactReview GitHub：<https://github.com/DEFENSE-SEU/FactReview>
+- FactReview arXiv：<https://arxiv.org/abs/2604.04074>
