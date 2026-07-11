@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -47,6 +48,7 @@ _REFERENCE_ONLY_STATUSES = frozenset(
         CitationFindingStatus.DUPLICATE_REFERENCE_METADATA,
     }
 )
+_NUMBERED_REFERENCE_PREFIX_RE = re.compile(r"^\s*\[\s*(?P<number>\d+)\s*\]")
 
 
 class CitationAuditIntegrityError(Exception):
@@ -114,10 +116,7 @@ def build_citation_audit(
     ordered_records = sorted(records, key=lambda item: item.id)
     ordered_links = sorted(links, key=lambda item: item.id)
     ordered_verifications = sorted(selected_verifications, key=lambda item: item.id)
-    verification_by_record = {item.reference_record_id: item for item in ordered_verifications}
-    findings = _link_findings(ordered_links, verification_by_record)
-    findings.extend(_reference_only_findings(ordered_records, ordered_links))
-    findings.sort(key=lambda item: item.id)
+    findings = _expected_findings(ordered_records, ordered_links, ordered_verifications)
     return CitationAudit(
         schema_version="peerassist.citation_audit.v1",
         paper_id=paper_id,
@@ -146,8 +145,10 @@ def validate_citation_audit(
     links_by_id = _unique_index(audit.links, "duplicate_link_id")
     verifications_by_id = _unique_index(audit.verifications, "duplicate_verification_id")
     _unique_index(audit.findings, "duplicate_finding_id")
+    _selected_verifications_by_record(audit.verifications)
 
     for record in audit.records:
+        _validate_distinct_ids(record.source_evidence_ids)
         for evidence_id in record.source_evidence_ids:
             evidence = evidence_by_id.get(evidence_id)
             if evidence is None:
@@ -156,6 +157,10 @@ def validate_citation_audit(
                 _fail("inconsistent_reference_chain")
 
     for citation_link in audit.links:
+        _validate_distinct_ids(citation_link.reference_record_ids)
+        _validate_distinct_ids(citation_link.reference_evidence_ids)
+        if citation_link.status is CitationLinkStatus.AMBIGUOUS and len(set(citation_link.reference_record_ids)) < 2:
+            _fail("inconsistent_link_chain")
         mention = evidence_by_id.get(citation_link.mention_evidence_id)
         if mention is None:
             _fail("dangling_evidence_id")
@@ -174,6 +179,8 @@ def validate_citation_audit(
 
     _validate_verification_provenance_uniqueness(audit.verifications)
     for verification in audit.verifications:
+        if verification.match is not None:
+            _validate_distinct_ids(verification.match.candidate_ids)
         if verification.reference_record_id not in records_by_id:
             _fail("dangling_reference_id")
         if verification.source != verification.adapter.name:
@@ -188,6 +195,7 @@ def validate_citation_audit(
             links_by_id=links_by_id,
             verifications_by_id=verifications_by_id,
         )
+    _validate_finding_set(audit, _expected_findings(audit.records, audit.links, audit.verifications))
     _validate_coverage(audit, ledger)
 
 
@@ -246,6 +254,25 @@ def _link_findings(
     return findings
 
 
+def _expected_findings(
+    records: Sequence[ReferenceRecord], links: Sequence[CitationLink], verifications: Sequence[CitationVerification]
+) -> list[CitationAuditFinding]:
+    findings = _link_findings(links, _selected_verifications_by_record(verifications))
+    findings.extend(_reference_only_findings(records, links))
+    return sorted(findings, key=lambda item: item.id)
+
+
+def _selected_verifications_by_record(
+    verifications: Iterable[CitationVerification],
+) -> dict[str, CitationVerification]:
+    selected: dict[str, CitationVerification] = {}
+    for verification in verifications:
+        if verification.reference_record_id in selected:
+            _fail("duplicate_reference_verification")
+        selected[verification.reference_record_id] = verification
+    return selected
+
+
 def _finding_for_link(
     citation_link: CitationLink,
     verification: CitationVerification | None,
@@ -294,7 +321,7 @@ def _reference_only_findings(
     for record in records:
         if record.id not in cited_record_ids:
             findings.append(_reference_finding(CitationFindingStatus.UNCITED_REFERENCE, [record]))
-        if not (normalize_doi(record.doi) or normalize_title(record.title) or record.year is not None):
+        if _is_malformed_reference(record):
             findings.append(_reference_finding(CitationFindingStatus.MALFORMED_REFERENCE, [record]))
 
     duplicate_groups: dict[tuple[str, ...], list[ReferenceRecord]] = {}
@@ -409,6 +436,13 @@ def _reference_evidence_ids(records: Iterable[ReferenceRecord]) -> set[str]:
     return {evidence_id for record in records for evidence_id in record.source_evidence_ids}
 
 
+def _is_malformed_reference(record: ReferenceRecord) -> bool:
+    match = _NUMBERED_REFERENCE_PREFIX_RE.match(record.raw_text)
+    has_matching_prefix = match is not None and int(match.group("number")) == record.reference_number
+    has_metadata = bool(normalize_doi(record.doi) or normalize_title(record.title) or record.year is not None)
+    return not has_matching_prefix or not has_metadata
+
+
 def _valid_reference_year(year: int | None) -> bool:
     return year is not None and 0 < year < 10000
 
@@ -481,6 +515,11 @@ def _validate_finding(
     links_by_id: Mapping[str, CitationLink],
     verifications_by_id: Mapping[str, CitationVerification],
 ) -> None:
+    _validate_distinct_ids(finding.citation_link_ids)
+    _validate_distinct_ids(finding.reference_record_ids)
+    _validate_distinct_ids(finding.mention_evidence_ids)
+    _validate_distinct_ids(finding.reference_evidence_ids)
+    _validate_distinct_ids(finding.verification_ids)
     _validate_ids(finding.citation_link_ids, links_by_id, "dangling_link_id")
     _validate_ids(finding.reference_record_ids, records_by_id, "dangling_reference_id")
     _validate_ids(finding.mention_evidence_ids, evidence_by_id, "dangling_evidence_id")
@@ -529,6 +568,11 @@ def _validate_ids(ids: Iterable[str], index: Mapping[str, Any], error_code: str)
         _fail(error_code)
 
 
+def _validate_distinct_ids(ids: Sequence[str]) -> None:
+    if len(ids) != len(set(ids)):
+        _fail("duplicate_trace_id")
+
+
 def _validate_finding_id(
     finding: CitationAuditFinding, verifications_by_id: Mapping[str, CitationVerification]
 ) -> None:
@@ -548,6 +592,39 @@ def _validate_finding_id(
     }
     if finding.id != make_finding_id(finding.status, trace):
         _fail("finding_id_mismatch")
+
+
+def _validate_finding_set(audit: CitationAudit, expected: Sequence[CitationAuditFinding]) -> None:
+    actual_signatures = {
+        _finding_signature(finding, {verification.id: verification for verification in audit.verifications})
+        for finding in audit.findings
+    }
+    expected_signatures = {
+        _finding_signature(finding, {verification.id: verification for verification in audit.verifications})
+        for finding in expected
+    }
+    if actual_signatures != expected_signatures:
+        _fail("finding_set_mismatch")
+
+
+def _finding_signature(
+    finding: CitationAuditFinding, verifications_by_id: Mapping[str, CitationVerification]
+) -> tuple[str, str, str]:
+    differences = [
+        difference
+        for verification_id in finding.verification_ids
+        for difference in verifications_by_id[verification_id].field_differences
+    ]
+    trace = {
+        "citation_link_ids": finding.citation_link_ids,
+        "reference_record_ids": finding.reference_record_ids,
+        "mention_evidence_ids": finding.mention_evidence_ids,
+        "reference_evidence_ids": finding.reference_evidence_ids,
+        "verification_ids": finding.verification_ids,
+        "difference_fields": [difference.field for difference in differences],
+        "difference_rules": [difference.rule for difference in differences],
+    }
+    return finding.id, finding.status.value, _canonical_sort_key(_canonical_trace(trace))
 
 
 def _validate_finding_status(

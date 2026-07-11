@@ -271,6 +271,29 @@ def test_duplicate_reference_metadata_uses_high_similarity_title_and_year() -> N
     assert duplicate.reference_record_ids == ["R-1", "R-2"]
 
 
+@pytest.mark.parametrize(
+    ("raw_text", "reference_number", "malformed"),
+    [
+        ("[2] Alpha Study. 2024.", 1, True),
+        ("Alpha Study. 2024.", 1, True),
+        ("[3] Alpha Study. 2024.", 3, False),
+    ],
+)
+def test_malformed_reference_requires_matching_numbered_prefix(
+    raw_text: str, reference_number: int, malformed: bool
+) -> None:
+    audit = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record(raw_text=raw_text, reference_number=reference_number)],
+        links=[],
+        selected_verifications=[],
+    )
+    statuses = {finding.status for finding in audit.findings}
+    assert (CitationFindingStatus.MALFORMED_REFERENCE in statuses) is malformed
+
+
 def valid_audit(tmp_path: Path):
     selected = verification(tmp_path)
     return build_citation_audit(
@@ -450,6 +473,84 @@ def test_rejects_duplicate_attempt_and_response_artifact_provenance(
     )
     with pytest.raises(CitationAuditIntegrityError, match=error_code):
         validate_citation_audit(audit, ledger(), tmp_path)
+
+
+def test_requires_exactly_one_selected_verification_per_reference_record(tmp_path: Path) -> None:
+    first = verification(tmp_path)
+    second = first.model_copy(update={"id": "V-2", "attempt_id": "attempt-2"})
+    with pytest.raises(CitationAuditIntegrityError, match="duplicate_reference_verification"):
+        build_citation_audit(
+            paper_id="paper-1",
+            parse_version="parse-1",
+            ledger=ledger(),
+            records=[record()],
+            links=[link()],
+            selected_verifications=[first, second],
+        )
+
+    audit = valid_audit(tmp_path / "validate")
+    audit.verifications.append(second)
+    with pytest.raises(CitationAuditIntegrityError, match="duplicate_reference_verification"):
+        validate_citation_audit(audit, ledger(), tmp_path / "validate")
+
+
+def test_requires_complete_regenerated_finding_set(tmp_path: Path) -> None:
+    audit = valid_audit(tmp_path)
+    audit.findings = []
+    audit.coverage["findings"] = 0
+    audit.coverage["findings.verified"] = 0
+    with pytest.raises(CitationAuditIntegrityError, match="finding_set_mismatch"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+    reference_only = build_citation_audit(
+        paper_id="paper-1",
+        parse_version="parse-1",
+        ledger=ledger(),
+        records=[record()],
+        links=[],
+        selected_verifications=[],
+    )
+    reference_only.findings = []
+    reference_only.coverage["findings"] = 0
+    reference_only.coverage["findings.uncited_reference"] = 0
+    with pytest.raises(CitationAuditIntegrityError, match="finding_set_mismatch"):
+        validate_citation_audit(reference_only, ledger(), tmp_path)
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "citation_link_ids",
+        "reference_record_ids",
+        "mention_evidence_ids",
+        "reference_evidence_ids",
+        "verification_ids",
+    ],
+)
+def test_rejects_duplicate_ids_in_finding_trace_lists(tmp_path: Path, attribute: str) -> None:
+    audit = valid_audit(tmp_path)
+    values = getattr(audit.findings[0], attribute)
+    setattr(audit.findings[0], attribute, [values[0], values[0]])
+    with pytest.raises(CitationAuditIntegrityError, match="duplicate_trace_id"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+
+def test_rejects_duplicate_ids_in_links_and_reference_sources(tmp_path: Path) -> None:
+    audit = valid_audit(tmp_path)
+    audit.records[0].source_evidence_ids = ["R-E-1", "R-E-1"]
+    with pytest.raises(CitationAuditIntegrityError, match="duplicate_trace_id"):
+        validate_citation_audit(audit, ledger(), tmp_path)
+
+    audit = valid_audit(tmp_path / "link")
+    audit.links[0].status = CitationLinkStatus.AMBIGUOUS
+    audit.links[0].reference_record_ids = ["R-1", "R-1"]
+    audit.links[0].reference_evidence_ids = ["R-E-1"]
+    audit.findings[0].status = CitationFindingStatus.AMBIGUOUS
+    audit.findings[0].reference_record_ids = ["R-1", "R-1"]
+    audit.findings[0].verification_ids = []
+    audit.findings[0].requires_human_review = True
+    with pytest.raises(CitationAuditIntegrityError, match="duplicate_trace_id"):
+        validate_citation_audit(audit, ledger(), tmp_path / "link")
 
 
 def test_atomic_write_preserves_previous_file_and_publishes_valid(tmp_path: Path) -> None:
