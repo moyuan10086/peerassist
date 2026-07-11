@@ -52,3 +52,7 @@ npm run build
 ## 安全约定
 
 前端只展示模型是否已配置、模型名和 Base URL，不保存或显示真实 API Key。真实密钥只允许通过后端运行时环境变量注入。
+
+## 引用核查数据
+
+工作台从后端状态和报告中消费 `citation_audit_path`、`citation_audit_summary` 以及 concern 的 `metadata.citation_finding_ids`。原始核验响应不会直接嵌入页面状态；界面只显示状态、字段差异、证据定位和受控的产物路径，避免把稿件或外部响应无意扩散到前端日志。

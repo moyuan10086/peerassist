@@ -18,6 +18,7 @@ PeerAssist 是以 [DEFENSE-SEU/FactReview](https://github.com/DEFENSE-SEU/FactRe
 | PDF 原文审稿 | 基于 PDF.js 渲染原始论文，支持翻页、缩放、文字选择和原文定位 |
 | 证据审稿队列 | 将模型/规则发现的 concerns 汇入人工确认队列，逐条处理 |
 | 确定性核查 | 检查统计显著性、数值一致性、百分比/符号/表述冲突等机械错误 |
+| 可追溯引用核查 | 关联正文数字引用与参考文献，保留页码、章节、原句、外部核验尝试和字段差异；证据不足时自动降级为待人工核查 |
 | 多代理评审 | 汇总证据、确定性核查和代理结果，生成可追溯审稿草稿 |
 | MCP/Skills 追踪 | 记录工具调用、状态、产物 ID 和失败事件，便于复盘 |
 | 人工逐条确认 | 支持确认、改写、降级、删除和标记待定，避免无证据事实进入最终意见 |
@@ -32,6 +33,7 @@ PeerAssist 是以 [DEFENSE-SEU/FactReview](https://github.com/DEFENSE-SEU/FactRe
 | `web/peerassist-workspace` | React/Vite 前端源码 |
 | `web/peerassist-workspace/dist` | 前端生产构建产物，由后端挂载到 `/workspace/` |
 | `docs/peerassist_operation_manual.md` | 中文操作手册 |
+| `docs/peerassist_citation_audit.md` | 引用核查数据契约、适配器、状态和降级策略 |
 | `docs/peerassist_lark_sync.md` | 飞书同步文档固定入口和本地同步记录 |
 | `deploy/nginx/peerassist-subdomains.conf` | 子域名/前后端分离部署参考 |
 | `eval/PeerAssist-Eval-v1` | 冻结测试集与评测骨架 |
@@ -193,6 +195,17 @@ git config user.email "moyuan10086@users.noreply.github.com"
 - 无证据新增事实必须删除、改写或标记待定。
 - 审稿意见需要绑定 PDF 原文、证据台账、确定性核查或工具追踪。
 - 只把系统作为审稿辅助，不替代审稿人的最终判断。
+
+## 引用核查产物
+
+运行 PeerAssist 阶段后，引用核查主要产物位于 `stages/peerassist/`：
+
+- `citation_audit.json`：正文引用、参考文献、核验记录和审计 finding 的规范索引。
+- `citation_verifications/attempt-<attempt_id>.json`：实际收到的外部核验响应快照，按 SHA-256 校验且不覆盖历史尝试。
+- `evidence_ledger.json`：新增 `citation` 证据项，保留原句、页码、章节、定位信息和解析器提供的坐标。
+- `confirmation_review_queue.json`：将需要人工处理的引用问题与其他审稿 concern 放入同一确认队列。
+
+第一版支持 `[1]`、`[1, 3-5]` 等数字型正文引用和编号参考文献。作者年份制、撤稿/PubPeer 和“引用是否语义支持主张”仍属于后续能力。`not_found`、`unavailable`、`ambiguous` 或核验失败都不表示引用虚假，只表示需要人工复核。
 
 ## 代码底座
 
