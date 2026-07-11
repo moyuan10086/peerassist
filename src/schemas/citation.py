@@ -122,9 +122,9 @@ class CitationMatch(BaseModel):
 
     method: str
     candidate_count: int = Field(ge=0)
-    selected_candidate_id: str | None = None
-    selection_reason: str = ""
-    candidate_ids: list[str] = Field(default_factory=list)
+    selected_candidate_id: str | None
+    selection_reason: str
+    candidate_ids: list[str]
 
 
 class RawResponseArtifact(BaseModel):
@@ -151,7 +151,7 @@ class CitationVerification(BaseModel):
     source_record: CitationSourceRecord | None = None
     raw_response_artifact: RawResponseArtifact | None = None
     error_code: str = ""
-    observed_metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    observed_metadata: dict[str, JsonValue]
     field_differences: list[CitationFieldDifference] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -203,8 +203,14 @@ class CitationVerification(BaseModel):
                 )
             ):
                 raise ValueError("unavailable verification forbids response, match, and source record")
-        elif status is VerificationStatus.FAILED and not self.error_code:
-            raise ValueError("failed verification requires error_code")
+        elif status is VerificationStatus.FAILED:
+            if not self.error_code:
+                raise ValueError("failed verification requires error_code")
+            response_data_present = (
+                self.match is not None or self.source_record is not None or bool(self.observed_metadata)
+            )
+            if response_data_present and self.raw_response_artifact is None:
+                raise ValueError("failed verification with response data requires raw response artifact")
         return self
 
 
@@ -216,7 +222,7 @@ class UnsupportedCitationMarker(BaseModel):
     raw: str
     start: int = Field(ge=0)
     end: int = Field(ge=0)
-    status: Literal[CitationLinkStatus.UNSUPPORTED_SYNTAX] = CitationLinkStatus.UNSUPPORTED_SYNTAX
+    status: Literal[CitationLinkStatus.UNSUPPORTED_SYNTAX]
     error_code: str
 
     @model_validator(mode="after")
@@ -246,14 +252,14 @@ class CitationAuditFinding(BaseModel):
 
     id: str
     status: CitationFindingStatus
-    severity: CitationFindingSeverity = CitationFindingSeverity.CLARIFICATION_NEEDED
-    citation_link_ids: list[str] = Field(default_factory=list)
-    reference_record_ids: list[str] = Field(default_factory=list)
-    mention_evidence_ids: list[str] = Field(default_factory=list)
-    reference_evidence_ids: list[str] = Field(default_factory=list)
-    verification_ids: list[str] = Field(default_factory=list)
-    message: str = ""
-    requires_human_review: bool = True
+    severity: CitationFindingSeverity
+    citation_link_ids: list[str]
+    reference_record_ids: list[str]
+    mention_evidence_ids: list[str]
+    reference_evidence_ids: list[str]
+    verification_ids: list[str]
+    message: str
+    requires_human_review: bool
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -299,9 +305,9 @@ class CitationAuditFinding(BaseModel):
 class CitationEvidenceResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mentions: list[EvidenceItem] = Field(default_factory=list)
-    references: list[ReferenceRecord] = Field(default_factory=list)
-    links: list[CitationLink] = Field(default_factory=list)
+    mentions: list[EvidenceItem]
+    references: list[ReferenceRecord]
+    links: list[CitationLink]
     unsupported_markers: list[UnsupportedCitationMarker] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -309,7 +315,7 @@ class CitationEvidenceResult(BaseModel):
 class CitationAudit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["peerassist.citation_audit.v1"] = "peerassist.citation_audit.v1"
+    schema_version: Literal["peerassist.citation_audit.v1"]
     paper_id: str
     parse_version: str
     records: list[ReferenceRecord] = Field(default_factory=list)

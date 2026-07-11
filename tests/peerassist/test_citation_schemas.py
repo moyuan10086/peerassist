@@ -15,6 +15,7 @@ from schemas.citation import (
     CitationFindingStatus,
     CitationLink,
     CitationLinkStatus,
+    CitationMatch,
     CitationVerification,
     ReferenceRecord,
     UnsupportedCitationMarker,
@@ -162,6 +163,34 @@ def audit_payload() -> dict[str, Any]:
     }
 
 
+def evidence_result_payload() -> dict[str, Any]:
+    return {
+        "mentions": [
+            {
+                "id": "C-P02-L004-12-15-1",
+                "type": "citation",
+                "text": "[1]",
+            }
+        ],
+        "references": [reference_payload()],
+        "links": [link_payload()],
+        "unsupported_markers": [],
+        "warnings": [],
+    }
+
+
+def unsupported_marker_payload() -> dict[str, Any]:
+    return {
+        "id": "unsupported-P02-L004-1",
+        "source_evidence_id": "P02-L004",
+        "raw": "[5-3]",
+        "start": 1,
+        "end": 6,
+        "status": "unsupported_syntax",
+        "error_code": "descending_range",
+    }
+
+
 def assert_validation_error(
     model: type[Any], payload: dict[str, Any], error_type: str, location: tuple[Any, ...]
 ) -> None:
@@ -199,6 +228,12 @@ def test_citation_audit_rejects_other_schema_versions() -> None:
     payload = audit_payload()
     payload["schema_version"] = "peerassist.citation_audit.v2"
     assert_validation_error(CitationAudit, payload, "literal_error", ("schema_version",))
+
+
+def test_citation_audit_requires_explicit_schema_version() -> None:
+    payload = audit_payload()
+    del payload["schema_version"]
+    assert_validation_error(CitationAudit, payload, "missing", ("schema_version",))
 
 
 @pytest.mark.parametrize("status", [status.value for status in VerificationStatus])
@@ -268,6 +303,31 @@ def test_completed_verification_does_not_require_candidate_summary_ids() -> None
     assert CitationVerification.model_validate(payload).status is VerificationStatus.COMPLETED
 
 
+def test_completed_verification_requires_explicit_observed_metadata() -> None:
+    payload = verification_payload("completed")
+    del payload["observed_metadata"]
+    assert_validation_error(CitationVerification, payload, "missing", ("observed_metadata",))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("match", match_payload()),
+        (
+            "source_record",
+            {"id": "external-0", "url": "https://example.invalid/record"},
+        ),
+        ("observed_metadata", {"title": "A Study"}),
+    ],
+)
+def test_failed_verification_response_data_requires_raw_artifact(field: str, value: Any) -> None:
+    payload = verification_payload("failed")
+    payload["raw_response_artifact"] = None
+    payload[field] = value
+    with pytest.raises(ValidationError, match="failed"):
+        CitationVerification.model_validate(payload)
+
+
 def test_failed_verification_permits_absent_raw_response() -> None:
     payload = verification_payload("failed")
     payload["raw_response_artifact"] = None
@@ -293,6 +353,25 @@ def test_raw_response_artifact_requires_lowercase_sha256(sha256: str) -> None:
 def test_each_finding_status_accepts_its_complete_trace(status: str) -> None:
     finding = CitationAuditFinding.model_validate(finding_payload(status))
     assert finding.status.value == status
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "severity",
+        "citation_link_ids",
+        "reference_record_ids",
+        "mention_evidence_ids",
+        "reference_evidence_ids",
+        "verification_ids",
+        "message",
+        "requires_human_review",
+    ],
+)
+def test_citation_finding_requires_explicit_contract_fields(field: str) -> None:
+    payload = finding_payload()
+    del payload[field]
+    assert_validation_error(CitationAuditFinding, payload, "missing", (field,))
 
 
 @pytest.mark.parametrize(
@@ -423,6 +502,13 @@ def test_citation_link_enforces_record_cardinality(status: str, reference_count:
         CitationLink.model_validate(payload)
 
 
+@pytest.mark.parametrize("reference_number", [0, -1])
+def test_citation_link_reference_number_must_be_positive(reference_number: int) -> None:
+    payload = link_payload()
+    payload["reference_number"] = reference_number
+    assert_validation_error(CitationLink, payload, "greater_than", ("reference_number",))
+
+
 def test_missing_reference_link_permits_no_reference_records() -> None:
     link = CitationLink.model_validate(link_payload("missing_reference", reference_count=0))
     assert link.reference_record_ids == []
@@ -439,48 +525,61 @@ def test_unsupported_syntax_is_not_a_citation_link() -> None:
     [(-1, 2), (1, -1), (4, 3)],
 )
 def test_unsupported_marker_rejects_invalid_offsets(start: int, end: int) -> None:
-    payload = {
-        "id": "unsupported-P02-L004-1",
-        "source_evidence_id": "P02-L004",
-        "raw": "[5-3]",
-        "start": start,
-        "end": end,
-        "status": "unsupported_syntax",
-        "error_code": "descending_range",
-    }
+    payload = unsupported_marker_payload()
+    payload["start"] = start
+    payload["end"] = end
     with pytest.raises(ValidationError):
         UnsupportedCitationMarker.model_validate(payload)
 
 
 def test_unsupported_marker_status_is_fixed() -> None:
-    payload = {
-        "id": "unsupported-P02-L004-1",
-        "source_evidence_id": "P02-L004",
-        "raw": "[5-3]",
-        "start": 1,
-        "end": 6,
-        "status": "linked",
-        "error_code": "descending_range",
-    }
+    payload = unsupported_marker_payload()
+    payload["status"] = "linked"
     assert_validation_error(UnsupportedCitationMarker, payload, "literal_error", ("status",))
 
 
+def test_unsupported_marker_requires_explicit_status() -> None:
+    payload = unsupported_marker_payload()
+    del payload["status"]
+    assert_validation_error(UnsupportedCitationMarker, payload, "missing", ("status",))
+
+
 def test_citation_evidence_result_accepts_evidence_items() -> None:
-    result = CitationEvidenceResult.model_validate(
-        {
-            "mentions": [
-                {
-                    "id": "C-P02-L004-12-15-1",
-                    "type": "citation",
-                    "text": "[1]",
-                }
-            ],
-            "references": [reference_payload()],
-            "links": [link_payload()],
-        }
-    )
+    result = CitationEvidenceResult.model_validate(evidence_result_payload())
     assert result.mentions[0].type is EvidenceType.CITATION
     assert result.unsupported_markers == []
+
+
+@pytest.mark.parametrize("field", ["mentions", "references", "links"])
+def test_citation_evidence_result_requires_primary_collections(field: str) -> None:
+    payload = evidence_result_payload()
+    del payload[field]
+    assert_validation_error(CitationEvidenceResult, payload, "missing", (field,))
+
+
+@pytest.mark.parametrize("field", ["selected_candidate_id", "selection_reason", "candidate_ids"])
+def test_citation_match_requires_explicit_selection_fields(field: str) -> None:
+    payload = match_payload()
+    del payload[field]
+    assert_validation_error(CitationMatch, payload, "missing", (field,))
+
+
+@pytest.mark.parametrize("candidate_count", [-1, -2])
+def test_citation_match_candidate_count_must_be_nonnegative(
+    candidate_count: int,
+) -> None:
+    payload = match_payload()
+    payload["candidate_count"] = candidate_count
+    assert_validation_error(CitationMatch, payload, "greater_than_equal", ("candidate_count",))
+
+
+@pytest.mark.parametrize("attempt_number", [0, -1])
+def test_citation_verification_attempt_number_must_be_positive(
+    attempt_number: int,
+) -> None:
+    payload = verification_payload()
+    payload["attempt_number"] = attempt_number
+    assert_validation_error(CitationVerification, payload, "greater_than", ("attempt_number",))
 
 
 def test_citation_owned_enums_reject_unknown_values() -> None:
