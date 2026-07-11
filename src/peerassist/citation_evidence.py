@@ -21,6 +21,7 @@ NUMBERED_REFERENCE_RE = re.compile(r"^\[\s*(?P<number>\d+)\s*\]\s*(?P<body>.*)$"
 DOI_RE = re.compile(r"\bdoi\s*:\s*(?P<doi>10\.\d{1,9}/[-._;()/:A-Z0-9]+)", re.I)
 YEAR_RE = re.compile(r"\b(?P<year>(?:19|20)\d{2})\b")
 CI_PREFIX_RE = re.compile(r"(?:\b\d+(?:\.\d+)?%\s*)?\bCI\s*$", re.I)
+REFERENCE_SECTIONS = frozenset({"references", "bibliography", "参考文献"})
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,10 @@ def parse_numeric_citation(raw: str, *, max_range: int = 100) -> NumericCitation
 
 
 def _is_citation_source(item: EvidenceItem) -> bool:
-    return item.type in {EvidenceType.TEXT_SPAN, EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE}
+    return (
+        item.section.strip().casefold() not in REFERENCE_SECTIONS
+        and item.type in {EvidenceType.TEXT_SPAN, EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE}
+    )
 
 
 def _citation_confidence(item: EvidenceItem) -> float:
@@ -133,7 +137,7 @@ def _reference_groups(items: list[EvidenceItem]) -> list[tuple[int, str, list[st
             current = (int(match.group("number")), item.text.strip(), [item.id])
             groups.append(current)
             continue
-        if current is not None and item.section.strip().casefold() in {"references", "bibliography", "参考文献"}:
+        if current is not None and item.section.strip().casefold() in REFERENCE_SECTIONS:
             continuation = item.text.strip()
             if continuation:
                 number, raw, source_ids = current
@@ -151,6 +155,18 @@ def _conservative_title(raw: str, number: int, year: int | None) -> str:
     return body
 
 
+def _trim_doi_sentence_punctuation(doi: str) -> str:
+    """Remove terminal prose punctuation while retaining balanced DOI delimiters."""
+    trimmed = doi.rstrip(".,;:")
+    while trimmed.endswith(")"):
+        opening = trimmed.count("(")
+        closing = trimmed.count(")")
+        if closing <= opening:
+            break
+        trimmed = trimmed[:-1].rstrip(".,;:")
+    return trimmed
+
+
 def build_reference_records(items: list[EvidenceItem]) -> list[ReferenceRecord]:
     """Build stable records, retaining different text under the same number."""
     records_by_key: dict[tuple[int, str], ReferenceRecord] = {}
@@ -162,7 +178,7 @@ def build_reference_records(items: list[EvidenceItem]) -> list[ReferenceRecord]:
             continue
         doi_match = DOI_RE.search(raw)
         year_match = YEAR_RE.search(raw)
-        doi = doi_match.group("doi").rstrip(".,;)").lower() if doi_match else ""
+        doi = _trim_doi_sentence_punctuation(doi_match.group("doi")).lower() if doi_match else ""
         year = int(year_match.group("year")) if year_match else None
         records_by_key[key] = ReferenceRecord(
             id=_reference_id(number, raw),

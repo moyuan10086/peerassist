@@ -132,6 +132,24 @@ def test_excludes_reference_section_and_confidence_interval_brackets() -> None:
     assert len(result.references) == 1
 
 
+def test_excludes_text_span_citations_in_reference_section_but_keeps_continuation() -> None:
+    reference = evidence("P08-L014", EvidenceType.REFERENCE, "[1] Alpha Study.", page=8, section="References")
+    continuation = evidence(
+        "P08-L015",
+        EvidenceType.TEXT_SPAN,
+        "Journal discussion cites [9]. 2020.",
+        page=8,
+        section="References",
+    )
+
+    result = extract_citation_evidence(ledger_with(reference, continuation))
+
+    assert result.mentions == []
+    assert result.links == []
+    assert result.references[0].raw_text == "[1] Alpha Study. Journal discussion cites [9]. 2020."
+    assert result.references[0].source_evidence_ids == ["P08-L014", "P08-L015"]
+
+
 @pytest.mark.parametrize("item_type", [EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE])
 def test_caption_and_table_mentions_preserve_source_type_at_lower_confidence(item_type: EvidenceType) -> None:
     source = evidence("P02-L004", item_type, "Figure 1: Adapted from [2].")
@@ -154,6 +172,20 @@ def test_build_reference_records_uses_stable_hash_and_aggregates_identical_dupli
     assert records[0].doi == "10.1/a"
     assert records[0].year == 2020
     assert records[0].title == "Alpha Study"
+
+
+@pytest.mark.parametrize(
+    ("raw", "doi"),
+    [
+        ("[1] Alpha Study. doi:10.1000/foo(bar)", "10.1000/foo(bar)"),
+        ("[1] Alpha Study. doi:10.1000/foo(bar).", "10.1000/foo(bar)"),
+        ("[1] Alpha Study. doi:10.1000/foo;", "10.1000/foo"),
+    ],
+)
+def test_build_reference_records_trims_only_unbalanced_doi_sentence_punctuation(raw: str, doi: str) -> None:
+    record = build_reference_records([evidence("P08-L014", EvidenceType.REFERENCE, raw, section="References")])[0]
+
+    assert record.doi == doi
 
 
 def test_build_reference_records_groups_multiline_continuations() -> None:
