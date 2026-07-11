@@ -125,6 +125,7 @@ class CitationMatch(BaseModel):
     selected_candidate_id: str | None
     selection_reason: str
     candidate_ids: list[str]
+    match_score: float | None = Field(default=None, ge=0, le=1)
 
 
 class RawResponseArtifact(BaseModel):
@@ -151,7 +152,7 @@ class CitationVerification(BaseModel):
     source_record: CitationSourceRecord | None = None
     raw_response_artifact: RawResponseArtifact | None = None
     error_code: str = ""
-    observed_metadata: dict[str, JsonValue]
+    observed_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     field_differences: list[CitationFieldDifference] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -168,6 +169,12 @@ class CitationVerification(BaseModel):
                 raise ValueError(
                     "completed verification requires one selected match, source record, and raw response artifact"
                 )
+            if "observed_metadata" not in self.model_fields_set:
+                raise ValueError("completed verification requires explicit observed_metadata")
+            if self.match.method == "title_similarity" and (
+                self.match.match_score is None or self.match.match_score < 0.95
+            ):
+                raise ValueError("completed title_similarity verification requires match_score >= 0.95")
         elif status is VerificationStatus.NOT_FOUND:
             if (
                 self.raw_response_artifact is None
@@ -191,6 +198,14 @@ class CitationVerification(BaseModel):
                 raise ValueError(
                     "ambiguous verification requires candidate evidence and raw response without authoritative selected/source record"
                 )
+            if self.match.candidate_count == 1 and (
+                self.match.method != "title_similarity"
+                or self.match.match_score is None
+                or not 0.85 <= self.match.match_score < 0.95
+            ):
+                raise ValueError(
+                    "ambiguous one-candidate verification requires title_similarity with 0.85 <= match_score < 0.95"
+                )
         elif status is VerificationStatus.UNAVAILABLE:
             if not self.error_code:
                 raise ValueError("unavailable verification requires error_code")
@@ -207,7 +222,10 @@ class CitationVerification(BaseModel):
             if not self.error_code:
                 raise ValueError("failed verification requires error_code")
             response_data_present = (
-                self.match is not None or self.source_record is not None or bool(self.observed_metadata)
+                self.match is not None
+                or self.source_record is not None
+                or bool(self.observed_metadata)
+                or bool(self.field_differences)
             )
             if response_data_present and self.raw_response_artifact is None:
                 raise ValueError("failed verification with response data requires raw response artifact")

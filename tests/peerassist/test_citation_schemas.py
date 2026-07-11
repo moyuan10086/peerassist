@@ -102,21 +102,25 @@ def verification_payload(status: str = "completed") -> dict[str, Any]:
         payload["match"] = match_payload(0)
         payload["source_record"] = None
         payload["observed_metadata"] = {}
+        payload["field_differences"] = []
     elif status == "ambiguous":
         payload["match"] = match_payload(2)
         payload["source_record"] = None
         payload["observed_metadata"] = {}
+        payload["field_differences"] = []
     elif status == "unavailable":
         payload["match"] = None
         payload["source_record"] = None
         payload["raw_response_artifact"] = None
         payload["error_code"] = "adapter_unavailable"
         payload["observed_metadata"] = {}
+        payload["field_differences"] = []
     elif status == "failed":
         payload["match"] = None
         payload["source_record"] = None
         payload["error_code"] = "adapter_schema_error"
         payload["observed_metadata"] = {}
+        payload["field_differences"] = []
     return payload
 
 
@@ -287,14 +291,89 @@ def test_verification_status_enforces_match_shape(
         CitationVerification.model_validate(payload)
 
 
-def test_ambiguous_verification_permits_one_non_authoritative_candidate() -> None:
+@pytest.mark.parametrize("match_score", [0.85, 0.949999])
+def test_ambiguous_verification_permits_one_title_similarity_candidate(
+    match_score: float,
+) -> None:
     payload = verification_payload("ambiguous")
     payload["match"] = match_payload(1)
+    payload["match"]["method"] = "title_similarity"
     payload["match"]["selected_candidate_id"] = None
     payload["match"]["selection_reason"] = "title similarity below unique threshold"
+    payload["match"]["match_score"] = match_score
     verification = CitationVerification.model_validate(payload)
     assert verification.match is not None
-    assert verification.match.candidate_count == 1
+    assert verification.match.match_score == match_score
+
+
+@pytest.mark.parametrize(
+    ("method", "match_score"),
+    [
+        ("doi_exact", 0.9),
+        ("title_similarity", None),
+        ("title_similarity", 0.849999),
+        ("title_similarity", 0.95),
+    ],
+)
+def test_one_candidate_ambiguous_requires_title_similarity_band(
+    method: str, match_score: float | None
+) -> None:
+    payload = verification_payload("ambiguous")
+    payload["match"] = match_payload(1)
+    payload["match"]["method"] = method
+    payload["match"]["selected_candidate_id"] = None
+    payload["match"]["match_score"] = match_score
+    with pytest.raises(ValidationError, match="ambiguous"):
+        CitationVerification.model_validate(payload)
+
+
+def test_one_candidate_ambiguous_forbids_selected_candidate() -> None:
+    payload = verification_payload("ambiguous")
+    payload["match"] = match_payload(1)
+    payload["match"]["method"] = "title_similarity"
+    payload["match"]["match_score"] = 0.9
+    with pytest.raises(ValidationError, match="ambiguous"):
+        CitationVerification.model_validate(payload)
+
+
+def test_multiple_candidate_ambiguous_may_omit_match_score() -> None:
+    payload = verification_payload("ambiguous")
+    assert payload["match"]["candidate_count"] == 2
+    assert "match_score" not in payload["match"]
+    verification = CitationVerification.model_validate(payload)
+    assert verification.match is not None
+    assert verification.match.match_score is None
+
+
+@pytest.mark.parametrize("match_score", [0.95, 1.0])
+def test_completed_title_similarity_requires_unique_score(
+    match_score: float,
+) -> None:
+    payload = verification_payload("completed")
+    payload["match"]["method"] = "title_similarity"
+    payload["match"]["match_score"] = match_score
+    verification = CitationVerification.model_validate(payload)
+    assert verification.match is not None
+    assert verification.match.match_score == match_score
+
+
+@pytest.mark.parametrize("match_score", [None, 0.949999])
+def test_completed_title_similarity_rejects_non_unique_score(
+    match_score: float | None,
+) -> None:
+    payload = verification_payload("completed")
+    payload["match"]["method"] = "title_similarity"
+    payload["match"]["match_score"] = match_score
+    with pytest.raises(ValidationError, match="completed"):
+        CitationVerification.model_validate(payload)
+
+
+def test_completed_doi_exact_may_omit_match_score() -> None:
+    payload = verification_payload("completed")
+    assert "match_score" not in payload["match"]
+    verification = CitationVerification.model_validate(payload)
+    assert verification.match is not None
+    assert verification.match.match_score is None
 
 
 def test_completed_verification_does_not_require_candidate_summary_ids() -> None:
@@ -306,7 +385,21 @@ def test_completed_verification_does_not_require_candidate_summary_ids() -> None
 def test_completed_verification_requires_explicit_observed_metadata() -> None:
     payload = verification_payload("completed")
     del payload["observed_metadata"]
-    assert_validation_error(CitationVerification, payload, "missing", ("observed_metadata",))
+    with pytest.raises(ValidationError, match="completed"):
+        CitationVerification.model_validate(payload)
+
+
+def test_completed_verification_accepts_explicit_empty_observed_metadata() -> None:
+    payload = verification_payload("completed")
+    payload["observed_metadata"] = {}
+    assert CitationVerification.model_validate(payload).observed_metadata == {}
+
+
+@pytest.mark.parametrize("status", ["not_found", "ambiguous", "unavailable", "failed"])
+def test_non_completed_verification_may_omit_observed_metadata(status: str) -> None:
+    payload = verification_payload(status)
+    del payload["observed_metadata"]
+    assert CitationVerification.model_validate(payload).observed_metadata == {}
 
 
 @pytest.mark.parametrize(
@@ -318,6 +411,20 @@ def test_completed_verification_requires_explicit_observed_metadata() -> None:
             {"id": "external-0", "url": "https://example.invalid/record"},
         ),
         ("observed_metadata", {"title": "A Study"}),
+        (
+            "field_differences",
+            [
+                {
+                    "field": "title",
+                    "manuscript_value": "A",
+                    "external_value": "B",
+                    "normalized_manuscript_value": "a",
+                    "normalized_external_value": "b",
+                    "comparison": "mismatch",
+                    "rule": "normalized_title_exact",
+                }
+            ],
+        ),
     ],
 )
 def test_failed_verification_response_data_requires_raw_artifact(field: str, value: Any) -> None:
@@ -571,6 +678,23 @@ def test_citation_match_candidate_count_must_be_nonnegative(
     payload = match_payload()
     payload["candidate_count"] = candidate_count
     assert_validation_error(CitationMatch, payload, "greater_than_equal", ("candidate_count",))
+
+
+@pytest.mark.parametrize(
+    ("match_score", "error_type"),
+    [(-0.000001, "greater_than_equal"), (1.000001, "less_than_equal")],
+)
+def test_citation_match_score_must_be_between_zero_and_one(match_score: float, error_type: str) -> None:
+    payload = match_payload()
+    payload["match_score"] = match_score
+    assert_validation_error(CitationMatch, payload, error_type, ("match_score",))
+
+
+@pytest.mark.parametrize("match_score", [0.0, 1.0])
+def test_citation_match_score_accepts_inclusive_bounds(match_score: float) -> None:
+    payload = match_payload()
+    payload["match_score"] = match_score
+    assert CitationMatch.model_validate(payload).match_score == match_score
 
 
 @pytest.mark.parametrize("attempt_number", [0, -1])
