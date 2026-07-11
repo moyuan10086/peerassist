@@ -463,6 +463,18 @@ def test_existing_refcheck_warning_parses_real_corrected_bibtex_from_exact_path_
     assert (tmp_path / verification.raw_response_artifact.path).read_bytes() == raw
 
 
+def test_existing_refcheck_deduplicates_warning_rows_for_one_external_record(tmp_path: Path) -> None:
+    first = refcheck_issue(type="incomplete::missing_doi")
+    second = refcheck_issue(type="incomplete::missing_venue")
+    payload = refcheck_payload(first, second)
+
+    verification = verify_reference(reference_record(), ExistingRefcheckAdapter(payload), artifact_dir=tmp_path)
+
+    assert verification.status is VerificationStatus.COMPLETED
+    assert verification.match is not None
+    assert verification.match.candidate_count == 1
+
+
 def test_existing_refcheck_explicit_no_match_is_not_found_but_omitted_success_is_unavailable(tmp_path: Path) -> None:
     no_match = refcheck_payload(refcheck_issue(severity="unverified", type="unverified::no_match", corrected_bibtex=""))
 
@@ -564,6 +576,14 @@ def test_artifacts_reject_traversal_and_cached_outside_or_symlink_paths(tmp_path
     assert not validate_response_artifact(tmp_path, linked_artifact)
 
 
+def test_artifact_validation_hashes_a_single_nofollow_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact = write_response_artifact(tmp_path, "descriptor", b'{"raw":true}')
+
+    monkeypatch.setattr(Path, "read_bytes", lambda _: (_ for _ in ()).throw(AssertionError("pathname reopened")))
+
+    assert validate_response_artifact(tmp_path, artifact)
+
+
 def test_artifact_publish_is_immutable_for_concurrent_same_attempt(tmp_path: Path) -> None:
     payload = b'{"raw":true}'
     barrier = threading.Barrier(2)
@@ -600,6 +620,52 @@ def test_artifact_serialization_and_write_failures_are_failed_verifications(tmp_
     assert unwritable.status is VerificationStatus.FAILED
     assert unwritable.error_code == "artifact_write_error"
     assert unwritable.raw_response_artifact is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {"doi": "10.1000/example"},
+        {"id": object(), "doi": "10.1000/example"},
+        {"id": "external-1", "doi": "10.1000/example", "nested": {"bad": object()}},
+    ],
+)
+def test_malformed_candidate_values_fail_schema_after_persisting_serializable_raw_response(
+    tmp_path: Path, candidate: dict[str, object]
+) -> None:
+    adapter = SequencedAdapter([MetadataLookupResult(candidates=[candidate], raw_response={"received": True})])  # type: ignore[list-item]
+
+    verification = verify_reference(reference_record(), adapter, artifact_dir=tmp_path)
+
+    assert verification.status is VerificationStatus.FAILED
+    assert verification.error_code == "adapter_schema_error"
+    assert verification.raw_response_artifact is not None
+    assert json.loads((tmp_path / verification.raw_response_artifact.path).read_text(encoding="utf-8")) == {"received": True}
+
+
+def test_whitespace_only_dois_are_not_exact_matches(tmp_path: Path) -> None:
+    verification = verify_reference(
+        reference_record(doi="   ", title="Different"),
+        OfflineMetadataVerifier([{"id": "external-1", "doi": "\t", "title": "Elsewhere"}]),
+        artifact_dir=tmp_path,
+    )
+
+    assert verification.status is VerificationStatus.NOT_FOUND
+
+
+def test_non_integral_year_does_not_match_manuscript_year() -> None:
+    differences = compare_reference_metadata(reference_record(year=2024), {"year": 2024.9})
+
+    assert not any(difference.field == "year" and difference.comparison.value == "match" for difference in differences)
+
+
+def test_cached_artifact_path_must_bind_to_its_own_attempt_id(tmp_path: Path) -> None:
+    first = verify_reference(reference_record(), OfflineMetadataVerifier([]), artifact_dir=tmp_path, attempt_id="attempt-a")
+    second = first.model_copy(update={"attempt_id": "attempt-b", "attempt_number": 2})
+
+    authoritative = select_authoritative_verification([second], artifact_dir=tmp_path)
+
+    assert authoritative is None
 
 
 def test_retry_rejects_nonpositive_max_attempts_without_adapter_work(tmp_path: Path) -> None:

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 import unicodedata
-from collections.abc import Mapping, MutableSequence, Sequence
+from collections.abc import Iterable, Mapping, MutableSequence, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from uuid import uuid4
 from peerassist.citation_artifacts import (
     ArtifactSerializationError,
     ArtifactWriteError,
+    expected_response_artifact_path,
     validate_response_artifact,
     write_response_artifact,
 )
@@ -142,7 +144,7 @@ class ExistingRefcheckAdapter:
             return MetadataLookupResult(candidates=[], raw_response=raw_response)
 
         candidates = [_candidate_from_warning(row) for row in matched_rows]
-        parsed_candidates = [candidate for candidate in candidates if candidate is not None]
+        parsed_candidates = _deduplicate_candidates(candidate for candidate in candidates if candidate is not None)
         if not parsed_candidates:
             raise CitationAdapterError("adapter_unavailable")
         return MetadataLookupResult(candidates=parsed_candidates, raw_response=raw_response)
@@ -216,21 +218,20 @@ def _candidate_from_warning(row: Mapping[str, str]) -> dict[str, Any] | None:
     if row["severity"].casefold() != "warning" or not row["corrected_bibtex"].strip():
         return None
     fields = _parse_bibtex_fields(row["corrected_bibtex"])
-    candidate: dict[str, Any] = {
-        "id": f"refcheck-{hashlib.sha256(_canonical_json_bytes(row)).hexdigest()[:12]}"
-    }
+    candidate: dict[str, Any] = {}
     for key in ("title", "doi"):
         if fields.get(key):
             candidate[key] = fields[key]
     if fields.get("year"):
-        try:
-            candidate["year"] = int(fields["year"])
-        except ValueError:
-            pass
+        parsed_year = _valid_year(fields["year"])
+        if parsed_year is not None:
+            candidate["year"] = parsed_year
     if row["verified_url"].strip():
         candidate["url"] = row["verified_url"].strip()
     elif fields.get("url"):
         candidate["url"] = fields["url"]
+    identity = _candidate_identity_key(candidate)
+    candidate["id"] = f"refcheck-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
     return candidate if len(candidate) > 1 else None
 
 
@@ -242,6 +243,66 @@ def _parse_bibtex_fields(bibtex: str) -> dict[str, str]:
             value = value[1:-1].strip()
         fields[match.group("field").casefold()] = value
     return fields
+
+
+def _valid_year(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _candidate_identity_key(candidate: Mapping[str, Any]) -> str:
+    doi = normalize_doi(candidate.get("doi"))
+    if doi:
+        return f"doi:{doi}"
+    for field in ("external_id", "id", "verified_url", "url"):
+        value = candidate.get(field)
+        if isinstance(value, str) and value.strip():
+            return f"external:{value.strip()}"
+    title = normalize_title(candidate.get("title"))
+    year = _valid_year(candidate.get("year"))
+    if title and year is not None:
+        return f"title-year:{title}:{year}"
+    return f"metadata:{_canonical_json_bytes(dict(candidate)).decode('utf-8')}"
+
+
+def _deduplicate_candidates(candidates: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for candidate in sorted(candidates, key=_canonical_json_bytes):
+        key = _candidate_identity_key(candidate)
+        existing = deduplicated.get(key)
+        if existing is None:
+            deduplicated[key] = dict(candidate)
+            continue
+        for field, value in sorted(candidate.items()):
+            if field not in existing or existing[field] is None or existing[field] == "":
+                existing[field] = value
+    return [deduplicated[key] for key in sorted(deduplicated)]
+
+
+def _is_json_compatible(value: object) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_compatible(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_compatible(item) for key, item in value.items())
+    return False
+
+
+def _is_valid_candidate(candidate: object) -> bool:
+    if not isinstance(candidate, Mapping) or not _is_json_compatible(dict(candidate)):
+        return False
+    candidate_id = candidate.get("id")
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        return False
+    if any(key in candidate and not isinstance(candidate[key], str) for key in ("doi", "title", "url")):
+        return False
+    return all(_valid_year(candidate[key]) is not None for key in ("year", "online_year", "print_year") if key in candidate)
 
 
 def normalize_query(record: ReferenceRecord) -> dict[str, Any]:
@@ -266,10 +327,7 @@ def verification_id(record: ReferenceRecord, adapter_name: str, adapter_version:
 
 
 def _candidate_id(candidate: Mapping[str, Any]) -> str:
-    candidate_id = str(candidate.get("id") or "").strip()
-    if candidate_id:
-        return candidate_id
-    return f"candidate-{hashlib.sha256(_canonical_json_bytes(dict(candidate))).hexdigest()[:12]}"
+    return str(candidate["id"])
 
 
 def _timestamp() -> str:
@@ -401,7 +459,7 @@ def verify_reference(
     artifact, persistence_error = _persist_response(artifact_dir, attempt_id, result.raw_response)
     if persistence_error:
         return _failed_verification(record, adapter, attempt_id, attempt_number, persistence_error)
-    if not isinstance(result.candidates, list) or not all(isinstance(candidate, Mapping) for candidate in result.candidates):
+    if not isinstance(result.candidates, list) or not all(_is_valid_candidate(candidate) for candidate in result.candidates):
         return _failed_verification(record, adapter, attempt_id, attempt_number, "adapter_schema_error", artifact)
 
     candidates = [dict(candidate) for candidate in result.candidates]
@@ -466,7 +524,7 @@ def _select_candidate(
     exact_doi = [
         candidate
         for candidate in candidates
-        if record.doi and candidate.get("doi") and normalize_doi(record.doi) == normalize_doi(candidate["doi"])
+        if _exact_doi_match(record.doi, candidate.get("doi"))
     ]
     if len(exact_doi) == 1:
         return exact_doi[0], "doi_exact", exact_doi
@@ -489,9 +547,20 @@ def _select_candidate(
     return None, "no_candidates", []
 
 
+def _exact_doi_match(manuscript_doi: object, candidate_doi: object) -> bool:
+    normalized_manuscript = normalize_doi(manuscript_doi)
+    normalized_candidate = normalize_doi(candidate_doi)
+    return bool(normalized_manuscript and normalized_candidate and normalized_manuscript == normalized_candidate)
+
+
 def _artifact_valid(verification: CitationVerification, artifact_dir: str | Path) -> bool:
     if verification.raw_response_artifact is None:
         return verification.status in {VerificationStatus.FAILED, VerificationStatus.UNAVAILABLE}
+    try:
+        if verification.raw_response_artifact.path != expected_response_artifact_path(verification.attempt_id):
+            return False
+    except ValueError:
+        return False
     return validate_response_artifact(artifact_dir, verification.raw_response_artifact)
 
 

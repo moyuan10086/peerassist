@@ -63,11 +63,18 @@ def _external_years(metadata: Mapping[str, Any]) -> list[tuple[str, int]]:
         value = metadata.get(key)
         if value is None or value == "":
             continue
-        try:
-            years.append((key, int(value)))
-        except (TypeError, ValueError):
-            continue
+        parsed = _valid_year(value)
+        if parsed is not None:
+            years.append((key, parsed))
     return years
+
+
+def _valid_year(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def compare_reference_metadata(
@@ -91,7 +98,7 @@ def compare_reference_metadata(
                 external_value=external_doi,
                 normalized_manuscript_value=manuscript_doi,
                 normalized_external_value=observed_doi,
-                is_match=manuscript_doi == observed_doi,
+                is_match=bool(manuscript_doi and observed_doi and manuscript_doi == observed_doi),
                 rule="normalized_doi_exact",
             )
         )

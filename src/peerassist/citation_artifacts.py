@@ -82,6 +82,11 @@ def _artifact_relative_path(attempt_id: str) -> Path:
     return _ARTIFACT_PREFIX / f"attempt-{attempt_id}.json"
 
 
+def expected_response_artifact_path(attempt_id: str) -> str:
+    """Return the only valid indexed path for an immutable attempt response."""
+    return _artifact_relative_path(attempt_id).as_posix()
+
+
 def write_response_artifact(artifact_root: str | Path, attempt_id: str, raw_response: Any) -> RawResponseArtifact:
     """Publish an immutable raw response without replacing an existing attempt."""
     encoded = response_bytes(raw_response)
@@ -126,12 +131,21 @@ def validate_response_artifact(artifact_root: str | Path, artifact: RawResponseA
         root = Path(artifact_root).resolve(strict=True)
         relative = _relative_artifact_path(artifact.path)
         candidate = _confined_destination(root, relative)
-        if candidate.is_symlink():
-            return False
-        file_stat = candidate.stat(follow_symlinks=False)
-        if not stat.S_ISREG(file_stat.st_mode):
-            return False
-        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        digest = _descriptor_sha256(candidate)
     except (OSError, ValueError):
         return False
     return digest == artifact.sha256
+
+
+def _descriptor_sha256(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("artifact is not a regular file")
+        digest = hashlib.sha256()
+        while block := os.read(descriptor, 1024 * 1024):
+            digest.update(block)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
