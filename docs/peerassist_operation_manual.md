@@ -50,6 +50,8 @@ runs/arxiv_real_data/runs/arxiv_2607_08522_v1/stages/peerassist/
 | `confirmation_review_queue.json` | 待人工确认队列 |
 | `human_confirmations.json` | 人工确认动作记录 |
 | `tool_trace.jsonl` | MCP/Skills/工具调用追踪 |
+| `citation_audit.json` | 正文引用、参考文献、核验状态和可追溯 finding |
+| `citation_verifications/attempt-*.json` | 不可变的引用核验原始响应快照 |
 | `agent_review_draft.md` | 大模型生成的审稿草稿 |
 | `peerassist_report.zh.md` | 中文审稿报告 |
 
@@ -139,6 +141,24 @@ npm run build
 7. 在“人工确认”中对每条 concern 执行确认、改写、降级、删除或标记待定。
 8. 在“工具追踪”查看每次 MCP/Skills/确定性检查/代理调用的状态、时间和产物 ID。
 9. 在“产物导出”复制关键产物路径，用于写正式审稿意见或复盘。
+
+### 5.1 引用核查
+
+PeerAssist 会从论文正文中提取 `[1]`、`[1, 3-5]` 等数字引用，并与参考文献编号建立确定性关联。引用 concern 至少回指正文引用位置；元数据差异还会同时回指参考文献条目和核验记录。
+
+常见状态：
+
+| 状态 | 含义 | 审稿人操作 |
+| --- | --- | --- |
+| `verified` | 已唯一关联，至少两个可比字段一致 | 通常无需生成 concern |
+| `metadata_mismatch` | DOI、题名或年份存在可复现差异 | 查看原文与核验快照后确认或改写 |
+| `missing_reference` | 正文编号未找到对应参考文献条目 | 检查解析和论文编号后要求作者澄清 |
+| `ambiguous` | 编号或外部候选不能唯一确定 | 保持待定并人工选择正确条目 |
+| `not_found` | 当前核验来源没有找到候选 | 不能据此认定文献不存在，需人工检索 |
+| `insufficient_evidence` | 可比较字段不足或核验服务不可用 | 保持待人工核查 |
+| `verification_failed` | 适配器、响应或文件核验失败 | 查看 `tool_trace.jsonl` 和错误码后重试 |
+
+引用核查历史与人工动作通过 finding ID 和 audit/parse 版本关联。论文重新解析后，如果原 finding 消失或证据版本变化，系统会标记 `needs_reconciliation`，不会静默沿用旧确认。
 
 ## 6. 人工确认动作
 

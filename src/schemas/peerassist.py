@@ -7,6 +7,7 @@ pipeline stages and future UIs can exchange the same records.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -52,7 +53,7 @@ class EvidenceLedger(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def derive_coverage(self) -> "EvidenceLedger":
+    def derive_coverage(self) -> EvidenceLedger:
         if not self.coverage:
             counts: dict[str, int] = {}
             for item in self.items:
@@ -173,7 +174,22 @@ class HumanConfirmationAction(BaseModel):
     reviewer_id: str = "local-reviewer"
     timestamp: str
     reason: str = ""
+    citation_finding_ids: list[str] = Field(default_factory=list)
+    audit_version: str = ""
+    reconciliation_status: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_utc_timestamp_for_citation_actions(self) -> HumanConfirmationAction:
+        if not self.citation_finding_ids:
+            return self
+        try:
+            timestamp = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("citation confirmation timestamp must be UTC-aware") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None or timestamp.utcoffset().total_seconds() != 0:
+            raise ValueError("citation confirmation timestamp must be UTC-aware")
+        return self
 
 
 class ToolTraceStatus(StrEnum):

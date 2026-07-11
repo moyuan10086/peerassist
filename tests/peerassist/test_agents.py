@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from peerassist.agents import (
     build_agent_input_packet,
     integrate_agent_results,
     run_peerassist_agents,
 )
+from schemas.citation import CitationAudit
 from schemas.peerassist import (
     AgentReviewResult,
     AgentRunStatus,
@@ -54,6 +57,30 @@ def _citation_lead_check() -> DeterministicCheck:
         evidence_ids=["P01-L001"],
         message="Numbered citation [2] was not found in parsed references.",
         benign_explanations=["parser missed a reference entry"],
+    )
+
+
+def _citation_audit() -> CitationAudit:
+    return CitationAudit.model_validate(
+        {
+            "schema_version": "peerassist.citation_audit.v1",
+            "paper_id": "demo",
+            "parse_version": "parser-1",
+            "findings": [
+                {
+                    "id": "F-missing-001",
+                    "status": "missing_reference",
+                    "severity": "clarification_needed",
+                    "citation_link_ids": ["link-1"],
+                    "reference_record_ids": [],
+                    "mention_evidence_ids": ["P01-L001"],
+                    "reference_evidence_ids": [],
+                    "verification_ids": [],
+                    "message": "Citation is not linked.",
+                    "requires_human_review": True,
+                }
+            ],
+        }
     )
 
 
@@ -128,16 +155,14 @@ def test_statistics_agent_reviews_significance_star_leads() -> None:
     assert by_agent["figure_table_agent"].drafts == []
 
 
-def test_standard_mode_citation_agent_reviews_citation_reference_leads() -> None:
-    results = run_peerassist_agents(mode="standard", ledger=_ledger(), checks=[_citation_lead_check()])
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_citation_agent_is_observable_but_does_not_generate_drafts(mode: str) -> None:
+    results = run_peerassist_agents(mode=mode, ledger=_ledger(), checks=[_citation_lead_check()])
 
     by_agent = {result.agent_id: result for result in results}
     assert by_agent["citation_agent"].status is AgentRunStatus.COMPLETED
-    assert by_agent["citation_agent"].drafts[0].category == "citation"
-    assert by_agent["citation_agent"].drafts[0].source_check_ids == [
-        "check_numbered_citation_reference_001"
-    ]
-    assert by_agent["citation_agent"].warnings == []
+    assert by_agent["citation_agent"].drafts == []
+    assert by_agent["citation_agent"].metadata["source"] == "citation_audit"
 
 
 def test_integrate_agent_results_returns_pending_concerns_with_agent_provenance() -> None:
@@ -152,13 +177,30 @@ def test_integrate_agent_results_returns_pending_concerns_with_agent_provenance(
     assert concerns[0].source_check_ids == ["check_percentage_consistency_001"]
 
 
-def test_integrated_citation_concern_records_citation_agent_provenance() -> None:
+def test_integrated_results_do_not_create_a_second_citation_concern() -> None:
     concerns = integrate_agent_results(
         run_peerassist_agents(mode="standard", ledger=_ledger(), checks=[_citation_lead_check()])
     )
 
-    citation = next(concern for concern in concerns if concern.category == "citation")
-    assert citation.source_agent_ids == ["citation_agent"]
+    assert not any(concern.category == "citation" for concern in concerns)
+
+
+@pytest.mark.parametrize(
+    ("mode", "source_agent_id"),
+    [("fast", "citation_audit"), ("standard", "citation_agent"), ("deep", "citation_agent")],
+)
+def test_audit_is_the_single_citation_concern_path_for_each_mode(
+    mode: str, source_agent_id: str
+) -> None:
+    concerns = integrate_agent_results(
+        run_peerassist_agents(mode=mode, ledger=_ledger(), checks=[_citation_lead_check()]),
+        citation_audit=_citation_audit(),
+        mode=mode,
+    )
+
+    citation_concerns = [concern for concern in concerns if concern.category == "citation"]
+    assert len(citation_concerns) == 1
+    assert citation_concerns[0].source_agent_ids == [source_agent_id]
 
 
 def test_integrated_figure_table_concern_records_figure_table_agent_provenance() -> None:
