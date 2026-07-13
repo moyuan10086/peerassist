@@ -1,12 +1,35 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
-from peerassist.job_repository import ReviewJobRepository
+import pymupdf
+
+from peerassist.job_adapters import build_local_stage_adapters
+from peerassist.job_repository import PaperRepository, ReviewJobRepository
 from peerassist.job_runner import RecoverableReviewJobRunner, ReviewJobScheduler
 from peerassist.review_context import build_review_context
-from schemas.peerassist_jobs import ConsentDecision, ReviewJobState, ReviewJobStatus, ReviewStage
+from schemas.peerassist_jobs import (
+    ConsentDecision,
+    PaperRecord,
+    ReviewJobState,
+    ReviewJobStatus,
+    ReviewStage,
+)
+
+
+def _pdf(path: Path) -> str:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text(
+        (72, 72),
+        "PeerAssist Study\nWe show accuracy improves.\nExperiments use Dataset A with n=100.",
+    )
+    document.save(path)
+    document.close()
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _job(repository: ReviewJobRepository) -> ReviewJobState:
@@ -259,3 +282,57 @@ def test_cancel_request_is_durable_before_worker_observes_it(tmp_path) -> None:
 
     assert cancelled.cancel_requested is True
     assert cancelled.status is ReviewJobStatus.CANCEL_REQUESTED
+
+
+def test_real_local_stages_commit_before_model_consent_gate(tmp_path) -> None:
+    source = tmp_path / "source.pdf"
+    paper_id = _pdf(source)
+    paper_dir = tmp_path / "papers" / paper_id / "source"
+    paper_dir.mkdir(parents=True)
+    stored_pdf = paper_dir / "source.pdf"
+    stored_pdf.write_bytes(source.read_bytes())
+    PaperRepository(tmp_path).create_or_get(
+        PaperRecord(
+            paper_id=paper_id,
+            source_pdf_path="source/source.pdf",
+            size_bytes=stored_pdf.stat().st_size,
+        )
+    )
+    repository = ReviewJobRepository(tmp_path)
+    job_id = uuid4()
+    state = repository.create(
+        ReviewJobState(
+            id=job_id,
+            paper_id=paper_id,
+            run_dir=f"jobs/{job_id}/run",
+            attempt_id="attempt-real",
+        )
+    )
+    runner = RecoverableReviewJobRunner(
+        repository,
+        build_local_stage_adapters(repository),
+        owner="worker-real",
+    )
+
+    blocked = runner.run(state.id)
+
+    assert blocked.status is ReviewJobStatus.BLOCKED
+    assert blocked.resume_stage is ReviewStage.AGENTS
+    for stage in (
+        ReviewStage.PARSE,
+        ReviewStage.EVIDENCE,
+        ReviewStage.PROFILE,
+        ReviewStage.PLAN,
+        ReviewStage.DETERMINISTIC,
+        ReviewStage.CITATION,
+    ):
+        assert repository.current_stage_manifest(state.id, stage) is not None
+
+    runner.grant_consent(state.id, service="model", actor="reviewer")
+    completed_candidate = runner.run(state.id)
+    out_dir = tmp_path / completed_candidate.run_dir / "stages" / "peerassist"
+
+    assert completed_candidate.status is ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION
+    assert (out_dir / "confirmation_review_queue.json").is_file()
+    assert (out_dir / "human_confirmations.json").is_file()
+    assert not (out_dir / "current_final_report.json").exists()
