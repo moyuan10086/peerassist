@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from threading import Lock
 from typing import Any
 from uuid import UUID, uuid4
 
 from common.storage import write_json_atomic
+from peerassist.confirmation_workflow import finalize_confirmed_report
 from peerassist.job_repository import ReviewJobRepository
 from schemas.peerassist_jobs import (
     ConsentDecision,
@@ -195,6 +198,67 @@ class RecoverableReviewJobRunner:
         self._event(updated, "job_retried")
         return updated
 
+    def request_cancel(self, job_id: UUID | str) -> ReviewJobState:
+        state = self.repository.get(job_id)
+        if state.status in {ReviewJobStatus.CANCELLED, ReviewJobStatus.COMPLETED}:
+            return state
+        updated = self._update(
+            state,
+            cancel_requested=True,
+            status=ReviewJobStatus.CANCEL_REQUESTED,
+        )
+        self._event(updated, "cancel_requested")
+        return updated
+
+    def finalize(
+        self,
+        job_id: UUID | str,
+        *,
+        expected_confirmation_revision: int,
+        override_reason: str = "",
+    ) -> ReviewJobState:
+        state = self.repository.get(job_id)
+        exporting = self._update(
+            state,
+            stage=ReviewStage.FINALIZE,
+            status=ReviewJobStatus.EXPORTING_REPORT,
+            error_code=None,
+            error=None,
+        )
+        self._event(exporting, "report_export_started")
+        result = finalize_confirmed_report(
+            run_dir=self.repository.data_dir / exporting.run_dir,
+            paper_id=exporting.paper_id,
+            expected_confirmation_revision=expected_confirmation_revision,
+            override_reason=override_reason,
+        )
+        if result.get("status") == "ok":
+            completed = self._update(
+                self.repository.get(job_id),
+                stage=ReviewStage.COMPLETE,
+                status=ReviewJobStatus.COMPLETED,
+                confirmation_revision=int(result.get("confirmation_revision") or 0),
+            )
+            self._event(completed, "report_export_completed", payload=result)
+            return completed
+        if result.get("status") == "blocked":
+            blocked = self._update(
+                self.repository.get(job_id),
+                stage=ReviewStage.AWAIT_CONFIRMATION,
+                status=ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION,
+                error_code=str(result.get("error_code") or "finalize_blocked"),
+            )
+            self._event(blocked, "report_export_blocked", payload=result)
+            return blocked
+        failed = self._update(
+            self.repository.get(job_id),
+            status=ReviewJobStatus.FAILED,
+            error_code=str(result.get("error_code") or "report_export_failed"),
+            error=str(result.get("error") or "report export failed"),
+        )
+        self._event(failed, "report_export_failed", payload=result)
+        return failed
+
     def _commit_denied_model_fallback(self, state: ReviewJobState) -> ReviewJobState:
         payload = {
             "schema_version": "peerassist.no_model_agent_result.v1",
@@ -279,3 +343,48 @@ class RecoverableReviewJobRunner:
             message=message,
             payload=payload,
         )
+
+
+class ReviewJobScheduler:
+    """Bounded in-process scheduler; repository leases remain authoritative."""
+
+    def __init__(self, runner: RecoverableReviewJobRunner, *, max_workers: int = 2) -> None:
+        self.runner = runner
+        self.executor = ThreadPoolExecutor(
+            max_workers=max(1, max_workers),
+            thread_name_prefix="peerassist-review",
+        )
+        self._futures: dict[UUID, Future[ReviewJobState]] = {}
+        self._lock = Lock()
+
+    def submit(self, job_id: UUID | str) -> Future[ReviewJobState]:
+        canonical = UUID(str(job_id))
+        with self._lock:
+            existing = self._futures.get(canonical)
+            if existing is not None and not existing.done():
+                return existing
+            future = self.executor.submit(self.runner.run, canonical)
+            self._futures[canonical] = future
+            return future
+
+    def wait(self, job_id: UUID | str, *, timeout: float | None = None) -> ReviewJobState:
+        future = self.submit(job_id)
+        return future.result(timeout=timeout)
+
+    def recover_orphans(self) -> list[UUID]:
+        recoverable = {
+            ReviewJobStatus.QUEUED,
+            ReviewJobStatus.INTERRUPTED,
+            ReviewJobStatus.CANCEL_REQUESTED,
+            *_STATUS.values(),
+        }
+        recovered: list[UUID] = []
+        for state in self.runner.repository.list():
+            if state.status not in recoverable:
+                continue
+            self.submit(state.id)
+            recovered.append(state.id)
+        return recovered
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        self.executor.shutdown(wait=wait, cancel_futures=False)

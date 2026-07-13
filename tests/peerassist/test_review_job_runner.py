@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from peerassist.job_repository import ReviewJobRepository
-from peerassist.job_runner import RecoverableReviewJobRunner
+from peerassist.job_runner import RecoverableReviewJobRunner, ReviewJobScheduler
 from peerassist.review_context import build_review_context
 from schemas.peerassist_jobs import ConsentDecision, ReviewJobState, ReviewJobStatus, ReviewStage
 
@@ -205,3 +205,57 @@ def test_retry_uses_new_attempt_without_deleting_previous_stage_outputs(tmp_path
     assert retried.stage is ReviewStage.EVIDENCE
     assert retried.attempt_id != state.attempt_id
     assert retried.error is None
+
+
+def test_background_scheduler_runs_and_recovers_orphaned_job(tmp_path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    state = _job(repository)
+    calls: list[str] = []
+    runner = RecoverableReviewJobRunner(repository, _adapters(calls), owner="worker-1")
+    state = repository.update(
+        state.id,
+        expected_revision=state.revision,
+        model_consent=state.model_consent.model_copy(update={"decision": ConsentDecision.GRANTED}),
+        status=ReviewJobStatus.INTERRUPTED,
+    )
+    scheduler = ReviewJobScheduler(runner, max_workers=1)
+    try:
+        recovered = scheduler.recover_orphans()
+        result = scheduler.wait(state.id, timeout=5)
+    finally:
+        scheduler.shutdown()
+
+    assert recovered == [state.id]
+    assert result.status is ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION
+
+
+def test_finalize_updates_job_status_from_export_result(tmp_path, monkeypatch) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    state = _job(repository)
+    runner = RecoverableReviewJobRunner(repository, _adapters([]), owner="worker-1")
+    state = repository.update(
+        state.id,
+        expected_revision=state.revision,
+        stage=ReviewStage.AWAIT_CONFIRMATION,
+        status=ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION,
+    )
+    monkeypatch.setattr(
+        "peerassist.job_runner.finalize_confirmed_report",
+        lambda **_kwargs: {"status": "ok", "confirmation_revision": 0},
+    )
+
+    completed = runner.finalize(state.id, expected_confirmation_revision=0)
+
+    assert completed.status is ReviewJobStatus.COMPLETED
+    assert completed.stage is ReviewStage.COMPLETE
+
+
+def test_cancel_request_is_durable_before_worker_observes_it(tmp_path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    state = _job(repository)
+    runner = RecoverableReviewJobRunner(repository, _adapters([]), owner="worker-1")
+
+    cancelled = runner.request_cancel(state.id)
+
+    assert cancelled.cancel_requested is True
+    assert cancelled.status is ReviewJobStatus.CANCEL_REQUESTED
