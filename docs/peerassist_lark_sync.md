@@ -278,3 +278,16 @@ model keys, paper secrets, or reviewer-private material here.
 - Browser verification opened the persisted arXiv Paper from its task card, rendered page 1 of 11 at 151%, produced 111 selectable text nodes, matched the real paper title, and had no horizontal overflow or console errors.
 - Local commits: `eab7fdc feat: open durable papers in the PDF workspace` and `b56a7ca fix: support PDF.js range loading in current browsers`.
 - Appended Feishu section `七十三、2026-07-14 持久化论文与 PDF 首屏阅读打通`; revision advanced from `105` to `106`. Append-only keyword verification confirmed sections `七十二` and `七十三` remain intact.
+
+## 2026-07-14 - ReviewJob-scoped human confirmation workspace
+
+- Added `GET /api/jobs/<id>/workspace`, which reconstructs the effective concern queue from the job's candidate findings plus immutable confirmation actions and returns sanitized job-scoped evidence, agent and trace state.
+- Added `POST /api/jobs/<id>/decisions` with confirmation revision CAS and stable finding lineage/revision binding. Successful decisions synchronize the ReviewJob `confirmation_revision` used by finalization.
+- Integration now writes job-compatible `evidence_ledger.json`, `agent_results.json` and an empty capability invocation ledger when needed, so task state survives refresh and service restart without falling back to the legacy demo run.
+- The frontend persists both active Paper and active ReviewJob identities. Paper, queue, confirmation and navigation counters now read the selected job workspace and refresh every three seconds.
+- PDF concern cards include page-aware evidence links. Clicking evidence navigates the reader to the corresponding page; page-local concerns flow back into the side panel, and pending findings expose confirm/rewrite/downgrade/delete actions.
+- Confirmed findings display Chinese status and no longer show mutation buttons.
+- Focused verification passed 4 Review Job API tests, Ruff and the production frontend build.
+- Browser E2E used a temporary awaiting-confirmation job: opened its PDF, displayed the task concern, jumped from evidence to page 2, confirmed the item, changed pending count from 1 to 0 and confirmation revision from 0 to 1, with no console errors. The temporary job was then archived and removed from the public list.
+- Local commit: `5ccbb2e feat: connect review jobs to human confirmation`.
+- Appended Feishu section `七十四、2026-07-14 ReviewJob 任务级人工确认工作区`; revision advanced from `106` to `107`. Append-only keyword verification confirmed sections `七十三` and `七十四` remain intact.
