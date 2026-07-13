@@ -167,6 +167,10 @@ def _write_confirmation_outputs(
     bundle = build_confirmation_bundle(concerns=concerns, evidence_lookup=evidence_lookup)
     queue = build_confirmation_review_queue(bundle)
     out_dir = peerassist_stage_dir(repository.data_dir / state.run_dir)
+    write_json_file(out_dir / "evidence_ledger.json", ledger.model_dump(mode="json"))
+    write_json_file(out_dir / "agent_results.json", _result(repository, state, ReviewStage.AGENTS))
+    if not (out_dir / "capability_invocations.json").exists():
+        write_json_file(out_dir / "capability_invocations.json", {"results": []})
     write_json_file(
         out_dir / "peerassist_concerns.json",
         {

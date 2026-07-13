@@ -927,6 +927,23 @@ input:focus {
   margin: 8px 0 10px;
 }
 
+.evidence-link {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 3px 0;
+  font: 12px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  text-align: left;
+  cursor: pointer;
+}
+
+.evidence-link:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
 .search-box {
   display: grid;
   grid-template-columns: 18px minmax(0, 250px);

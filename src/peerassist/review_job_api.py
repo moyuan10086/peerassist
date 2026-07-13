@@ -11,8 +11,19 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from common.pipeline_context import peerassist_stage_dir, read_json_file
+from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
+from peerassist.confirmations import (
+    apply_confirmations,
+    build_confirmation_bundle,
+    build_confirmation_review_queue,
+)
 from peerassist.job_adapters import build_local_stage_adapters
-from peerassist.job_repository import PaperRepository, ReviewJobRepository
+from peerassist.job_repository import (
+    PaperRepository,
+    RepositoryConflictError,
+    ReviewJobRepository,
+)
 from peerassist.job_runner import RecoverableReviewJobRunner, ReviewJobScheduler
 from peerassist.upload import (
     UploadInterruptedError,
@@ -21,13 +32,16 @@ from peerassist.upload import (
     UploadValidationError,
     persist_multipart_upload,
 )
-from schemas.peerassist_jobs import ReviewJobState
+from schemas.peerassist import Concern, HumanConfirmationAction
+from schemas.peerassist_jobs import ReviewJobState, ReviewJobStatus, ReviewStage
 
 _JOB_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)(?P<action>/events|/cancel|/retry|/finalize)?$")
 _CONSENT_RE = re.compile(
     r"^/api/jobs/(?P<job>[0-9a-f-]+)/consents/(?P<service>parse|search|model)$"
 )
 _PAPER_SOURCE_RE = re.compile(r"^/api/papers/(?P<paper>[0-9a-f]{64})/source$")
+_JOB_WORKSPACE_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)/workspace$")
+_JOB_DECISION_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)/decisions$")
 
 
 class ReviewJobService:
@@ -84,6 +98,152 @@ class ReviewJobService:
             raise FileNotFoundError("paper source is not a regular file")
         return source, record.paper_id
 
+    def workspace(self, job_id: UUID | str) -> tuple[ReviewJobState, dict[str, Any]]:
+        state = self.repository.get(job_id)
+        run_dir = self._run_dir(state)
+        workspace = load_confirmation_state(run_dir=run_dir)
+        out_dir = peerassist_stage_dir(run_dir)
+        ledger_payload = read_json_file(out_dir / "evidence_ledger.json")
+        if not ledger_payload:
+            ledger_payload = self._stage_result(state, ReviewStage.EVIDENCE)
+        evidence_rows = ledger_payload.get("items") if isinstance(ledger_payload.get("items"), list) else []
+        evidence_by_id = {
+            str(row.get("id") or ""): row
+            for row in evidence_rows
+            if isinstance(row, dict) and row.get("id")
+        }
+        evidence_lookup = {
+            evidence_id: str(row.get("locator") or evidence_id)
+            for evidence_id, row in evidence_by_id.items()
+        }
+
+        concerns_payload = read_json_file(out_dir / "peerassist_concerns.json")
+        concern_rows = (
+            concerns_payload.get("concerns")
+            if isinstance(concerns_payload.get("concerns"), list)
+            else []
+        )
+        concerns = [Concern.model_validate(row) for row in concern_rows if isinstance(row, dict)]
+        confirmations = read_json_file(out_dir / "human_confirmations.json")
+        action_rows = (
+            confirmations.get("actions") if isinstance(confirmations.get("actions"), list) else []
+        )
+        actions = [
+            HumanConfirmationAction.model_validate(row)
+            for row in action_rows
+            if isinstance(row, dict)
+        ]
+        effective_concerns = apply_confirmations(concerns, actions)
+        bundle = build_confirmation_bundle(
+            concerns=effective_concerns,
+            evidence_lookup=evidence_lookup,
+        )
+        queue = build_confirmation_review_queue(bundle)
+        for item in queue.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            item["evidence"] = [
+                {
+                    "id": evidence_id,
+                    "locator": str(evidence_by_id.get(evidence_id, {}).get("locator") or evidence_id),
+                    "page": evidence_by_id.get(evidence_id, {}).get("page"),
+                    "text": str(evidence_by_id.get(evidence_id, {}).get("text") or ""),
+                    "bbox": evidence_by_id.get(evidence_id, {}).get("bbox"),
+                }
+                for evidence_id in item.get("evidence_ids", [])
+            ]
+
+        workspace["queue"] = queue
+        workspace["actions"] = [action.model_dump(mode="json") for action in actions]
+        workspace["actions_count"] = len(actions)
+        workspace["confirmation_revision"] = max(
+            0, int(confirmations.get("revision") or 0)
+        )
+        workspace["pending_count"] = sum(
+            1
+            for concern in effective_concerns
+            if concern.status.value == "pending_human_confirmation"
+        )
+        workspace["evidence_preview"] = [
+            {
+                "id": evidence_id,
+                "locator": str(row.get("locator") or ""),
+                "page": row.get("page"),
+                "text": str(row.get("text") or ""),
+            }
+            for evidence_id, row in list(evidence_by_id.items())[:8]
+        ]
+        workspace.pop("paths", None)
+        runtime = workspace.get("runtime")
+        if isinstance(runtime, dict):
+            runtime.pop("stage_dir", None)
+            runtime["queue_items"] = len(queue.get("items", []))
+        workspace["ready_for_confirmation"] = (
+            state.status is ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION
+        )
+        return state, workspace
+
+    def apply_decision(
+        self, job_id: UUID | str, payload: dict[str, Any]
+    ) -> tuple[ReviewJobState, dict[str, Any], dict[str, Any]]:
+        state = self.repository.get(job_id)
+        if state.status is not ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION:
+            raise ValueError("job_not_awaiting_human_confirmation")
+        result = apply_confirmation_decision(
+            run_dir=self._run_dir(state),
+            paper_id=state.paper_id,
+            concern_id=str(payload.get("concern_id") or ""),
+            action=str(payload.get("action") or ""),
+            reviewer_id=str(payload.get("reviewer_id") or "reviewer"),
+            timestamp=str(payload.get("timestamp") or ""),
+            previous_text=str(payload.get("previous_text") or ""),
+            new_text=str(payload.get("new_text") or ""),
+            reason=str(payload.get("reason") or ""),
+            expected_revision=int(payload.get("confirmation_revision") or 0),
+            expected_finding_lineage_id=str(payload.get("finding_lineage_id") or ""),
+            expected_finding_id=str(payload.get("finding_id") or ""),
+            expected_finding_revision=int(payload.get("finding_revision") or 0),
+        )
+        if result.get("status") != "ok":
+            current, workspace = self.workspace(job_id)
+            return current, result, workspace
+        confirmation_revision = int(result.get("confirmation_revision") or 0)
+        for _ in range(3):
+            current = self.repository.get(job_id)
+            try:
+                state = self.repository.update(
+                    job_id,
+                    expected_revision=current.revision,
+                    confirmation_revision=confirmation_revision,
+                )
+                break
+            except RepositoryConflictError:
+                continue
+        else:
+            raise RepositoryConflictError("unable to persist confirmation revision")
+        state, workspace = self.workspace(job_id)
+        return state, result, workspace
+
+    def _run_dir(self, state: ReviewJobState) -> Path:
+        run_dir = (self.repository.data_dir / state.run_dir).resolve(strict=True)
+        expected = (self.repository.jobs_dir / str(state.id) / "run").resolve(strict=True)
+        if run_dir != expected:
+            raise ValueError("job run directory mismatch")
+        return run_dir
+
+    def _stage_result(self, state: ReviewJobState, stage: ReviewStage) -> dict[str, Any]:
+        manifest = self.repository.current_stage_manifest(state.id, stage)
+        if manifest is None:
+            return {}
+        path = (
+            self.repository.jobs_dir
+            / str(state.id)
+            / manifest.output_dir
+            / manifest.artifacts.get("result", "result.json")
+        )
+        payload = read_json_file(path)
+        return payload if isinstance(payload, dict) else {}
+
 
 class ReviewJobHttpServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], data_dir: Path) -> None:
@@ -120,6 +280,15 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         paper_match = _PAPER_SOURCE_RE.match(path)
         if paper_match is not None:
             self._send_paper_source(paper_match.group("paper"))
+            return
+        workspace_match = _JOB_WORKSPACE_RE.match(path)
+        if workspace_match is not None:
+            try:
+                state, workspace = self.service.workspace(workspace_match.group("job"))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=404)
+                return
+            self._send_json({"job": state.model_dump(mode="json"), "state": workspace})
             return
         match = _JOB_RE.match(path)
         if match is None:
@@ -159,6 +328,25 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=409)
                 return
             self._send_json({"job": state.model_dump(mode="json")}, status=202)
+            return
+        decision = _JOB_DECISION_RE.match(self.path)
+        if decision is not None:
+            try:
+                state, result, workspace = self.service.apply_decision(
+                    decision.group("job"), payload
+                )
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            status = 200 if result.get("status") == "ok" else 409
+            self._send_json(
+                {
+                    "job": state.model_dump(mode="json"),
+                    "result": result,
+                    "state": workspace,
+                },
+                status=status,
+            )
             return
         consent = _CONSENT_RE.match(self.path)
         if consent is not None:

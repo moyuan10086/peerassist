@@ -6,12 +6,16 @@ from pathlib import Path
 from threading import Thread
 from time import sleep
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import pymupdf
 
+from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_server import create_review_job_server
-from peerassist.job_repository import PaperRepository
-from schemas.peerassist_jobs import PaperRecord
+from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
+from peerassist.job_repository import PaperRepository, ReviewJobRepository
+from schemas.peerassist import Concern, ConcernLevel
+from schemas.peerassist_jobs import PaperRecord, ReviewJobState
 
 
 def _paper(data_dir: Path) -> str:
@@ -165,6 +169,97 @@ def test_paper_source_supports_byte_ranges(tmp_path: Path) -> None:
             assert response.headers["Content-Range"] == f"bytes 0-31/{len(content)}"
             assert response.headers["Content-Type"] == "application/pdf"
             assert response.read() == content[:32]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_job_workspace_applies_confirmation_decisions(tmp_path: Path) -> None:
+    paper_id = _paper(tmp_path)
+    job_id = uuid4()
+    state = ReviewJobRepository(tmp_path).create(
+        ReviewJobState(
+            id=job_id,
+            paper_id=paper_id,
+            run_dir=f"jobs/{job_id}/run",
+            attempt_id="attempt-workspace-test",
+            stage="await_confirmation",
+            status="awaiting_human_confirmation",
+        )
+    )
+    concern = Concern(
+        id="concern-workspace-test",
+        level=ConcernLevel.CLARIFICATION_NEEDED,
+        category="statistics",
+        title="Sample size needs clarification",
+        evidence_ids=["P01-L001"],
+        impact="The reported result may be underpowered.",
+        author_action="Please report the sample-size rationale.",
+    )
+    out_dir = peerassist_stage_dir(tmp_path / state.run_dir)
+    bundle = build_confirmation_bundle(
+        concerns=[concern],
+        evidence_lookup={"P01-L001": "page 1, line 1"},
+    )
+    write_json_file(
+        out_dir / "peerassist_concerns.json",
+        {"paper_id": paper_id, "concerns": [concern.model_dump(mode="json")]},
+    )
+    write_json_file(out_dir / "confirmation_bundle.json", bundle)
+    write_json_file(out_dir / "confirmation_review_queue.json", build_confirmation_review_queue(bundle))
+    write_json_file(
+        out_dir / "human_confirmations.json",
+        {"schema_version": "peerassist.human_confirmations.v2", "revision": 0, "mutation_revision": 0, "actions": []},
+    )
+    write_json_file(
+        out_dir / "evidence_ledger.json",
+        {
+            "items": [
+                {
+                    "id": "P01-L001",
+                    "type": "text_span",
+                    "page": 1,
+                    "locator": "page 1, line 1",
+                    "text": "We evaluate ten samples.",
+                    "section": "Experiments",
+                    "bbox": [72, 72, 240, 90],
+                }
+            ]
+        },
+    )
+    write_json_file(out_dir / "agent_results.json", {"results": []})
+    write_json_file(out_dir / "capability_invocations.json", {"results": []})
+
+    server = create_review_job_server(data_dir=tmp_path, host="127.0.0.1", port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, workspace = _json(f"{base}/api/jobs/{job_id}/workspace")
+        assert status == 200
+        item = workspace["state"]["queue"]["items"][0]
+        assert item["evidence"][0]["page"] == 1
+        assert workspace["state"]["pending_count"] == 1
+
+        status, decision = _json(
+            f"{base}/api/jobs/{job_id}/decisions",
+            method="POST",
+            payload={
+                "concern_id": concern.id,
+                "finding_lineage_id": concern.finding_lineage_id,
+                "finding_id": concern.finding_id,
+                "finding_revision": concern.revision,
+                "confirmation_revision": 0,
+                "action": "confirm",
+                "reviewer_id": "api-reviewer",
+                "timestamp": "2026-07-14T01:30:00Z",
+            },
+        )
+        assert status == 200
+        assert decision["job"]["confirmation_revision"] == 1
+        assert decision["state"]["pending_count"] == 0
+        assert decision["state"]["queue"]["items"][0]["status"] == "confirmed"
     finally:
         server.shutdown()
         server.server_close()

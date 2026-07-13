@@ -77,6 +77,7 @@ type Evidence = {
   locator?: string;
   page?: number | null;
   text?: string;
+  bbox?: number[] | null;
 };
 
 type Concern = {
@@ -146,6 +147,8 @@ type ConfirmationState = {
   queue?: { items?: Concern[] };
   pending_count?: number;
   actions_count?: number;
+  confirmation_revision?: number;
+  ready_for_confirmation?: boolean;
   agent_runs?: AgentRun[];
   capability_invocations?: Record<string, unknown>[];
   tool_trace?: {
@@ -225,12 +228,14 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
+  const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
+  const [jobWorkspace, setJobWorkspace] = useState<ConfirmationState | null>(null);
   const [activePdfUrl, setActivePdfUrl] = useState(() => {
     const storedPaperId = window.localStorage.getItem("peerassist.activePaperId") || "";
     return storedPaperId ? `/api/papers/${storedPaperId}/source` : initial.assets.pdf_url || "";
   });
 
-  const state = bootstrap.state || {};
+  const state = activeJobId && jobWorkspace ? jobWorkspace : bootstrap.state || {};
   const queueItems = state.queue?.items || [];
   const events = state.tool_trace?.events || [];
   const agentRuns = state.agent_runs || [];
@@ -259,6 +264,16 @@ function App() {
     return jobs;
   }, []);
 
+  const refreshJobWorkspace = useCallback(async (jobId: string) => {
+    if (!jobId) return null;
+    const response = await fetch(`/api/jobs/${jobId}/workspace`, { cache: "no-store" });
+    if (!response.ok) throw new Error("无法读取当前审稿任务工作区");
+    const payload = (await response.json()) as { state?: ConfirmationState };
+    const nextState = payload.state || {};
+    setJobWorkspace(nextState);
+    return nextState;
+  }, []);
+
   useEffect(() => {
     Promise.all([refresh(), refreshJobs()]).catch(() =>
       setStreamLines((lines) => [...lines, "初始状态读取失败，保留本地壳"]),
@@ -269,6 +284,16 @@ function App() {
     const timer = window.setInterval(() => refreshJobs().catch(() => undefined), 3000);
     return () => window.clearInterval(timer);
   }, [refreshJobs]);
+
+  useEffect(() => {
+    if (!activeJobId) {
+      setJobWorkspace(null);
+      return;
+    }
+    refreshJobWorkspace(activeJobId).catch(() => setJobWorkspace(null));
+    const timer = window.setInterval(() => refreshJobWorkspace(activeJobId).catch(() => undefined), 3000);
+    return () => window.clearInterval(timer);
+  }, [activeJobId, refreshJobWorkspace]);
 
   useEffect(() => {
     if (!window.EventSource) return;
@@ -293,10 +318,14 @@ function App() {
     setActiveWindow(windowId);
   };
 
-  const openPaperById = (paperId: string) => {
+  const openPaperById = (paperId: string, jobId = "") => {
     const normalized = paperId.trim();
     if (!/^[0-9a-f]{64}$/.test(normalized)) return;
     window.localStorage.setItem("peerassist.activePaperId", normalized);
+    if (jobId) {
+      window.localStorage.setItem("peerassist.activeJobId", jobId);
+      setActiveJobId(jobId);
+    }
     setActivePaperId(normalized);
     setActivePdfUrl(`/api/papers/${normalized}/source`);
     navigate("paper", "/paper");
@@ -362,7 +391,7 @@ function App() {
   async function submitDecision(concern: Concern, action: string) {
     setBusy(true);
     try {
-      const response = await fetch("/api/decision", {
+      const response = await fetch(activeJobId ? `/api/jobs/${activeJobId}/decisions` : "/api/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -370,6 +399,7 @@ function App() {
           finding_lineage_id: concern.finding_lineage_id || "",
           finding_id: concern.finding_id || "",
           finding_revision: concern.revision || 1,
+          confirmation_revision: state.confirmation_revision || 0,
           action,
           reviewer_id: "local-reviewer",
           timestamp: new Date().toISOString(),
@@ -378,9 +408,14 @@ function App() {
         }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "确认失败");
+      if (!response.ok) throw new Error(payload.error || payload.result?.error_code || "确认失败");
       showToast(`已记录：${labelAction(action)}`);
-      await refresh();
+      if (activeJobId) {
+        setJobWorkspace(payload.state || null);
+        await refreshJobs();
+      } else {
+        await refresh();
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "确认失败");
     } finally {
@@ -432,7 +467,7 @@ function App() {
         `upload: 已创建任务 ${String(result.job?.id || "")}`,
       ]);
       await refreshJobs();
-      openPaperById(String(result.paper?.paper_id || ""));
+      openPaperById(String(result.paper?.paper_id || ""), String(result.job?.id || ""));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "论文上传失败";
@@ -499,11 +534,13 @@ function App() {
         {activeWindow === "paper" && (
           <PaperWindow
             pdfUrl={activePdfUrl}
-            queueItems={activePaperId ? [] : queueItems}
+            queueItems={queueItems}
             busy={busy}
             linkedReviewJob={Boolean(activePaperId)}
+            readyForConfirmation={Boolean(state.ready_for_confirmation)}
             onRunReview={runAgentReview}
             onSubmitManual={submitManualConcern}
+            onDecision={submitDecision}
           />
         )}
         {activeWindow === "agent" && (
@@ -518,7 +555,7 @@ function App() {
             onRunReview={runAgentReview}
             onJobAction={runJobAction}
             onUploadPaper={uploadPaper}
-            onOpenPaper={openPaperById}
+            onOpenPaper={(job) => openPaperById(job.paper_id, job.id)}
           />
         )}
         {activeWindow === "queue" && (
@@ -557,20 +594,25 @@ function PaperWindow({
   queueItems,
   busy,
   linkedReviewJob,
+  readyForConfirmation,
   onRunReview,
   onSubmitManual,
+  onDecision,
 }: {
   pdfUrl: string;
   queueItems: Concern[];
   busy: boolean;
   linkedReviewJob: boolean;
+  readyForConfirmation: boolean;
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onSubmitManual: (selectedText: string, note: string, page: string) => void;
+  onDecision: (concern: Concern, action: string) => void;
 }) {
   const [selectedText, setSelectedText] = useState("");
   const [note, setNote] = useState("");
   const [page, setPage] = useState("1");
   const [currentPage, setCurrentPage] = useState(1);
+  const [targetPage, setTargetPage] = useState(1);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [inspectorTab, setInspectorTab] = useState<"review" | "concerns">("review");
   const [inspectorWidth, setInspectorWidth] = useState(372);
@@ -619,6 +661,7 @@ function PaperWindow({
               setCurrentPage(nextPage);
               setPage(String(nextPage));
             }}
+            targetPage={targetPage}
           />
         ) : (
           <div className="empty-pdf">当前运行目录没有发现原始 PDF。</div>
@@ -659,7 +702,7 @@ function PaperWindow({
               {linkedReviewJob && (
                 <div className="linked-job-banner">
                   <GitBranch size={17} />
-                  <div><strong>已连接后台审稿任务</strong><span>本地解析与核查按持久化阶段运行</span></div>
+                  <div><strong>已连接后台审稿任务</strong><span>{readyForConfirmation ? "候选意见已生成，等待逐条确认" : "本地解析与核查按持久化阶段运行"}</span></div>
                 </div>
               )}
               <button className="primary-button wide" type="button" disabled={busy || linkedReviewJob} onClick={() => onRunReview("", "fast")}>
@@ -693,7 +736,17 @@ function PaperWindow({
           ) : (
             <div className="inspector-body concern-list">
               {(pageConcerns.length ? pageConcerns : queueItems.slice(0, 5)).map((item) => (
-                <ConcernCard concern={item} compact key={item.id} />
+                <ConcernCard
+                  concern={item}
+                  compact
+                  disabled={busy}
+                  onDecision={readyForConfirmation && item.status === "pending_human_confirmation" ? onDecision : undefined}
+                  onLocate={(evidence) => {
+                    const evidencePage = Number(evidence.page || 0);
+                    if (evidencePage > 0) setTargetPage(evidencePage);
+                  }}
+                  key={item.id}
+                />
               ))}
               {!queueItems.length && <p className="muted">当前还没有审稿关注点。</p>}
             </div>
@@ -712,10 +765,12 @@ function PdfReviewReader({
   pdfUrl,
   onSelection,
   onPageChange,
+  targetPage,
 }: {
   pdfUrl: string;
   onSelection: (payload: { text: string; page: number }) => void;
   onPageChange: (page: number) => void;
+  targetPage?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
@@ -843,6 +898,13 @@ function PdfReviewReader({
 
   const commitPageInput = () => goToPage(Number(pageInput) || pageNumber);
 
+  useEffect(() => {
+    if (!targetPage || !pageCount) return;
+    const boundedPage = Math.max(1, Math.min(pageCount, targetPage));
+    setPageNumber(boundedPage);
+    setPageInput(String(boundedPage));
+  }, [pageCount, targetPage]);
+
   return (
     <div className="pdf-reader">
       <div className="pdf-toolbar">
@@ -922,7 +984,7 @@ function AgentWindow({
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void;
   onUploadPaper: (file: File) => Promise<boolean>;
-  onOpenPaper: (paperId: string) => void;
+  onOpenPaper: (job: ReviewJob) => void;
 }) {
   const [mode, setMode] = useState("fast");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -1043,7 +1105,7 @@ function AgentWindow({
 
 const reviewStages = ["validate", "parse", "evidence", "profile", "plan", "deterministic", "citation", "agents", "integrate", "await_confirmation", "finalize", "complete"];
 
-function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void; onOpenPaper: (paperId: string) => void }) {
+function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void; onOpenPaper: (job: ReviewJob) => void }) {
   const current = Math.max(0, reviewStages.indexOf(job.stage));
   const canCancel = !["completed", "cancelled", "failed", "awaiting_human_confirmation"].includes(job.status);
   return (
@@ -1055,7 +1117,7 @@ function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; b
           <code>{job.id}</code>
         </div>
         <div className="job-actions">
-          <button className="ghost-button" type="button" onClick={() => onOpenPaper(job.paper_id)}><FileText size={15} /> 阅读论文</button>
+          <button className="ghost-button" type="button" onClick={() => onOpenPaper(job)}><FileText size={15} /> 阅读论文</button>
           {job.status === "blocked" && job.required_consents?.includes("model") && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "consent")}>授权模型并继续</button>}
           {canCancel && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "cancel")}>取消</button>}
           {["failed", "cancelled", "interrupted"].includes(job.status) && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "retry")}>重试</button>}
@@ -1267,11 +1329,13 @@ function ConcernCard({
   compact,
   disabled,
   onDecision,
+  onLocate,
 }: {
   concern: Concern;
   compact?: boolean;
   disabled?: boolean;
   onDecision?: (concern: Concern, action: string) => void;
+  onLocate?: (evidence: Evidence) => void;
 }) {
   const evidence = concern.evidence || [];
   return (
@@ -1286,10 +1350,12 @@ function ConcernCard({
       <p className="muted">{concern.author_action || concern.benign_explanation || "暂无作者行动建议。"}</p>
       <div className="evidence-list">
         {evidence.map((item) => (
-          <code key={item.id || item.locator}>{item.id || "证据"} · {item.locator || "无定位"}</code>
+          <button className="evidence-link" type="button" disabled={!onLocate || !item.page} onClick={() => onLocate?.(item)} key={item.id || item.locator}>
+            {item.id || "证据"} · {item.locator || "无定位"}
+          </button>
         ))}
       </div>
-      {onDecision && (
+      {onDecision && concern.status === "pending_human_confirmation" && (
         <div className="button-row">
           {["confirm", "rewrite", "downgrade", "delete"].map((action) => (
             <button className={action === "delete" ? "danger-button" : "ghost-button"} disabled={disabled} key={action} type="button" onClick={() => onDecision(concern, action)}>
@@ -1342,7 +1408,13 @@ function labelCategory(value: string) {
 }
 
 function labelStatus(value: string) {
-  return value === "pending_human_confirmation" ? "待人工确认" : value || "未知状态";
+  return ({
+    pending_human_confirmation: "待人工确认",
+    confirmed: "已确认",
+    downgraded: "已降级",
+    rewritten: "已改写",
+    deleted: "已删除",
+  } as Record<string, string>)[value] || value || "未知状态";
 }
 
 function labelAction(value: string) {
