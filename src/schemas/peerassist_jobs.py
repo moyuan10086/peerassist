@@ -73,6 +73,8 @@ class ReviewStage(StrEnum):
 
 class ReviewJobStatus(StrEnum):
     QUEUED = "queued"
+    CANCEL_REQUESTED = "cancel_requested"
+    INTERRUPTED = "interrupted"
     VALIDATING_INPUT = "validating_input"
     PARSING = "parsing"
     EVIDENCE_BUILDING = "evidence_building"
@@ -180,10 +182,8 @@ class StageManifest(BaseModel):
     @model_validator(mode="after")
     def validate_artifact_metadata(self) -> StageManifest:
         artifact_names = set(self.artifacts)
-        unknown_hashes = set(self.artifact_sha256) - artifact_names
-        unknown_sizes = set(self.artifact_sizes) - artifact_names
-        if unknown_hashes or unknown_sizes:
-            raise ValueError("artifact hash and size entries must reference declared artifacts")
+        if set(self.artifact_sha256) != artifact_names or set(self.artifact_sizes) != artifact_names:
+            raise ValueError("artifact hash and size entries must exactly match declared artifacts")
         return self
 
 
@@ -220,12 +220,16 @@ class StageCheckpoint(BaseModel):
     def validate_manifest_consistency(self) -> StageCheckpoint:
         if self.committed and self.manifest is None:
             raise ValueError("committed checkpoint requires a manifest")
+        if self.committed and self.committed_at is None:
+            raise ValueError("committed checkpoint requires committed_at")
         if self.manifest is None:
             return self
         if self.manifest.stage != self.stage:
             raise ValueError("checkpoint stage must match manifest stage")
         if self.manifest.attempt_id != self.attempt_id:
             raise ValueError("checkpoint attempt_id must match manifest attempt_id")
+        if self.committed and self.committed_at != self.manifest.committed_at:
+            raise ValueError("checkpoint committed_at must match manifest committed_at")
         return self
 
 

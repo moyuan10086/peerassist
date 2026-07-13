@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from schemas.peerassist_jobs import (
 )
 
 PAPER_SHA = "a" * 64
+ARTIFACT_SHA = "b" * 64
 
 
 def _job_contract(**overrides: object) -> ReviewJobState:
@@ -80,22 +82,28 @@ def test_review_job_contract_defaults_revisions_and_persists_consent_gate() -> N
 
 
 def test_stage_checkpoint_contract_validates_committed_manifest_consistency() -> None:
+    committed_at = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     manifest = StageManifest(
         stage=ReviewStage.PARSE,
         attempt_id="attempt-1",
         checkpoint_path="attempts/attempt-1/stages/parse/checkpoint.json",
         output_dir="attempts/attempt-1/stages/parse/outputs",
         artifacts={"paper": "paper.json"},
+        artifact_sha256={"paper": ARTIFACT_SHA},
+        artifact_sizes={"paper": 128},
+        committed_at=committed_at,
     )
     checkpoint = StageCheckpoint(
         stage=ReviewStage.PARSE,
         attempt_id="attempt-1",
         status="completed",
         committed=True,
+        committed_at=committed_at,
         manifest=manifest,
     )
 
     assert checkpoint.manifest.stage is checkpoint.stage
+    assert checkpoint.committed_at == checkpoint.manifest.committed_at
 
     with pytest.raises(ValidationError, match="stage"):
         StageCheckpoint(
@@ -103,6 +111,7 @@ def test_stage_checkpoint_contract_validates_committed_manifest_consistency() ->
             attempt_id="attempt-1",
             status="completed",
             committed=True,
+            committed_at=committed_at,
             manifest=manifest,
         )
     with pytest.raises(ValidationError, match="attempt_id"):
@@ -111,6 +120,7 @@ def test_stage_checkpoint_contract_validates_committed_manifest_consistency() ->
             attempt_id="attempt-2",
             status="completed",
             committed=True,
+            committed_at=committed_at,
             manifest=manifest,
         )
     with pytest.raises(ValidationError, match="manifest"):
@@ -119,6 +129,7 @@ def test_stage_checkpoint_contract_validates_committed_manifest_consistency() ->
             attempt_id="attempt-1",
             status="completed",
             committed=True,
+            committed_at=committed_at,
         )
     with pytest.raises(ValidationError, match="path"):
         StageManifest(
@@ -127,6 +138,64 @@ def test_stage_checkpoint_contract_validates_committed_manifest_consistency() ->
             checkpoint_path="../../checkpoint.json",
             output_dir="attempts/attempt-1/stages/parse/outputs",
         )
+
+
+@pytest.mark.parametrize(
+    ("artifact_sha256", "artifact_sizes"),
+    [
+        ({}, {"paper": 128}),
+        ({"paper": ARTIFACT_SHA}, {}),
+        ({"paper": ARTIFACT_SHA, "extra": "c" * 64}, {"paper": 128}),
+        ({"paper": ARTIFACT_SHA}, {"paper": 128, "extra": 1}),
+    ],
+)
+def test_stage_manifest_contract_requires_exact_artifact_metadata_sets(
+    artifact_sha256: dict[str, str], artifact_sizes: dict[str, int]
+) -> None:
+    with pytest.raises(ValidationError, match="artifact"):
+        StageManifest(
+            stage=ReviewStage.PARSE,
+            attempt_id="attempt-1",
+            checkpoint_path="attempts/attempt-1/stages/parse/checkpoint.json",
+            output_dir="attempts/attempt-1/stages/parse/outputs",
+            artifacts={"paper": "paper.json"},
+            artifact_sha256=artifact_sha256,
+            artifact_sizes=artifact_sizes,
+        )
+
+
+def test_stage_checkpoint_contract_requires_matching_committed_timestamp() -> None:
+    committed_at = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    manifest = StageManifest(
+        stage=ReviewStage.PARSE,
+        attempt_id="attempt-1",
+        checkpoint_path="attempts/attempt-1/stages/parse/checkpoint.json",
+        output_dir="attempts/attempt-1/stages/parse/outputs",
+        committed_at=committed_at,
+    )
+
+    with pytest.raises(ValidationError, match="committed_at"):
+        StageCheckpoint(
+            stage=ReviewStage.PARSE,
+            attempt_id="attempt-1",
+            status="completed",
+            committed=True,
+            manifest=manifest,
+        )
+    with pytest.raises(ValidationError, match="committed_at"):
+        StageCheckpoint(
+            stage=ReviewStage.PARSE,
+            attempt_id="attempt-1",
+            status="completed",
+            committed=True,
+            committed_at=committed_at + timedelta(seconds=1),
+            manifest=manifest,
+        )
+
+
+def test_review_job_status_contract_includes_startup_recovery_states() -> None:
+    assert ReviewJobStatus.CANCEL_REQUESTED == "cancel_requested"
+    assert ReviewJobStatus.INTERRUPTED == "interrupted"
 
 
 def test_legacy_job_state_load_contract_preserves_artifacts_and_accepts_migration_metadata() -> None:
