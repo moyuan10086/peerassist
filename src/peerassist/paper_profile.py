@@ -167,8 +167,7 @@ def _items_related(candidate: EvidenceItem, base_items: list[EvidenceItem]) -> b
     return any(_overlap(candidate.text, base.text) >= 2 for base in base_items)
 
 
-def _is_conflicting_support(claim_text: str, support_text: str) -> bool:
-    del claim_text
+def _is_conflicting_support(_claim_text: str, support_text: str) -> bool:
     normalized = support_text.lower()
     return any(
         phrase in normalized
@@ -178,7 +177,6 @@ def _is_conflicting_support(claim_text: str, support_text: str) -> bool:
             "failed to",
             "fails to",
             "no improvement",
-            "worse than",
             "contradict",
             "conflict",
         )

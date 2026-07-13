@@ -245,6 +245,27 @@ def test_decrease_is_not_unconditionally_treated_as_conflict(tmp_path: Path) -> 
     assert artifacts.claim_graph.edges[0].relation == "supported_by"
 
 
+def test_worse_than_reverse_comparison_can_support_outperformance(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-comparison-direction",
+        source_sha256="f" * 64,
+        items=[
+            _item("claim", "Our method outperforms baseline X.", section="Abstract"),
+            _item(
+                "result",
+                "Baseline X is worse than our method in the held-out results.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value != "conflicting"
+    assert artifacts.claim_graph.edges[0].relation == "supported_by"
+
+
 def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: Path) -> None:
     minor = EvidenceItem(
         id="minor-writing",
