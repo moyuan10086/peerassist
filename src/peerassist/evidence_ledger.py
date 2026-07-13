@@ -127,6 +127,42 @@ def _items_from_content_list(content_list_path: Path | None, *, warnings: list[s
     table_counter = 0
     for record in _iter_content_records(payload):
         record_type = str(record.get("type") or record.get("category") or "").lower()
+        if record_type == "text" and isinstance(record.get("lines"), list):
+            page = int(record.get("page") or 0) or None
+            block_id = str(record.get("block_id") or f"P{page or 0:04d}-B0000")
+            for line_index, line in enumerate(record["lines"], start=1):
+                if not isinstance(line, dict):
+                    continue
+                text = str(line.get("text") or "").strip()
+                if not text:
+                    continue
+                raw_bbox = line.get("bbox")
+                bbox = (
+                    [float(value) for value in raw_bbox]
+                    if isinstance(raw_bbox, list) and len(raw_bbox) == 4
+                    else None
+                )
+                locator = str(line.get("locator") or "").strip() or (
+                    f"page {page or 0}, block {block_id}, line {line_index}"
+                )
+                items.append(
+                    EvidenceItem(
+                        id=f"{block_id}-L{line_index:03d}",
+                        type=EvidenceType.TEXT_SPAN,
+                        page=page,
+                        section=str(record.get("section") or ""),
+                        locator=locator,
+                        text=text,
+                        bbox=bbox,
+                        source_path=str(content_list_path),
+                        metadata={
+                            "block_id": block_id,
+                            "line": line_index,
+                            "structured_locator": True,
+                        },
+                    )
+                )
+            continue
         rows = record.get("rows")
         if record_type != "table" or not isinstance(rows, list):
             continue
@@ -177,12 +213,17 @@ def build_evidence_ledger(
     """
     warnings: list[str] = list(provider_warnings or [])
     items: list[EvidenceItem] = []
+    markdown_items: list[EvidenceItem] = []
     if mineru_markdown_path is None or not mineru_markdown_path.exists():
         warnings.append("mineru_markdown_missing")
     else:
-        items.extend(_items_from_markdown(mineru_markdown_path, warnings=warnings))
+        markdown_items = _items_from_markdown(mineru_markdown_path, warnings=warnings)
 
-    items.extend(_items_from_content_list(mineru_content_list_path, warnings=warnings))
+    content_items = _items_from_content_list(mineru_content_list_path, warnings=warnings)
+    if any(item.type is EvidenceType.TEXT_SPAN for item in content_items):
+        markdown_items = [item for item in markdown_items if item.type is not EvidenceType.TEXT_SPAN]
+    items.extend(markdown_items)
+    items.extend(content_items)
 
     source_sha256 = _sha256(source_pdf) if source_pdf.exists() else ""
     metadata = {

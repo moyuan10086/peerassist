@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 from enum import StrEnum
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from common.storage import write_bytes_atomic, write_json_atomic, write_text_atomic
 
@@ -86,15 +88,23 @@ def _apply_resource_limits(memory_limit_bytes: int, cpu_limit_seconds: int) -> N
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit_seconds, cpu_limit_seconds + 1))
 
 
-def _cleanup_parse_artifacts(output_dir: Path, result_path: Path | None = None) -> None:
+def _cleanup_worker_artifacts(output_dir: Path) -> None:
     for name in ("paper.local.md", "paper.local.content_list.json"):
         (output_dir / name).unlink(missing_ok=True)
         for temporary in output_dir.glob(f".{name}.*.tmp"):
             temporary.unlink(missing_ok=True)
-    if result_path is not None:
-        result_path.unlink(missing_ok=True)
-        for temporary in output_dir.glob(f".{result_path.name}.*.tmp"):
-            temporary.unlink(missing_ok=True)
+
+
+def _cleanup_invocation(staging_dir: Path) -> None:
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _parse_worker(
@@ -208,7 +218,7 @@ def _parse_worker(
                     )
                 )
         except (pymupdf.FileDataError, RuntimeError):
-            _cleanup_parse_artifacts(output_dir)
+            _cleanup_worker_artifacts(output_dir)
             return LocalPdfParseResult(
                 status=LocalParseStatus.CORRUPTED,
                 source_pdf=str(source_pdf.resolve()),
@@ -253,7 +263,6 @@ def parse_pdf_locally(
     source_pdf = Path(source_pdf)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    _cleanup_parse_artifacts(output_dir)
     if not source_pdf.is_file():
         return LocalPdfParseResult(
             status=LocalParseStatus.FAILED,
@@ -262,7 +271,10 @@ def parse_pdf_locally(
             error_code="source_pdf_missing",
         )
 
-    result_path = output_dir / f".local-parse-result-{uuid4().hex}.json"
+    invocation_id = uuid4().hex
+    staging_dir = output_dir / f".local-parse-{invocation_id}"
+    staging_dir.mkdir()
+    result_path = staging_dir / "result.json"
     command = [
         sys.executable,
         "-m",
@@ -271,7 +283,7 @@ def parse_pdf_locally(
         "--source",
         str(source_pdf.resolve()),
         "--output-dir",
-        str(output_dir.resolve()),
+        str(staging_dir.resolve()),
         "--result",
         str(result_path.resolve()),
         "--memory-limit-bytes",
@@ -287,7 +299,7 @@ def parse_pdf_locally(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
-        _cleanup_parse_artifacts(output_dir, result_path)
+        _cleanup_invocation(staging_dir)
         return LocalPdfParseResult(
             status=LocalParseStatus.FAILED,
             source_pdf=str(source_pdf.resolve()),
@@ -295,7 +307,7 @@ def parse_pdf_locally(
             error_code="local_parser_timeout",
         )
     if completed.returncode != 0 or not result_path.is_file():
-        _cleanup_parse_artifacts(output_dir, result_path)
+        _cleanup_invocation(staging_dir)
         return LocalPdfParseResult(
             status=LocalParseStatus.FAILED,
             source_pdf=str(source_pdf.resolve()),
@@ -303,9 +315,42 @@ def parse_pdf_locally(
             error_code="local_parser_failed",
         )
     try:
-        return LocalPdfParseResult.model_validate_json(result_path.read_bytes())
-    finally:
-        result_path.unlink(missing_ok=True)
+        result = LocalPdfParseResult.model_validate_json(result_path.read_bytes())
+    except (OSError, ValidationError):
+        _cleanup_invocation(staging_dir)
+        return LocalPdfParseResult(
+            status=LocalParseStatus.FAILED,
+            source_pdf=str(source_pdf.resolve()),
+            warnings=["local_parser_result_invalid"],
+            error_code="local_parser_result_invalid",
+        )
+    result_path.unlink(missing_ok=True)
+    if result.status not in {LocalParseStatus.OK, LocalParseStatus.OCR_REQUIRED}:
+        _cleanup_invocation(staging_dir)
+        return result.model_copy(update={"markdown_path": None, "content_list_path": None})
+    staged_markdown = staging_dir / "paper.local.md"
+    staged_content = staging_dir / "paper.local.content_list.json"
+    if not staged_markdown.is_file() or not staged_content.is_file():
+        _cleanup_invocation(staging_dir)
+        return LocalPdfParseResult(
+            status=LocalParseStatus.FAILED,
+            source_pdf=str(source_pdf.resolve()),
+            warnings=["local_parser_artifacts_missing"],
+            error_code="local_parser_artifacts_missing",
+        )
+    invocations_dir = output_dir / "invocations"
+    invocations_dir.mkdir(exist_ok=True)
+    final_dir = invocations_dir / invocation_id
+    os.replace(staging_dir, final_dir)
+    _fsync_directory(invocations_dir)
+    return result.model_copy(
+        update={
+            "markdown_path": str((final_dir / "paper.local.md").resolve()),
+            "content_list_path": str(
+                (final_dir / "paper.local.content_list.json").resolve()
+            ),
+        }
+    )
 
 
 def _worker_main(args: argparse.Namespace) -> int:

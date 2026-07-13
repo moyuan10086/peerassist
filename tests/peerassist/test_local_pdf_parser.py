@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pymupdf
 
 import peerassist.local_pdf_parser as local_parser
+from peerassist.evidence_ledger import build_evidence_ledger
 from peerassist.local_pdf_parser import LocalParseStatus, parse_pdf_locally
+from schemas.peerassist import EvidenceType
 
 
 def _selectable_pdf(path: Path) -> None:
@@ -46,6 +50,17 @@ def test_local_parser_extracts_pages_blocks_lines_locators_and_bbox(tmp_path: Pa
     assert first_block["lines"][0]["locator"].startswith("page 1, block 1, line 1")
     assert len(first_block["lines"][0]["bbox"]) == 4
     assert result.pages[0].text.startswith("PeerAssist")
+
+    ledger = build_evidence_ledger(
+        paper_id="paper-1",
+        source_pdf=source,
+        mineru_markdown_path=Path(result.markdown_path),
+        mineru_content_list_path=Path(result.content_list_path),
+        provider_name="local_pymupdf",
+    )
+    located = next(item for item in ledger.items if item.type is EvidenceType.TEXT_SPAN)
+    assert located.locator.startswith("page 1, block 1, line 1")
+    assert located.bbox is not None and len(located.bbox) == 4
 
 
 def test_blank_or_image_only_pdf_requires_ocr_without_external_call(tmp_path: Path) -> None:
@@ -133,21 +148,75 @@ def test_local_parser_timeout_is_explicit_and_leaves_no_parse_artifacts(
     source = tmp_path / "paper.pdf"
     _selectable_pdf(source)
 
-    def timeout(*args: object, **kwargs: object) -> None:
+    def timeout(command: list[str], *args: object, **kwargs: object) -> None:
+        staging = Path(command[command.index("--output-dir") + 1])
+        (staging / ".paper.local.md.deadbeef.tmp").write_text("partial", encoding="utf-8")
         raise subprocess.TimeoutExpired(cmd="local-parser", timeout=0.01)
 
     monkeypatch.setattr(local_parser.subprocess, "run", timeout)
     output = tmp_path / "parse"
     output.mkdir()
-    atomic_markdown_temp = output / ".paper.local.md.deadbeef.tmp"
-    atomic_content_temp = output / ".paper.local.content_list.json.deadbeef.tmp"
-    atomic_markdown_temp.write_text("partial", encoding="utf-8")
-    atomic_content_temp.write_text("partial", encoding="utf-8")
+    unrelated = output / "keep.txt"
+    unrelated.write_text("keep", encoding="utf-8")
     result = parse_pdf_locally(source, output, timeout_seconds=0.01)
 
     assert result.status is LocalParseStatus.FAILED
     assert "local_parser_timeout" in result.warnings
     assert not (output / "paper.local.md").exists()
     assert not (output / "paper.local.content_list.json").exists()
-    assert not atomic_markdown_temp.exists()
-    assert not atomic_content_temp.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert not list(output.glob(".local-parse-*"))
+
+
+def test_invalid_worker_result_is_failed_and_cleans_only_invocation_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "paper.pdf"
+    _selectable_pdf(source)
+    output = tmp_path / "parse"
+    output.mkdir()
+    unrelated = output / "keep.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    def invalid_result(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        staging = Path(command[command.index("--output-dir") + 1])
+        result_path = Path(command[command.index("--result") + 1])
+        (staging / "paper.local.md").write_text("partial", encoding="utf-8")
+        result_path.write_text("{not-json", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(local_parser.subprocess, "run", invalid_result)
+    result = parse_pdf_locally(source, output, timeout_seconds=10)
+
+    assert result.status is LocalParseStatus.FAILED
+    assert result.error_code == "local_parser_result_invalid"
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert not list(output.glob(".local-parse-*"))
+
+
+def test_overlapping_local_parses_publish_distinct_invocation_artifacts(tmp_path: Path) -> None:
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _selectable_pdf(first)
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Second manuscript text")
+    document.save(second)
+    document.close()
+    output = tmp_path / "parse"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda source: parse_pdf_locally(source, output, timeout_seconds=10),
+                (first, second),
+            )
+        )
+
+    assert all(result.status is LocalParseStatus.OK for result in results)
+    markdown_paths = [Path(result.markdown_path or "") for result in results]
+    assert len(set(markdown_paths)) == 2
+    assert all(path.is_file() for path in markdown_paths)
+    assert "PeerAssist Local Parser" in markdown_paths[0].read_text(encoding="utf-8")
+    assert "Second manuscript text" in markdown_paths[1].read_text(encoding="utf-8")
