@@ -101,6 +101,12 @@ def apply_confirmations(
     for concern in concerns:
         updated = concern
         for action in actions_by_concern.get(concern.id, []):
+            if action.finding_lineage_id and action.finding_lineage_id != concern.finding_lineage_id:
+                continue
+            if action.finding_id and action.finding_id != concern.finding_id:
+                continue
+            if action.revision is not None and action.revision != concern.revision:
+                continue
             updated = _apply_action(updated, action)
         result.append(updated)
     return result
@@ -162,6 +168,9 @@ def confirmation_action_from_queue_decision(
     previous_text: str = "",
     new_text: str = "",
     reason: str = "",
+    finding_lineage_id: str = "",
+    finding_id: str = "",
+    revision: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> HumanConfirmationAction:
     normalized = action.strip().lower()
@@ -169,6 +178,9 @@ def confirmation_action_from_queue_decision(
         raise ValueError(f"unsupported confirmation action: {action}")
     return HumanConfirmationAction(
         concern_id=concern_id,
+        finding_lineage_id=finding_lineage_id,
+        finding_id=finding_id,
+        revision=revision,
         action=normalized,
         previous_text=previous_text,
         new_text=new_text,
@@ -183,6 +195,9 @@ def _queue_item(row: dict[str, Any], *, position: int) -> dict[str, Any]:
     return {
         "position": position,
         "id": row.get("id", ""),
+        "finding_lineage_id": row.get("finding_lineage_id", ""),
+        "finding_id": row.get("finding_id", ""),
+        "revision": row.get("revision", 1),
         "status": row.get("status", ""),
         "level": row.get("level", ""),
         "category": row.get("category", ""),

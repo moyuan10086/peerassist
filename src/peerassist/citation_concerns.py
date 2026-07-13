@@ -127,7 +127,16 @@ def _metadata_for_finding(
             artifacts.append({"path": artifact.path, "sha256": artifact.sha256})
         if verification.error_code:
             error_codes.append(verification.error_code)
+    stable_targets = [
+        *finding.citation_link_ids,
+        *finding.reference_record_ids,
+        *finding.mention_evidence_ids,
+        *finding.reference_evidence_ids,
+    ]
     metadata: dict[str, object] = {
+        "producer_namespace": "citation_audit",
+        "producer_version": audit.schema_version,
+        "issue_anchor": f"{finding.status.value}:{'|'.join(stable_targets)}",
         "citation_finding_ids": [finding.id],
         "citation_link_ids": list(finding.citation_link_ids),
         "reference_record_ids": list(finding.reference_record_ids),

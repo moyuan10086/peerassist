@@ -2,17 +2,48 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from common.pipeline_context import peerassist_stage_dir, read_json_file, write_json_file
+from common.storage import exclusive_file_lock, write_json_atomic, write_text_atomic
 from peerassist.confirmations import (
     apply_confirmations,
     confirmation_action_from_queue_decision,
 )
 from peerassist.report_export import export_peerassist_report
-from schemas.peerassist import Concern, HumanConfirmationAction
+from schemas.citation import CitationAudit
+from schemas.peerassist import (
+    Concern,
+    ConcernLevel,
+    ConcernStatus,
+    FindingImportance,
+    HumanConfirmationAction,
+)
+
+
+def _workflow_lock(out_dir: Path) -> Path:
+    return out_dir / ".confirmation-finalize.lock"
+
+
+def _confirmation_revision(payload: dict[str, Any]) -> int:
+    try:
+        return max(0, int(payload.get("revision") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mutation_revision(payload: dict[str, Any]) -> int:
+    try:
+        return max(0, int(payload.get("mutation_revision", payload.get("revision") or 0)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def load_confirmation_state(*, run_dir: Path) -> dict[str, Any]:
@@ -51,6 +82,7 @@ def load_confirmation_state(*, run_dir: Path) -> dict[str, Any]:
         "queue": queue,
         "actions": actions,
         "actions_count": len(actions),
+        "confirmation_revision": _confirmation_revision(confirmations),
         "pending_count": pending_count,
         "agent_runs": agent_runs,
         "capability_invocations": capability_invocations,
@@ -78,11 +110,19 @@ def apply_confirmation_decision(
     previous_text: str = "",
     new_text: str = "",
     reason: str = "",
+    expected_revision: int | None = None,
+    before_commit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     out_dir = peerassist_stage_dir(run_dir)
     confirmations_path = out_dir / "human_confirmations.json"
-    confirmations = read_json_file(confirmations_path)
+    with exclusive_file_lock(_workflow_lock(out_dir)):
+        confirmations = read_json_file(confirmations_path)
+    observed_revision = _confirmation_revision(confirmations)
+    observed_mutation_revision = _mutation_revision(confirmations)
+    if expected_revision is not None and observed_revision != expected_revision:
+        return _revision_conflict(expected_revision, observed_revision)
     rows = confirmations.get("actions") if isinstance(confirmations.get("actions"), list) else []
+    concern = _find_concern(out_dir / "peerassist_concerns.json", concern_id)
 
     confirmation_action = confirmation_action_from_queue_decision(
         concern_id=concern_id,
@@ -92,23 +132,268 @@ def apply_confirmation_decision(
         previous_text=previous_text,
         new_text=new_text,
         reason=reason,
+        finding_lineage_id=concern.finding_lineage_id,
+        finding_id=concern.finding_id,
+        revision=concern.revision,
         metadata={"source": "peerassist_confirmation_workflow"},
     )
     candidate_rows = [*rows, confirmation_action.model_dump(mode="json")]
     _validate_confirmation_actions(out_dir=out_dir, paper_id=paper_id, rows=candidate_rows)
-    rows = candidate_rows
-    write_json_file(
-        confirmations_path,
-        {"schema_version": "peerassist.human_confirmations.v1", "actions": rows},
-    )
+    if before_commit is not None:
+        before_commit()
+    with exclusive_file_lock(_workflow_lock(out_dir)):
+        current = read_json_file(confirmations_path)
+        current_revision = _confirmation_revision(current)
+        current_mutation_revision = _mutation_revision(current)
+        if (
+            current_revision != observed_revision
+            or current_mutation_revision != observed_mutation_revision
+        ):
+            return _revision_conflict(observed_revision, current_revision)
+        rows = candidate_rows
+        committed_revision = observed_revision + 1
+        write_json_atomic(
+            confirmations_path,
+            {
+                **current,
+                "schema_version": "peerassist.human_confirmations.v2",
+                "revision": committed_revision,
+                "mutation_revision": observed_mutation_revision + 1,
+                "actions": rows,
+            },
+        )
 
     report_paths = refresh_confirmation_reports(run_dir=run_dir, paper_id=paper_id)
     return {
         "schema_version": "peerassist.confirmation_decision_result.v1",
+        "status": "ok",
         "action": confirmation_action.model_dump(mode="json"),
         "actions_count": len(rows),
+        "confirmation_revision": committed_revision,
         **report_paths,
     }
+
+
+def finalize_confirmed_report(
+    *,
+    run_dir: Path,
+    paper_id: str,
+    expected_confirmation_revision: int,
+    override_reason: str = "",
+    before_pointer_commit: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Freeze one confirmation revision and publish an immutable localized report."""
+
+    out_dir = peerassist_stage_dir(run_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    confirmations_path = out_dir / "human_confirmations.json"
+    pointer_path = out_dir / "current_final_report.json"
+    with exclusive_file_lock(_workflow_lock(out_dir)):
+        pointer = read_json_file(pointer_path)
+        if pointer.get("confirmation_revision") == expected_confirmation_revision:
+            manifest_path = out_dir / str(pointer.get("manifest_path") or "")
+            if manifest_path.is_file():
+                return _finalize_success(manifest_path, idempotent=True)
+        confirmations = read_json_file(confirmations_path)
+        observed_revision = _confirmation_revision(confirmations)
+        observed_mutation_revision = _mutation_revision(confirmations)
+    if observed_revision != expected_confirmation_revision:
+        return _revision_conflict(expected_confirmation_revision, observed_revision)
+
+    concerns = _load_concerns(out_dir / "peerassist_concerns.json")
+    actions = _actions_from_payload(confirmations)
+    confirmed_concerns = apply_confirmations(concerns, actions)
+    unresolved_core = [
+        concern
+        for concern in confirmed_concerns
+        if concern.status is ConcernStatus.PENDING_HUMAN_CONFIRMATION and _is_core(concern)
+    ]
+    normalized_override = str(override_reason or "").strip()
+    if unresolved_core and not normalized_override:
+        return {
+            "schema_version": "peerassist.finalize_result.v1",
+            "status": "blocked",
+            "error_code": "unresolved_core_findings",
+            "unresolved_core_count": len(unresolved_core),
+            "unresolved_finding_ids": [concern.finding_id for concern in unresolved_core],
+            "confirmation_revision": observed_revision,
+        }
+
+    report_version = f"r{observed_revision:06d}"
+    reports_dir = out_dir / "reports"
+    temporary_dir = reports_dir / f".{report_version}.{uuid4().hex}.tmp"
+    final_dir = reports_dir / report_version
+    try:
+        temporary_dir.mkdir(parents=True, exist_ok=False)
+        evidence_lookup = _evidence_lookup_from_bundle(out_dir / "confirmation_bundle.json")
+        citation_audit, citation_audit_path = _load_citation_audit(out_dir / "citation_audit.json")
+        en_md, en_payload = export_peerassist_report(
+            paper_id=paper_id,
+            concerns=confirmed_concerns,
+            evidence_lookup=evidence_lookup,
+            language="en",
+            citation_audit=citation_audit,
+            citation_audit_path=citation_audit_path,
+            report_status="final",
+            confirmation_revision=observed_revision,
+        )
+        zh_md, zh_payload = export_peerassist_report(
+            paper_id=paper_id,
+            concerns=confirmed_concerns,
+            evidence_lookup=evidence_lookup,
+            language="zh",
+            citation_audit=citation_audit,
+            citation_audit_path=citation_audit_path,
+            report_status="final",
+            confirmation_revision=observed_revision,
+        )
+        artifacts = {
+            "report_en_md": f"reports/{report_version}/report.en.md",
+            "report_zh_md": f"reports/{report_version}/report.zh.md",
+            "report_en_json": f"reports/{report_version}/report.en.json",
+            "report_zh_json": f"reports/{report_version}/report.zh.json",
+        }
+        write_text_atomic(temporary_dir / "report.en.md", en_md)
+        write_text_atomic(temporary_dir / "report.zh.md", zh_md)
+        write_json_atomic(temporary_dir / "report.en.json", en_payload)
+        write_json_atomic(temporary_dir / "report.zh.json", zh_payload)
+        artifact_sha256 = {
+            name: hashlib.sha256((temporary_dir / Path(path).name).read_bytes()).hexdigest()
+            for name, path in artifacts.items()
+        }
+        manifest = {
+            "schema_version": "peerassist.final_report_manifest.v1",
+            "paper_id": paper_id,
+            "report_version": report_version,
+            "confirmation_revision": observed_revision,
+            "created_at": datetime.now(UTC).isoformat(),
+            "override_reason": normalized_override or None,
+            "artifacts": artifacts,
+            "artifact_sha256": artifact_sha256,
+        }
+        write_json_atomic(temporary_dir / "manifest.json", manifest)
+    except Exception as exc:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+        return {
+            "schema_version": "peerassist.finalize_result.v1",
+            "status": "failed",
+            "error_code": "report_export_failed",
+            "error": str(exc),
+            "confirmation_revision": observed_revision,
+        }
+
+    if before_pointer_commit is not None:
+        before_pointer_commit()
+    with exclusive_file_lock(_workflow_lock(out_dir)):
+        current = read_json_file(confirmations_path)
+        current_revision = _confirmation_revision(current)
+        current_mutation_revision = _mutation_revision(current)
+        if (
+            current_revision != observed_revision
+            or current_mutation_revision != observed_mutation_revision
+        ):
+            shutil.rmtree(temporary_dir, ignore_errors=True)
+            return _revision_conflict(observed_revision, current_revision)
+        pointer_before = read_json_file(pointer_path)
+        published_new_dir = False
+        if final_dir.exists():
+            shutil.rmtree(temporary_dir, ignore_errors=True)
+            existing_manifest = read_json_file(final_dir / "manifest.json")
+            if existing_manifest.get("confirmation_revision") != observed_revision:
+                return {
+                    "schema_version": "peerassist.finalize_result.v1",
+                    "status": "failed",
+                    "error_code": "report_version_conflict",
+                    "confirmation_revision": observed_revision,
+                }
+        else:
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            temporary_dir.replace(final_dir)
+            published_new_dir = True
+        manifest_path = final_dir / "manifest.json"
+        pointer_payload = {
+            "schema_version": "peerassist.current_final_report.v1",
+            "report_version": report_version,
+            "confirmation_revision": observed_revision,
+            "manifest_path": str(manifest_path.relative_to(out_dir)),
+        }
+        try:
+            write_json_atomic(pointer_path, pointer_payload)
+            write_json_atomic(
+                confirmations_path,
+                {
+                    **current,
+                    "schema_version": "peerassist.human_confirmations.v2",
+                    "revision": observed_revision,
+                    "mutation_revision": observed_mutation_revision + 1,
+                    "last_finalized_confirmation_revision": observed_revision,
+                },
+            )
+        except Exception as exc:
+            if pointer_before:
+                write_json_atomic(pointer_path, pointer_before)
+            else:
+                pointer_path.unlink(missing_ok=True)
+            if published_new_dir:
+                shutil.rmtree(final_dir, ignore_errors=True)
+            return {
+                "schema_version": "peerassist.finalize_result.v1",
+                "status": "failed",
+                "error_code": "report_commit_failed",
+                "error": str(exc),
+                "confirmation_revision": observed_revision,
+            }
+    return _finalize_success(manifest_path, idempotent=False)
+
+
+def _finalize_success(manifest_path: Path, *, idempotent: bool) -> dict[str, Any]:
+    manifest = read_json_file(manifest_path)
+    return {
+        "schema_version": "peerassist.finalize_result.v1",
+        "status": "ok",
+        "idempotent": idempotent,
+        "report_version": str(manifest.get("report_version") or ""),
+        "confirmation_revision": int(manifest.get("confirmation_revision") or 0),
+        "manifest_path": str(manifest_path),
+        "artifacts": dict(manifest.get("artifacts") or {}),
+    }
+
+
+def _revision_conflict(expected: int, current: int) -> dict[str, Any]:
+    return {
+        "schema_version": "peerassist.revision_conflict.v1",
+        "status": "revision_conflict",
+        "error_code": "revision_conflict",
+        "expected_revision": expected,
+        "current_revision": current,
+    }
+
+
+def _find_concern(path: Path, concern_id: str) -> Concern:
+    for concern in _load_concerns(path):
+        if concern.id == concern_id:
+            return concern
+    raise ValueError(f"unknown concern: {concern_id}")
+
+
+def _actions_from_payload(payload: dict[str, Any]) -> list[HumanConfirmationAction]:
+    rows = payload.get("actions") if isinstance(payload.get("actions"), list) else []
+    return [HumanConfirmationAction.model_validate(row) for row in rows if isinstance(row, dict)]
+
+
+def _is_core(concern: Concern) -> bool:
+    return (
+        concern.importance is FindingImportance.CORE
+        or concern.level is ConcernLevel.MAJOR_CONCERN
+        or str(concern.metadata.get("importance") or "").lower() == "core"
+    )
+
+
+def _load_citation_audit(path: Path) -> tuple[CitationAudit | None, str]:
+    payload = read_json_file(path)
+    if not payload:
+        return None, ""
+    return CitationAudit.model_validate(payload), str(path)
 
 
 def _validate_confirmation_actions(*, out_dir: Path, paper_id: str, rows: list[dict[str, Any]]) -> None:
@@ -156,6 +441,7 @@ def refresh_confirmation_reports(*, run_dir: Path, paper_id: str) -> dict[str, s
         "zh": str(report_zh_md_path),
     }
     report_payload["confirmation_workflow_refreshed"] = True
+    report_payload["report_status"] = "draft"
     write_json_file(report_json_path, report_payload)
     return {
         "report_md": str(report_md_path),

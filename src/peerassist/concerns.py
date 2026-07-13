@@ -45,6 +45,11 @@ def concerns_from_checks(checks: list[DeterministicCheck]) -> list[Concern]:
                 author_action="Please clarify the calculation basis and provide enough detail for readers to reproduce it.",
                 status=ConcernStatus.PENDING_HUMAN_CONFIRMATION,
                 source_check_ids=[check.id],
+                metadata={
+                    "producer_namespace": "deterministic_checks",
+                    "producer_version": "v1",
+                    "issue_anchor": check.id,
+                },
             )
         )
     return concerns
@@ -56,6 +61,13 @@ def concern_from_agent_draft(
     concern_id = draft.id if draft.id.startswith("concern_") else f"concern_{draft.id}"
     return Concern(
         id=concern_id,
+        finding_lineage_id=draft.finding_lineage_id,
+        finding_id=draft.finding_id,
+        revision=draft.revision,
+        supersedes=list(draft.supersedes),
+        reconciles=list(draft.reconciles),
+        affected_claim_ids=list(draft.affected_claim_ids),
+        importance=draft.importance,
         level=draft.level,
         category=draft.category,
         title=draft.title,

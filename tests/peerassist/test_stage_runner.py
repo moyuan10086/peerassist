@@ -7,9 +7,11 @@ from pathlib import Path
 from common.pipeline_context import (
     init_full_pipeline_context,
     parse_stage_dir,
+    peerassist_stage_dir,
     refcheck_stage_dir,
     write_json_file,
 )
+from peerassist.confirmation_server import _persist_manual_selection_concern
 from peerassist.stage_runner import run_peerassist_stage
 
 
@@ -230,6 +232,82 @@ def test_run_peerassist_stage_fast_writes_artifacts(tmp_path: Path) -> None:
     trace_text = Path(result.outputs["tool_trace"]).read_text(encoding="utf-8")
     assert "resolve_parse_provider" in trace_text
     assert "deterministic_consistency_checks" in trace_text
+
+
+def test_candidate_stage_writes_profile_queue_and_lineage_without_final_manifest(
+    tmp_path: Path,
+) -> None:
+    run_dir, source_pdf, _markdown = _stage_fixture(
+        tmp_path,
+        "# Demo Paper\n\n## Abstract\nThe success rate was 30/100 (40%).\n",
+    )
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(),
+        run_dir=run_dir,
+        paper_key="demo",
+        paper_pdf=source_pdf,
+        mode="fast",
+    )
+
+    assert result.status == "ok"
+    for key in (
+        "evidence_ledger",
+        "paper_profile",
+        "claim_graph",
+        "experiment_inventory",
+        "review_plan",
+        "citation_audit",
+        "deterministic_checks",
+        "concerns",
+        "confirmation_review_queue",
+    ):
+        assert Path(result.outputs[key]).exists()
+    out_dir = peerassist_stage_dir(run_dir)
+    assert not (out_dir / "current_final_report.json").exists()
+    assert not (out_dir / "reports").exists()
+
+    concerns = json.loads(Path(result.outputs["concerns"]).read_text(encoding="utf-8"))["concerns"]
+    assert concerns
+    for concern in concerns:
+        assert concern["finding_lineage_id"].startswith("fln_")
+        assert concern["finding_id"].startswith("fnd_")
+        assert concern["revision"] == 1
+
+    manual = _persist_manual_selection_concern(
+        run_dir=run_dir,
+        paper_id="demo",
+        payload={"selected_text": "The success rate was 30/100 (40%).", "note": "请核对分母。"},
+    )
+    updated = json.loads(Path(manual["concerns_path"]).read_text(encoding="utf-8"))["concerns"]
+    manual_concern = next(row for row in updated if row["id"] == manual["concern_id"])
+    assert manual_concern["finding_lineage_id"].startswith("fln_")
+    assert manual_concern["finding_id"].startswith("fnd_")
+    assert manual_concern["revision"] == 1
+
+
+def test_candidate_citation_findings_have_distinct_stable_lineages(tmp_path: Path) -> None:
+    run_dir, source_pdf, _markdown = _stage_fixture(
+        tmp_path,
+        (
+            "Prior work supports the first claim [1] and the second claim [2].\n\n"
+            "## References\n[1] First Study. 2024.\n[2] Second Study. 2025.\n"
+        ),
+    )
+
+    result = run_peerassist_stage(
+        repo_root=Path.cwd(),
+        run_dir=run_dir,
+        paper_key="demo",
+        paper_pdf=source_pdf,
+        mode="fast",
+    )
+
+    concerns = json.loads(Path(result.outputs["concerns"]).read_text(encoding="utf-8"))["concerns"]
+    citation_concerns = [row for row in concerns if row["category"] == "citation"]
+    assert len(citation_concerns) >= 2
+    assert all(row["finding_id"].startswith("fnd_") for row in citation_concerns)
+    assert len({row["finding_lineage_id"] for row in citation_concerns}) == len(citation_concerns)
 
 
 def test_run_peerassist_stage_off_is_skipped(tmp_path: Path) -> None:

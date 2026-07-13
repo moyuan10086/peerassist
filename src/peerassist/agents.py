@@ -63,7 +63,12 @@ def _draft_for_check(check: DeterministicCheck) -> AgentConcernDraft:
         author_action=(
             "Please clarify the calculation basis and provide enough detail for readers to reproduce it."
         ),
-        metadata={"check_message": check.message},
+        metadata={
+            "check_message": check.message,
+            "producer_namespace": "deterministic_agent",
+            "producer_version": "v1",
+            "issue_anchor": check.id,
+        },
     )
 
 
@@ -240,5 +245,10 @@ def _manual_check_concern(result: AgentReviewResult) -> Concern:
         author_action="Please review this check manually before relying on the report.",
         status=ConcernStatus.PENDING_HUMAN_CONFIRMATION,
         source_agent_ids=[result.agent_id],
-        metadata={"agent_status": result.status.value},
+        metadata={
+            "agent_status": result.status.value,
+            "producer_namespace": result.agent_id,
+            "producer_version": "v1",
+            "issue_anchor": "agent_incomplete",
+        },
     )

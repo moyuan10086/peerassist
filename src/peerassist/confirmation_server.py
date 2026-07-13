@@ -5684,6 +5684,9 @@ def _persist_manual_selection_concern(
         source_agent_ids=["human_pdf_annotator"],
         metadata={
             "source": "manual_pdf_selection",
+            "producer_namespace": "human_pdf_annotator",
+            "producer_version": "v1",
+            "issue_anchor": f"page={page}:{selected_text}:{note}",
             "selected_text": selected_text,
             "page": page,
             "created_at": timestamp,

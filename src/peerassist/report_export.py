@@ -176,6 +176,8 @@ def export_peerassist_report(
     language: str = "en",
     citation_audit: CitationAudit | None = None,
     citation_audit_path: str = "",
+    report_status: str = "draft",
+    confirmation_revision: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     evidence_lookup = evidence_lookup or {}
     normalized_language = str(language or "en").strip().lower()
@@ -248,6 +250,8 @@ def export_peerassist_report(
         "schema_version": "peerassist.report.v1",
         "paper_id": paper_id,
         "language": normalized_language,
+        "report_status": report_status,
+        "confirmation_revision": confirmation_revision,
         "confirmed_count": len(confirmed),
         "pending_count": len(pending),
         "concerns": [concern.model_dump(mode="json") for concern in active],
