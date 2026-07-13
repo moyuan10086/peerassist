@@ -291,3 +291,17 @@ model keys, paper secrets, or reviewer-private material here.
 - Browser E2E used a temporary awaiting-confirmation job: opened its PDF, displayed the task concern, jumped from evidence to page 2, confirmed the item, changed pending count from 1 to 0 and confirmation revision from 0 to 1, with no console errors. The temporary job was then archived and removed from the public list.
 - Local commit: `5ccbb2e feat: connect review jobs to human confirmation`.
 - Appended Feishu section `七十四、2026-07-14 ReviewJob 任务级人工确认工作区`; revision advanced from `106` to `107`. Append-only keyword verification confirmed sections `七十三` and `七十四` remain intact.
+
+## 2026-07-14 - Immutable final report discovery and download
+
+- Added a job-scoped final report artifact index derived only from `current_final_report.json` and its immutable manifest.
+- Report manifest and artifact paths must resolve inside the job's `reports/` directory; downloads verify the manifest SHA-256 before serving data.
+- Added `GET/HEAD /api/jobs/<id>/artifacts` and `/api/jobs/<id>/artifacts/<name>` for the four allowlisted English/Chinese Markdown/JSON reports.
+- Artifact downloads use attachment disposition; `?disposition=inline` provides a real browser preview without weakening path or hash validation.
+- The selected ReviewJob workspace now exposes report version, confirmation revision, file size, SHA-256 and safe download URLs.
+- The Chinese artifact window renders four report cards with online-view and download actions. Successful finalization automatically selects the job and opens the artifact window.
+- Focused verification passed 4 Review Job API tests, Ruff and the production frontend build.
+- End-to-end verification confirmed one task at confirmation revision 1, finalized it as report version `r000001`, displayed four artifacts, downloaded the Chinese Markdown with HTTP 200 and verified it contained PeerAssist report content. The page had no horizontal overflow or console errors.
+- Public HEAD verification returned `Content-Disposition: inline; filename="report.zh.md"` for the preview URL. The temporary task was archived and removed from the public list.
+- Local commit: `06e96e0 feat: expose immutable final report artifacts`.
+- Appended Feishu section `七十五、2026-07-14 不可变最终报告在线查看与下载`; revision advanced from `107` to `108`. Append-only keyword verification confirmed sections `七十四` and `七十五` remain intact.
