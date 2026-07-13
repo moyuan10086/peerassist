@@ -62,6 +62,186 @@ class EvidenceLedger(BaseModel):
         return self
 
 
+class ProvenanceKind(StrEnum):
+    REPORTED = "reported"
+    INFERRED = "inferred"
+    NOT_FOUND = "not_found"
+
+
+class GroundedField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: Any = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    provenance: ProvenanceKind = ProvenanceKind.NOT_FOUND
+    needs_human_review: bool = False
+
+    @model_validator(mode="after")
+    def enforce_grounding(self) -> GroundedField:
+        has_value = self.value not in (None, "", [], {})
+        if has_value and not self.evidence_ids:
+            self.needs_human_review = True
+        if not has_value:
+            self.needs_human_review = True
+            self.provenance = ProvenanceKind.NOT_FOUND
+        return self
+
+
+class PaperProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "peerassist.paper_profile.v1"
+    paper_id: str
+    title: GroundedField = Field(default_factory=GroundedField)
+    abstract: GroundedField = Field(default_factory=GroundedField)
+    domain: GroundedField = Field(default_factory=GroundedField)
+    paper_type: GroundedField = Field(default_factory=GroundedField)
+    research_question: GroundedField = Field(default_factory=GroundedField)
+    contributions: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    section_roles: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    method_inputs: GroundedField = Field(default_factory=GroundedField)
+    method_outputs: GroundedField = Field(default_factory=GroundedField)
+    method_assumptions: GroundedField = Field(default_factory=GroundedField)
+    conclusions: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    conclusion_boundaries: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    parse_warnings: list[str] = Field(default_factory=list)
+
+    def grounded_fields(self) -> list[GroundedField]:
+        return [
+            self.title,
+            self.abstract,
+            self.domain,
+            self.paper_type,
+            self.research_question,
+            self.contributions,
+            self.section_roles,
+            self.method_inputs,
+            self.method_outputs,
+            self.method_assumptions,
+            self.conclusions,
+            self.conclusion_boundaries,
+        ]
+
+
+class ClaimSupportStatus(StrEnum):
+    SUPPORTED = "supported"
+    PARTIALLY_SUPPORTED = "partially_supported"
+    CONFLICTING = "conflicting"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class ProfileClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    text: str
+    claim_type: str
+    centrality: float = Field(ge=0, le=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    support_evidence_ids: list[str] = Field(default_factory=list)
+    support_status: ClaimSupportStatus = ClaimSupportStatus.INSUFFICIENT_EVIDENCE
+    conclusion_boundaries: list[str] = Field(default_factory=list)
+    benign_explanations: list[str] = Field(default_factory=list)
+
+
+class ClaimSupportEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_evidence_id: str
+    target_claim_id: str
+    relation: str = "supported_by"
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ClaimGraph(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "peerassist.claim_graph.v1"
+    paper_id: str
+    claims: list[ProfileClaim] = Field(default_factory=list)
+    edges: list[ClaimSupportEdge] = Field(default_factory=list)
+
+
+class ExperimentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    experiment_id: str
+    datasets: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    sample_sizes: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    data_splits: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    baselines: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    metrics: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    random_seeds: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    statistics: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    ablations: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    key_figures: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    key_tables: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+
+    def grounded_fields(self) -> list[GroundedField]:
+        return [
+            self.datasets,
+            self.sample_sizes,
+            self.data_splits,
+            self.baselines,
+            self.metrics,
+            self.random_seeds,
+            self.statistics,
+            self.ablations,
+            self.key_figures,
+            self.key_tables,
+        ]
+
+
+class ExperimentInventory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "peerassist.experiment_inventory.v1"
+    paper_id: str
+    experiments: list[ExperimentRecord] = Field(default_factory=list)
+
+
+class ReviewRouteItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int = Field(ge=1)
+    priority: str
+    reason: str
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AgentReviewAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    focus: str
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ReviewPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "peerassist.review_plan.v1"
+    paper_id: str
+    core_claim_ids: list[str] = Field(default_factory=list)
+    reading_route: list[ReviewRouteItem] = Field(default_factory=list)
+    agent_assignments: list[AgentReviewAssignment] = Field(default_factory=list)
+    collapsed_minor_categories: list[str] = Field(
+        default_factory=lambda: ["wording", "formatting", "minor_style"]
+    )
+
+
+class PaperUnderstandingArtifacts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: PaperProfile
+    claim_graph: ClaimGraph
+    experiment_inventory: ExperimentInventory
+    review_plan: ReviewPlan
+    artifact_paths: dict[str, str] = Field(default_factory=dict)
+
+
 class DeterministicCheckApplicability(StrEnum):
     APPLICABLE = "applicable"
     NOT_APPLICABLE = "not_applicable"
