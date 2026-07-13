@@ -27,8 +27,40 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
+type GetOrInsertComputed = (key: unknown, callback: (key: unknown) => unknown) => unknown;
+
+const mapPrototype = Map.prototype as Map<unknown, unknown> & {
+  getOrInsertComputed?: GetOrInsertComputed;
+};
+if (!mapPrototype.getOrInsertComputed) {
+  Object.defineProperty(mapPrototype, "getOrInsertComputed", {
+    configurable: true,
+    value(this: Map<unknown, unknown>, key: unknown, callback: (key: unknown) => unknown) {
+      if (this.has(key)) return this.get(key);
+      const value = callback(key);
+      this.set(key, value);
+      return value;
+    },
+  });
+}
+
+const weakMapPrototype = WeakMap.prototype as WeakMap<object, unknown> & {
+  getOrInsertComputed?: GetOrInsertComputed;
+};
+if (!weakMapPrototype.getOrInsertComputed) {
+  Object.defineProperty(weakMapPrototype, "getOrInsertComputed", {
+    configurable: true,
+    value(this: WeakMap<object, unknown>, key: object, callback: (key: object) => unknown) {
+      if (this.has(key)) return this.get(key);
+      const value = callback(key);
+      this.set(key, value);
+      return value;
+    },
+  });
+}
+
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
+  "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
   import.meta.url,
 ).toString();
 
