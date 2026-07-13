@@ -179,3 +179,19 @@ model keys, paper secrets, or reviewer-private material here.
 - Browser verification on the current 11-page demo paper: desktop 1440x960 reached rendered PDF plus text layer in about 3.27 s; mobile 390x844 in about 4.09 s; both had zero horizontal overflow. Selection propagation and inspector expansion were also verified.
 - Focused verification: frontend production build passed; three confirmation server tests passed; public `/legacy` redirect, PDF `206`, immutable asset caching and HTTP `200` workspace access were verified.
 - Appended Feishu section `六十二、2026-07-13 PeerAssist PDF 首屏性能与审稿工作台重构`; revision advanced from `94` to `95`. Keyword verification confirmed both sections `六十一` and `六十二` remain present. No overwrite operation was used, and no model key, GitHub token or private review material was written.
+
+## 2026-07-13 - End-to-end review Milestone A foundation
+
+- Approved and committed the real-manuscript Milestone A design and implementation plan, including full-SHA Paper identity, multiple ReviewJobs per Paper, candidate/final report separation, local-first parsing and per-task external-service consent.
+- Implemented strict durable job contracts and the cross-process file repository: revision CAS, monotonic durable events, damaged-tail recovery warnings, worker leases, deletion tombstones, committed checkpoints/manifests and one authoritative current-stage pointer.
+- Focused verification reached 24 passing contract tests and 58 passing repository tests; the concurrency/recovery subset passed five consecutive runs with 34 tests per run, and Ruff passed.
+- Appended Feishu section `六十三、2026-07-13 真实论文端到端审稿里程碑 A 启动`; revision advanced from `95` to `96`. Keyword verification confirmed both sections `六十二` and `六十三` remain present.
+- Sync used `block_insert_after` only. No overwrite, credential, manuscript-private content or reviewer-private material was used.
+
+## 2026-07-13 - Bounded streaming PDF upload
+
+- Added direct-stream and multipart PDF persistence with incremental SHA-256, actual-byte limits, MIME/filename/PDF-header validation, unique mode-0600 temporary files and complete interruption/parse cleanup.
+- Added a separate 64 KiB multipart overhead budget, directory-fd/O_NOFOLLOW publication, atomic source-and-record locking, immutable source-field checks and concurrent duplicate convergence.
+- Focused upload verification reached 28 passing tests. The contract, repository and upload suite reached 86 passing tests with Ruff clean.
+- Appended Feishu section `六十四、2026-07-13 有界 PDF 流式上传完成`; revision advanced from `96` to `97`. Keyword verification confirmed both sections `六十三` and `六十四` remain present.
+- Sync used `block_insert_after` only and stored no credentials or private manuscript content.
