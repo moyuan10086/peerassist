@@ -18,6 +18,8 @@ from common.storage import exclusive_file_lock
 from peerassist.job_repository import PaperRepository, RepositoryCorruptionError
 from schemas.peerassist_jobs import PaperRecord
 
+MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
 
 class UploadError(Exception):
     """Base upload error."""
@@ -243,6 +245,9 @@ def persist_multipart_upload(
         raise UploadParseError("content_length must be non-negative")
 
     limit = _configured_limit(max_pdf_bytes)
+    max_request_bytes = limit + MAX_MULTIPART_OVERHEAD_BYTES
+    if content_length is not None and content_length > max_request_bytes:
+        raise UploadTooLargeError("declared multipart size exceeds the configured limit")
     current_header_name = bytearray()
     current_header_value = bytearray()
     headers: dict[bytes, bytes] = {}
@@ -317,9 +322,14 @@ def persist_multipart_upload(
         "on_end": on_end,
     }
     parser = MultipartParser(parameters[b"boundary"], callbacks)
+    request_size = 0
     try:
         for chunk in chunks:
-            parser.write(bytes(chunk))
+            data = bytes(chunk)
+            request_size += len(data)
+            if request_size > max_request_bytes:
+                raise UploadTooLargeError("actual multipart size exceeds the configured limit")
+            parser.write(data)
         parser.finalize()
         if not ended or not file_seen or not file_ended or sink is None:
             raise UploadParseError("multipart request is incomplete")

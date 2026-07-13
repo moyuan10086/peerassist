@@ -242,6 +242,30 @@ def test_declared_oversize_is_rejected_before_stream_consumption(tmp_path: Path)
     _assert_no_partial_upload(tmp_path)
 
 
+def test_declared_oversize_multipart_is_rejected_before_stream_consumption(
+    tmp_path: Path,
+) -> None:
+    repository = PaperRepository(tmp_path)
+    consumed = False
+
+    def content():
+        nonlocal consumed
+        consumed = True
+        yield _multipart_body(PDF)
+
+    with pytest.raises(UploadTooLargeError):
+        persist_multipart_upload(
+            content(),
+            content_type=f"multipart/form-data; boundary={BOUNDARY}",
+            content_length=len(PDF) + upload.MAX_MULTIPART_OVERHEAD_BYTES + 1,
+            max_pdf_bytes=len(PDF),
+            repository=repository,
+        )
+
+    assert consumed is False
+    _assert_no_partial_upload(tmp_path)
+
+
 def test_chunk_crossing_limit_is_removed(tmp_path: Path) -> None:
     repository = PaperRepository(tmp_path)
     chunks = [PDF[:10], PDF[10:20], PDF[20:]]
