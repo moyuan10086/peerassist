@@ -76,6 +76,36 @@ def test_corrupted_pdf_returns_explicit_local_state(tmp_path: Path) -> None:
     assert result.content_list_path is None
 
 
+def test_page_extraction_corruption_returns_corrupted_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "partially-broken.pdf"
+    source.write_bytes(b"%PDF-placeholder")
+
+    class BrokenDocument:
+        needs_pass = False
+        page_count = 1
+
+        def load_page(self, index: int):
+            raise RuntimeError("cannot load page tree")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pymupdf, "open", lambda path: BrokenDocument())
+    result = local_parser._parse_worker(
+        source,
+        tmp_path / "parse",
+        memory_limit_bytes=0,
+        cpu_limit_seconds=0,
+    )
+
+    assert result.status is LocalParseStatus.CORRUPTED
+    assert result.error_code == "corrupted_pdf"
+    assert "pdf_page_extraction_failed" in result.warnings
+
+
 def test_encrypted_pdf_returns_explicit_local_state(tmp_path: Path) -> None:
     source = tmp_path / "encrypted.pdf"
     document = pymupdf.open()
@@ -108,9 +138,16 @@ def test_local_parser_timeout_is_explicit_and_leaves_no_parse_artifacts(
 
     monkeypatch.setattr(local_parser.subprocess, "run", timeout)
     output = tmp_path / "parse"
+    output.mkdir()
+    atomic_markdown_temp = output / ".paper.local.md.deadbeef.tmp"
+    atomic_content_temp = output / ".paper.local.content_list.json.deadbeef.tmp"
+    atomic_markdown_temp.write_text("partial", encoding="utf-8")
+    atomic_content_temp.write_text("partial", encoding="utf-8")
     result = parse_pdf_locally(source, output, timeout_seconds=0.01)
 
     assert result.status is LocalParseStatus.FAILED
     assert "local_parser_timeout" in result.warnings
     assert not (output / "paper.local.md").exists()
     assert not (output / "paper.local.content_list.json").exists()
+    assert not atomic_markdown_temp.exists()
+    assert not atomic_content_temp.exists()

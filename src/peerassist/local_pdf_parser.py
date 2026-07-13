@@ -86,6 +86,17 @@ def _apply_resource_limits(memory_limit_bytes: int, cpu_limit_seconds: int) -> N
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit_seconds, cpu_limit_seconds + 1))
 
 
+def _cleanup_parse_artifacts(output_dir: Path, result_path: Path | None = None) -> None:
+    for name in ("paper.local.md", "paper.local.content_list.json"):
+        (output_dir / name).unlink(missing_ok=True)
+        for temporary in output_dir.glob(f".{name}.*.tmp"):
+            temporary.unlink(missing_ok=True)
+    if result_path is not None:
+        result_path.unlink(missing_ok=True)
+        for temporary in output_dir.glob(f".{result_path.name}.*.tmp"):
+            temporary.unlink(missing_ok=True)
+
+
 def _parse_worker(
     source_pdf: Path,
     output_dir: Path,
@@ -119,81 +130,91 @@ def _parse_worker(
         content_list: list[dict[str, Any]] = []
         markdown_lines: list[str] = []
         text_char_count = 0
-        for page_index in range(document.page_count):
-            page_number = page_index + 1
-            page = document.load_page(page_index)
-            page_dict = page.get_text("dict", sort=True)
-            blocks: list[LocalPdfBlock] = []
-            page_text_lines: list[str] = []
-            markdown_lines.append(f"<!-- page: {page_number} -->")
-            block_number = 0
-            for raw_block in page_dict.get("blocks", []):
-                if not isinstance(raw_block, dict) or int(raw_block.get("type", -1)) != 0:
-                    continue
-                raw_lines = raw_block.get("lines")
-                if not isinstance(raw_lines, list):
-                    continue
-                lines: list[LocalPdfLine] = []
-                for raw_line in raw_lines:
-                    if not isinstance(raw_line, dict):
+        try:
+            for page_index in range(document.page_count):
+                page_number = page_index + 1
+                page = document.load_page(page_index)
+                page_dict = page.get_text("dict", sort=True)
+                blocks: list[LocalPdfBlock] = []
+                page_text_lines: list[str] = []
+                markdown_lines.append(f"<!-- page: {page_number} -->")
+                block_number = 0
+                for raw_block in page_dict.get("blocks", []):
+                    if not isinstance(raw_block, dict) or int(raw_block.get("type", -1)) != 0:
                         continue
-                    spans = raw_line.get("spans")
-                    if not isinstance(spans, list):
+                    raw_lines = raw_block.get("lines")
+                    if not isinstance(raw_lines, list):
                         continue
-                    text = "".join(
-                        str(span.get("text") or "")
-                        for span in spans
-                        if isinstance(span, dict)
-                    ).strip()
-                    if not text:
-                        continue
-                    line_number = len(lines) + 1
-                    locator = (
-                        f"page {page_number}, block {block_number + 1}, line {line_number}"
-                    )
-                    lines.append(
-                        LocalPdfLine(
-                            text=text,
-                            locator=locator,
-                            bbox=_bbox(raw_line.get("bbox")),
+                    lines: list[LocalPdfLine] = []
+                    for raw_line in raw_lines:
+                        if not isinstance(raw_line, dict):
+                            continue
+                        spans = raw_line.get("spans")
+                        if not isinstance(spans, list):
+                            continue
+                        text = "".join(
+                            str(span.get("text") or "")
+                            for span in spans
+                            if isinstance(span, dict)
+                        ).strip()
+                        if not text:
+                            continue
+                        line_number = len(lines) + 1
+                        locator = (
+                            f"page {page_number}, block {block_number + 1}, line {line_number}"
                         )
+                        lines.append(
+                            LocalPdfLine(
+                                text=text,
+                                locator=locator,
+                                bbox=_bbox(raw_line.get("bbox")),
+                            )
+                        )
+                    if not lines:
+                        continue
+                    block_number += 1
+                    block_text = "\n".join(line.text for line in lines)
+                    block = LocalPdfBlock(
+                        block_id=f"P{page_number:04d}-B{block_number:04d}",
+                        page=page_number,
+                        text=block_text,
+                        bbox=_bbox(raw_block.get("bbox")),
+                        lines=lines,
                     )
-                if not lines:
-                    continue
-                block_number += 1
-                block_text = "\n".join(line.text for line in lines)
-                block = LocalPdfBlock(
-                    block_id=f"P{page_number:04d}-B{block_number:04d}",
-                    page=page_number,
-                    text=block_text,
-                    bbox=_bbox(raw_block.get("bbox")),
-                    lines=lines,
+                    blocks.append(block)
+                    page_text_lines.extend(line.text for line in lines)
+                    markdown_lines.extend(line.text for line in lines)
+                    content_list.append(
+                        {
+                            "page_idx": page_index,
+                            "page": page_number,
+                            "type": "text",
+                            "text": block_text,
+                            "bbox": block.bbox,
+                            "block_id": block.block_id,
+                            "lines": [line.model_dump(mode="json") for line in lines],
+                        }
+                    )
+                markdown_lines.append("")
+                page_text = "\n".join(page_text_lines)
+                text_char_count += len(page_text)
+                pages.append(
+                    LocalPdfPage(
+                        page=page_number,
+                        width=float(page.rect.width),
+                        height=float(page.rect.height),
+                        text=page_text,
+                        blocks=blocks,
+                    )
                 )
-                blocks.append(block)
-                page_text_lines.extend(line.text for line in lines)
-                markdown_lines.extend(line.text for line in lines)
-                content_list.append(
-                    {
-                        "page_idx": page_index,
-                        "page": page_number,
-                        "type": "text",
-                        "text": block_text,
-                        "bbox": block.bbox,
-                        "block_id": block.block_id,
-                        "lines": [line.model_dump(mode="json") for line in lines],
-                    }
-                )
-            markdown_lines.append("")
-            page_text = "\n".join(page_text_lines)
-            text_char_count += len(page_text)
-            pages.append(
-                LocalPdfPage(
-                    page=page_number,
-                    width=float(page.rect.width),
-                    height=float(page.rect.height),
-                    text=page_text,
-                    blocks=blocks,
-                )
+        except (pymupdf.FileDataError, RuntimeError):
+            _cleanup_parse_artifacts(output_dir)
+            return LocalPdfParseResult(
+                status=LocalParseStatus.CORRUPTED,
+                source_pdf=str(source_pdf.resolve()),
+                page_count=document.page_count,
+                warnings=["pdf_page_extraction_failed"],
+                error_code="corrupted_pdf",
             )
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -232,10 +253,7 @@ def parse_pdf_locally(
     source_pdf = Path(source_pdf)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    markdown_path = output_dir / "paper.local.md"
-    content_list_path = output_dir / "paper.local.content_list.json"
-    markdown_path.unlink(missing_ok=True)
-    content_list_path.unlink(missing_ok=True)
+    _cleanup_parse_artifacts(output_dir)
     if not source_pdf.is_file():
         return LocalPdfParseResult(
             status=LocalParseStatus.FAILED,
@@ -269,9 +287,7 @@ def parse_pdf_locally(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
-        result_path.unlink(missing_ok=True)
-        markdown_path.unlink(missing_ok=True)
-        content_list_path.unlink(missing_ok=True)
+        _cleanup_parse_artifacts(output_dir, result_path)
         return LocalPdfParseResult(
             status=LocalParseStatus.FAILED,
             source_pdf=str(source_pdf.resolve()),
@@ -279,9 +295,7 @@ def parse_pdf_locally(
             error_code="local_parser_timeout",
         )
     if completed.returncode != 0 or not result_path.is_file():
-        result_path.unlink(missing_ok=True)
-        markdown_path.unlink(missing_ok=True)
-        content_list_path.unlink(missing_ok=True)
+        _cleanup_parse_artifacts(output_dir, result_path)
         return LocalPdfParseResult(
             status=LocalParseStatus.FAILED,
             source_pdf=str(source_pdf.resolve()),
