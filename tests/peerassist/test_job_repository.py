@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+import peerassist.job_repository as job_repository
 from common.storage import write_json_atomic
 from common.types import JobState
 from peerassist.job_repository import (
@@ -450,6 +451,23 @@ def test_paper_repository_rejects_symlinked_identity_directory(tmp_path: Path) -
     assert not (outside / "paper.json").exists()
 
 
+def test_identity_directory_creation_fsyncs_repository_parents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper_repository = PaperRepository(tmp_path)
+    job_repository = ReviewJobRepository(tmp_path)
+    fsynced: list[Path] = []
+    monkeypatch.setattr(paper_repository, "_fsync_directory", fsynced.append, raising=False)
+    monkeypatch.setattr(job_repository, "_fsync_directory", fsynced.append)
+
+    paper_repository.create_or_get(PaperRecord(paper_id=PAPER_SHA))
+    job_repository.create(_job_contract())
+
+    assert paper_repository.papers_dir in fsynced
+    assert job_repository.jobs_dir in fsynced
+
+
 def test_review_job_repository_create_read_list_and_cas(tmp_path: Path) -> None:
     repository = ReviewJobRepository(tmp_path)
     first = _job_contract()
@@ -534,6 +552,18 @@ def test_review_job_repository_stale_delete_conflicts_without_archiving(tmp_path
     assert not (tmp_path / "jobs" / ".deleted" / str(job.id)).exists()
 
 
+def test_review_job_repository_create_rejects_deleted_job_id(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = _job_contract()
+    tombstone = tmp_path / "jobs" / ".deleted" / str(job.id)
+    tombstone.mkdir()
+
+    with pytest.raises(RepositoryConflictError, match="deleted"):
+        repository.create(job)
+
+    assert not (tmp_path / "jobs" / str(job.id)).exists()
+
+
 def test_stale_cas_across_processes_has_one_winner_without_mutation(tmp_path: Path) -> None:
     repository = ReviewJobRepository(tmp_path)
     job = repository.create(_job_contract())
@@ -609,6 +639,42 @@ def test_event_replay_after_last_event_id_and_damaged_tail_recovery(tmp_path: Pa
     assert events_path.read_bytes()[:valid_size].endswith(b"\n")
     assert repository.get(job.id).last_event_id == 4
     assert repository.append_event(job.id, "resumed").event_id == 5
+
+
+def test_event_replay_reconciles_last_event_id_after_post_append_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+
+    def fail_state_update(*args: object, **kwargs: object) -> None:
+        raise OSError("injected state failure")
+
+    monkeypatch.setattr(repository, "_update_last_event_id", fail_state_update)
+    with pytest.raises(OSError, match="injected state failure"):
+        repository.append_event(job.id, "committed-before-crash")
+    monkeypatch.undo()
+
+    assert ReviewJobState.model_validate(
+        json.loads((tmp_path / "jobs" / str(job.id) / "job.json").read_text(encoding="utf-8"))
+    ).last_event_id == 0
+    assert [event.event_id for event in repository.replay_events(job.id)] == [1]
+    assert repository.get(job.id).last_event_id == 1
+
+
+def test_get_reconciles_last_event_id_to_validated_event_tail(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    repository.append_event(job.id, "created")
+    state_path = tmp_path / "jobs" / str(job.id) / "job.json"
+    stale = ReviewJobState.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+    write_json_atomic(state_path, stale.model_copy(update={"last_event_id": 9}).model_dump(mode="json"))
+
+    reconciled = repository.get(job.id)
+
+    assert reconciled.last_event_id == 1
+    assert ReviewJobState.model_validate(json.loads(state_path.read_text(encoding="utf-8"))) == reconciled
 
 
 def test_events_jsonl_symlink_is_rejected_for_append_and_replay(tmp_path: Path) -> None:
@@ -816,8 +882,10 @@ def test_commit_stage_manifest_validates_then_materializes_read_only_view(tmp_pa
     assert StageManifest.model_validate_json(pointer.read_text(encoding="utf-8")) == manifest
     assert StageManifest.model_validate_json(immutable.read_text(encoding="utf-8")) == manifest
     assert compatibility.read_bytes() == content
+    assert os.path.samefile(attempt_output, compatibility)
     assert stat.S_IMODE(compatibility.stat().st_mode) & 0o222 == 0
     assert attempt_output.read_bytes() == content
+    assert repository.get(job.id).current_stage_manifests == {ReviewStage.PARSE: manifest}
 
 
 def test_manifest_pointer_failure_preserves_previous_commit_and_attempts(
@@ -852,6 +920,89 @@ def test_manifest_pointer_failure_preserves_previous_commit_and_attempts(
     assert (
         tmp_path / "jobs" / str(job.id) / "manifests" / "parse" / "attempt-2.json"
     ).is_file()
+    unpublished = (
+        tmp_path
+        / "jobs"
+        / str(job.id)
+        / "compatibility_views"
+        / "parse"
+        / "attempt-2"
+        / "paper.json"
+    )
+    assert os.path.samefile(second_output, unpublished)
+
+
+def test_post_pointer_failure_is_reconciled_without_rolling_back_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    first_content = b'{"attempt": 1}\n'
+    second_content = b'{"attempt": 2}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", first_content)
+    second_output = _write_stage_output(tmp_path, job.id, "attempt-2", second_content)
+    first_manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=first_content)
+    second_manifest = _stage_manifest(job.id, attempt_id="attempt-2", content=second_content)
+    _write_stage_checkpoint(tmp_path, job.id, first_manifest)
+    _write_stage_checkpoint(tmp_path, job.id, second_manifest)
+    repository.commit_stage_outputs(job.id, first_manifest)
+    original_write_json_atomic = job_repository.write_json_atomic
+
+    def fail_state_write(path: Path, payload: dict[str, object]) -> None:
+        if Path(path).name == "job.json":
+            raise OSError("injected post-pointer state failure")
+        original_write_json_atomic(path, payload)
+
+    monkeypatch.setattr(job_repository, "write_json_atomic", fail_state_write)
+    with pytest.raises(OSError, match="post-pointer"):
+        repository.commit_stage_outputs(job.id, second_manifest)
+    monkeypatch.undo()
+
+    root = tmp_path / "jobs" / str(job.id)
+    pointer = StageManifest.model_validate_json(
+        (root / "current_stages" / "parse.json").read_text(encoding="utf-8")
+    )
+    stale_state = ReviewJobState.model_validate_json((root / "job.json").read_text(encoding="utf-8"))
+    published = root / "run" / "stages" / "parse" / "paper.json"
+    assert pointer == second_manifest
+    assert stale_state.current_stage_manifests == {ReviewStage.PARSE: first_manifest}
+    assert published.read_bytes() == first_content
+
+    reconciled = repository.get(job.id)
+
+    assert reconciled.current_stage_manifests == {ReviewStage.PARSE: second_manifest}
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) == second_manifest
+    assert published.read_bytes() == second_content
+    assert os.path.samefile(second_output, published)
+
+
+def test_manifest_commit_rejects_injected_regular_compatibility_artifact(
+    tmp_path: Path,
+) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    output = _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    _write_stage_checkpoint(tmp_path, job.id, manifest)
+    injected = (
+        tmp_path
+        / "jobs"
+        / str(job.id)
+        / "compatibility_views"
+        / "parse"
+        / "attempt-1"
+        / "paper.json"
+    )
+    injected.parent.mkdir(parents=True)
+    injected.write_bytes(content)
+
+    with pytest.raises(ManifestValidationError, match="hard link"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+    assert not os.path.samefile(output, injected)
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) is None
 
 
 def test_manifest_validation_rejects_hash_mismatch_and_symlink_escape(tmp_path: Path) -> None:

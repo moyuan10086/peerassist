@@ -101,7 +101,10 @@ class PaperRepository:
         with exclusive_file_lock(lock_path):
             if path.parent.is_symlink():
                 raise RepositoryCorruptionError("paper identity directory is a symlink")
+            identity_created = not path.parent.exists()
             path.parent.mkdir(exist_ok=True)
+            if identity_created:
+                self._fsync_directory(self.papers_dir)
             if path.is_symlink():
                 raise RepositoryCorruptionError("paper record is a symlink")
             if path.exists():
@@ -116,6 +119,14 @@ class PaperRepository:
         if not path.is_file():
             raise RepositoryNotFoundError(f"paper not found: {paper_id}")
         return PaperRecord.model_validate(read_json(path))
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 class ReviewJobRepository:
@@ -151,6 +162,11 @@ class ReviewJobRepository:
             raise RepositoryConflictError("new review jobs must start at revision 0")
         with exclusive_file_lock(self._lock_path(validated.id)):
             path = self._state_path(validated.id)
+            deleted_path = self.deleted_dir / str(validated.id)
+            if deleted_path.is_symlink():
+                raise RepositoryCorruptionError("deleted review job path is a symlink")
+            if deleted_path.exists():
+                raise RepositoryConflictError(f"review job was deleted: {validated.id}")
             if path.parent.is_symlink():
                 raise RepositoryCorruptionError("review job directory is a symlink")
             if path.is_symlink():
@@ -158,12 +174,18 @@ class ReviewJobRepository:
             if path.exists():
                 raise RepositoryConflictError(f"review job already exists: {validated.id}")
             root = path.parent
+            identity_created = not root.exists()
             (root / "run").mkdir(parents=True, exist_ok=True)
+            if identity_created:
+                self._fsync_directory(self.jobs_dir)
             write_json_atomic(path, _json_payload(validated))
         return validated
 
     def get(self, job_id: UUID | str) -> ReviewJobState:
-        return self._load_state(job_id)
+        with exclusive_file_lock(self._lock_path(job_id)):
+            state = self._load_state(job_id)
+            state = self._reconcile_last_event_id_locked(job_id, state)
+            return self._reconcile_stage_views_locked(job_id, state)
 
     def list(self) -> list[ReviewJobState]:
         jobs: list[ReviewJobState] = []
@@ -176,7 +198,7 @@ class ReviewJobRepository:
                 continue
             state_path = path / "job.json"
             if state_path.is_file():
-                jobs.append(ReviewJobState.model_validate(read_json(state_path)))
+                jobs.append(self.get(path.name))
         return jobs
 
     def compare_and_swap(
@@ -391,9 +413,27 @@ class ReviewJobRepository:
         if after_event_id < 0:
             raise ValueError("after_event_id must be non-negative")
         with exclusive_file_lock(self._lock_path(job_id)):
-            self._load_state(job_id)
+            state = self._load_state(job_id)
             events = self._read_events_locked(job_id)
+            self._reconcile_last_event_id_locked(job_id, state, events=events)
             return [event for event in events if event.event_id > after_event_id]
+
+    def _reconcile_last_event_id_locked(
+        self,
+        job_id: UUID | str,
+        state: ReviewJobState,
+        *,
+        events: list[ReviewJobEvent] | None = None,
+    ) -> ReviewJobState:
+        validated_events = self._read_events_locked(job_id) if events is None else events
+        last_event_id = validated_events[-1].event_id if validated_events else 0
+        if state.last_event_id == last_event_id:
+            return state
+        updated = state.model_copy(
+            update={"last_event_id": last_event_id, "updated_at": _utcnow()}
+        )
+        write_json_atomic(self._state_path(job_id), _json_payload(updated))
+        return updated
 
     def _claim_path(self, job_id: UUID | str) -> Path:
         return self._job_dir(job_id) / "worker_claim.json"
@@ -590,12 +630,12 @@ class ReviewJobRepository:
     def _replace_current_stage_pointer(self, path: Path, manifest: StageManifest) -> None:
         write_json_atomic(path, _json_payload(manifest))
 
-    def _materialize_compatibility_view(
+    def _prepare_compatibility_view(
         self,
         job_id: UUID | str,
         manifest: StageManifest,
         output_dir: Path,
-    ) -> None:
+    ) -> Path:
         root = self._job_dir(job_id)
         view_dir = self._mkdir_owned(
             root,
@@ -616,7 +656,12 @@ class ReviewJobRepository:
             target_artifact = target_parent / relative.name
             if target_artifact.is_symlink():
                 raise ManifestValidationError("compatibility artifact is a symlink escape")
-            if not target_artifact.exists():
+            if target_artifact.exists():
+                if not target_artifact.is_file() or not os.path.samefile(artifact, target_artifact):
+                    raise ManifestValidationError(
+                        "compatibility artifact must be a hard link to committed output"
+                    )
+            else:
                 os.link(artifact, target_artifact)
                 self._fsync_directory(target_parent)
             target_artifact.chmod(stat.S_IMODE(target_artifact.stat().st_mode) & ~0o222)
@@ -626,8 +671,21 @@ class ReviewJobRepository:
                 child.chmod(stat.S_IMODE(child.stat().st_mode) & ~0o222)
             current = Path(directory)
             current.chmod(stat.S_IMODE(current.stat().st_mode) & ~0o222)
+        return view_dir
+
+    def _publish_compatibility_view(
+        self,
+        job_id: UUID | str,
+        manifest: StageManifest,
+        view_dir: Path,
+    ) -> None:
+        root = self._job_dir(job_id)
         stages_dir = self._mkdir_owned(root, PurePosixPath("run", "stages"))
         target = stages_dir / manifest.stage.value
+        if target.is_symlink() and target.resolve() == view_dir.resolve():
+            return
+        if target.exists() and not target.is_symlink():
+            raise ManifestValidationError("compatibility stage target is not a symlink")
         temporary = stages_dir / f".{manifest.stage.value}.{uuid4().hex}.tmp"
         relative_target = os.path.relpath(view_dir, stages_dir)
         os.symlink(relative_target, temporary, target_is_directory=True)
@@ -636,6 +694,45 @@ class ReviewJobRepository:
             self._fsync_directory(stages_dir)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def _current_stage_manifests_locked(
+        self,
+        job_id: UUID | str,
+    ) -> dict[ReviewStage, StageManifest]:
+        root = self._job_dir(job_id)
+        pointer_dir = root / "current_stages"
+        if not pointer_dir.exists():
+            return {}
+        self._ensure_owned_path(root, pointer_dir)
+        manifests: dict[ReviewStage, StageManifest] = {}
+        for path in sorted(pointer_dir.glob("*.json")):
+            self._ensure_owned_path(root, path)
+            manifest = StageManifest.model_validate(read_json(path))
+            if path.stem != manifest.stage.value:
+                raise RepositoryCorruptionError("current stage pointer name does not match stage")
+            manifests[manifest.stage] = manifest
+        return manifests
+
+    def _reconcile_stage_views_locked(
+        self,
+        job_id: UUID | str,
+        state: ReviewJobState,
+    ) -> ReviewJobState:
+        manifests = self._current_stage_manifests_locked(job_id)
+        if state.current_stage_manifests != manifests:
+            state = state.model_copy(
+                update={
+                    "current_stage_manifests": manifests,
+                    "revision": state.revision + 1,
+                    "updated_at": _utcnow(),
+                }
+            )
+            write_json_atomic(self._state_path(job_id), _json_payload(state))
+        for manifest in manifests.values():
+            output_dir = self._validate_manifest_outputs(job_id, manifest)
+            view_dir = self._prepare_compatibility_view(job_id, manifest, output_dir)
+            self._publish_compatibility_view(job_id, manifest, view_dir)
+        return state
 
     def commit_stage_outputs(
         self,
@@ -659,22 +756,13 @@ class ReviewJobRepository:
                 PurePosixPath("manifests", validated.stage.value),
             )
             self._write_immutable_manifest(immutable, validated)
+            self._prepare_compatibility_view(job_id, validated, output_dir)
             pointer_dir = self._mkdir_owned(root, PurePosixPath("current_stages"))
             pointer = pointer_dir / f"{validated.stage.value}.json"
             if pointer.is_symlink():
                 raise ManifestValidationError("current stage pointer is a symlink escape")
             self._replace_current_stage_pointer(pointer, validated)
-            manifests = dict(state.current_stage_manifests)
-            manifests[validated.stage] = validated
-            updated = state.model_copy(
-                update={
-                    "current_stage_manifests": manifests,
-                    "revision": state.revision + 1,
-                    "updated_at": _utcnow(),
-                }
-            )
-            write_json_atomic(self._state_path(job_id), _json_payload(updated))
-            self._materialize_compatibility_view(job_id, validated, output_dir)
+            self._reconcile_stage_views_locked(job_id, state)
             return validated
 
     def current_stage_manifest(
