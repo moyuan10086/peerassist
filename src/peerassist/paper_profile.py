@@ -31,23 +31,22 @@ SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 REFERENCE_RE = re.compile(
     r"\b((?i:dataset|benchmark|corpus|experiment|evaluation))\s*[-:#]?\s*"
-    r"([A-Z0-9][A-Za-z0-9_-]*(?:\s+[A-Z0-9][A-Za-z0-9_-]*)*)\b"
+    r"([A-Z0-9][A-Za-z0-9_-]*"
+    r"(?:\s+(?:(?:for|of|and|the|in|on)\s+)?[A-Z0-9][A-Za-z0-9_-]*)*)\b"
 )
 OUTPERFORM_RE = re.compile(
     r"(?P<left>[A-Za-z][A-Za-z0-9 _-]*?)\s+"
     r"(?:(?P<negation>does not|did not|fails to|failed to)\s+)?"
     r"outperform(?:s|ed|ing)?\s+"
     r"(?P<right>[A-Za-z0-9][A-Za-z0-9 _-]*?)"
-    r"(?=\s+(?:on|in|using|for)\s+(?:the\s+)?"
-    r"(?:benchmark|dataset|corpus|test|held-out)\b|[.;]|$)",
+    r"(?=\s+(?:on|in|using|for|at|across|under)\s+|[.;,]|$)",
     re.IGNORECASE,
 )
 COMPARATIVE_RE = re.compile(
     r"(?P<left>[A-Za-z][A-Za-z0-9 _-]*?)\s+(?:is|are|was|were)\s+"
-    r"(?P<direction>better|worse)\s+than\s+"
+    r"(?:(?P<negation>not)\s+)?(?P<direction>better|worse)\s+than\s+"
     r"(?P<right>[A-Za-z0-9][A-Za-z0-9 _-]*?)"
-    r"(?=\s+(?:on|in|using|for)\s+(?:the\s+)?"
-    r"(?:benchmark|dataset|corpus|test|held-out)\b|[.;]|$)",
+    r"(?=\s+(?:on|in|using|for|at|across|under)\s+|[.;,]|$)",
     re.IGNORECASE,
 )
 
@@ -220,7 +219,7 @@ def _comparison(
         _entity_tokens(match.group("left")),
         _entity_tokens(match.group("right")),
         1 if match.group("direction").lower() == "better" else -1,
-        False,
+        bool(match.group("negation")),
     )
 
 
@@ -231,17 +230,17 @@ def _comparison_conflicts(claim_text: str, support_text: str) -> bool | None:
         return None
     claim_left, claim_right, claim_direction, claim_negated = claim
     support_left, support_right, support_direction, support_negated = support
-    if claim_negated:
-        return None
     if claim_left == support_left and claim_right == support_right:
         aligned_direction = support_direction
     elif claim_left == support_right and claim_right == support_left:
         aligned_direction = -support_direction
     else:
         return None
-    if support_negated:
-        return aligned_direction == claim_direction
-    return aligned_direction != claim_direction
+    if claim_negated == support_negated:
+        return not claim_negated and aligned_direction != claim_direction
+    positive_direction = aligned_direction if not support_negated else claim_direction
+    negated_direction = claim_direction if claim_negated else aligned_direction
+    return positive_direction == negated_direction
 
 
 def _is_conflicting_support(claim_text: str, support_text: str) -> bool:

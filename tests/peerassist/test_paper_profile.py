@@ -309,6 +309,51 @@ def test_reverse_negated_outperformance_is_not_a_conflict(tmp_path: Path) -> Non
     assert artifacts.claim_graph.edges[0].relation == "supported_by"
 
 
+def test_negated_claim_conflicts_with_positive_comparison(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-negated-claim",
+        source_sha256="4" * 64,
+        items=[
+            _item(
+                "claim",
+                "Our method does not outperform baseline X.",
+                section="Abstract",
+            ),
+            _item(
+                "result",
+                "Our method outperforms baseline X.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value == "conflicting"
+    assert artifacts.claim_graph.edges[0].relation == "conflicts_with"
+
+
+def test_not_better_comparison_conflicts_with_outperformance(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-not-better",
+        source_sha256="5" * 64,
+        items=[
+            _item("claim", "Our method outperforms baseline X.", section="Abstract"),
+            _item(
+                "result",
+                "Our method is not better than baseline X.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value == "conflicting"
+
+
 def test_reverse_outperformance_with_scope_is_a_conflict(tmp_path: Path) -> None:
     ledger = EvidenceLedger(
         paper_id="paper-scoped-comparison",
@@ -328,6 +373,37 @@ def test_reverse_outperformance_with_scope_is_a_conflict(tmp_path: Path) -> None
     claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
     assert claim.support_status.value == "conflicting"
     assert artifacts.claim_graph.edges[0].relation == "conflicts_with"
+
+
+def test_comparison_scope_is_trimmed_for_named_dataset_and_table(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-generic-scope",
+        source_sha256="6" * 64,
+        items=[
+            _item("claim", "Our method outperforms baseline X.", section="Abstract"),
+            _item(
+                "cifar-result",
+                "Baseline X outperforms our method on CIFAR-10.",
+                section="Results",
+            ),
+            _item(
+                "table-result",
+                "Our method is worse than baseline X in Table 2.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value == "conflicting"
+    claim_relations = {
+        edge.relation
+        for edge in artifacts.claim_graph.edges
+        if edge.target_claim_id == claim.claim_id
+    }
+    assert claim_relations == {"conflicts_with"}
 
 
 def test_multiword_dataset_names_with_shared_prefix_do_not_cross_link(tmp_path: Path) -> None:
@@ -354,6 +430,46 @@ def test_multiword_dataset_names_with_shared_prefix_do_not_cross_link(tmp_path: 
                 "data-test",
                 "Dataset Alpha Test contains n=80 samples.",
                 section="Dataset Alpha Test",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+    by_label = {
+        experiment.label.value: experiment
+        for experiment in artifacts.experiment_inventory.experiments
+    }
+
+    assert "data-train" in by_label["experiment a"].datasets.evidence_ids
+    assert "data-test" not in by_label["experiment a"].datasets.evidence_ids
+    assert "data-test" in by_label["experiment b"].datasets.evidence_ids
+    assert "data-train" not in by_label["experiment b"].datasets.evidence_ids
+
+
+def test_dataset_names_with_connectors_do_not_cross_link(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-connector-datasets",
+        source_sha256="7" * 64,
+        items=[
+            _item(
+                "exp-train",
+                "Experiment A evaluates Dataset Alpha for Training.",
+                section="Experiment A",
+            ),
+            _item(
+                "exp-test",
+                "Experiment B evaluates Dataset Alpha for Testing.",
+                section="Experiment B",
+            ),
+            _item(
+                "data-train",
+                "Dataset Alpha for Training contains n=100 samples.",
+                section="Dataset Alpha for Training",
+            ),
+            _item(
+                "data-test",
+                "Dataset Alpha for Testing contains n=80 samples.",
+                section="Dataset Alpha for Testing",
             ),
         ],
     )
