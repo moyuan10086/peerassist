@@ -54,6 +54,9 @@ def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path) -> None:
     thread.start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
+        status, health = _json(f"{base}/api/health")
+        assert status == 200
+        assert health["status"] == "ok"
         status, created = _json(
             f"{base}/api/reviews",
             method="POST",

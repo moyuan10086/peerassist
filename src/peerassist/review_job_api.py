@@ -85,6 +85,9 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         return self.server.review_service  # type: ignore[attr-defined,no-any-return]
 
     def do_GET(self) -> None:
+        if self.path == "/api/health":
+            self._send_json({"status": "ok", "service": "peerassist-review-jobs"})
+            return
         match = _JOB_RE.match(self.path)
         if match is None:
             self._send_json({"error": "not_found"}, status=404)
