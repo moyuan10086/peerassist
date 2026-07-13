@@ -4,11 +4,20 @@ import * as pdfjsLib from "pdfjs-dist";
 import {
   Bot,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ClipboardCheck,
+  Download,
+  ExternalLink,
   FileText,
   FolderDown,
   GitBranch,
   Loader2,
+  Maximize2,
+  Minus,
+  PanelRightClose,
+  PanelRightOpen,
+  Plus,
   RefreshCw,
   Search,
   Send,
@@ -18,7 +27,7 @@ import {
 import "./styles.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.mjs",
+  "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url,
 ).toString();
 
@@ -118,13 +127,6 @@ type PdfDocumentProxy = Awaited<ReturnType<typeof pdfjsLib.getDocument>> extends
 }
   ? T
   : never;
-
-type PdfTextItem = {
-  str: string;
-  transform: number[];
-  width?: number;
-  height?: number;
-};
 
 const fallbackBootstrap: Bootstrap = {
   paper_id: "unknown",
@@ -318,6 +320,7 @@ function App() {
               key={item.id}
               type="button"
               className="nav-link"
+              title={item.label}
               aria-current={activeWindow === item.id ? "page" : undefined}
               onClick={() => navigate(item.id, item.path)}
             >
@@ -329,11 +332,11 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span>{bootstrap.model_config.model || "模型未配置"}</span>
-          <a href={bootstrap.assets.legacy_url || "/legacy"}>旧版 PDF.js 审稿台</a>
+          <span>证据约束 · 人工确认</span>
         </div>
       </aside>
 
-      <main className="workspace">
+      <main className={`workspace ${activeWindow === "paper" ? "paper-workspace" : ""}`}>
         <header className="workspace-topbar">
           <div>
             <p className="eyebrow">现代智能体审稿工作区</p>
@@ -349,7 +352,7 @@ function App() {
           </div>
         </header>
 
-        <StatusStrip state={state} model={bootstrap.model_config.model || ""} />
+        {activeWindow !== "paper" && <StatusStrip state={state} model={bootstrap.model_config.model || ""} />}
 
         {activeWindow === "paper" && (
           <PaperWindow
@@ -418,56 +421,134 @@ function PaperWindow({
   const [selectedText, setSelectedText] = useState("");
   const [note, setNote] = useState("");
   const [page, setPage] = useState("1");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorTab, setInspectorTab] = useState<"review" | "concerns">("review");
+  const [inspectorWidth, setInspectorWidth] = useState(372);
+  const resizeState = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!resizeState.current) return;
+      const delta = resizeState.current.startX - event.clientX;
+      setInspectorWidth(Math.min(520, Math.max(310, resizeState.current.startWidth + delta)));
+    };
+    const stopResize = () => {
+      resizeState.current = null;
+      document.body.classList.remove("is-resizing-panel");
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+    };
+  }, []);
+
   const handlePdfSelection = useCallback((payload: { text: string; page: number }) => {
     setSelectedText(payload.text);
     setPage(String(payload.page));
+    setInspectorOpen(true);
+    setInspectorTab("review");
   }, []);
+
+  const pageConcerns = queueItems.filter((item) =>
+    (item.evidence || []).some((evidence) => Number(evidence.page || 0) === currentPage),
+  );
+
   return (
-    <section className="paper-grid">
+    <section
+      className={`paper-grid ${inspectorOpen ? "" : "inspector-collapsed"}`}
+      style={{ "--inspector-width": `${inspectorWidth}px` } as React.CSSProperties}
+    >
       <div className="panel pdf-panel">
-        <div className="panel-head">
-          <h2>原文 PDF</h2>
-          <span className="tag good">可选中文字</span>
-        </div>
         {pdfUrl ? (
-          <PdfReviewReader pdfUrl={pdfUrl} onSelection={handlePdfSelection} />
+          <PdfReviewReader
+            pdfUrl={pdfUrl}
+            onSelection={handlePdfSelection}
+            onPageChange={(nextPage) => {
+              setCurrentPage(nextPage);
+              setPage(String(nextPage));
+            }}
+          />
         ) : (
           <div className="empty-pdf">当前运行目录没有发现原始 PDF。</div>
         )}
       </div>
-      <aside className="inspector">
-        <div className="panel">
-          <div className="panel-head">
-            <h2>选区审稿</h2>
-            <span className="tag">人工入口</span>
-          </div>
-          <div className="panel-body selection-box">
-            <p className="muted">在 PDF 中选中文字后，可把关键原文粘贴到这里，交给智能体审稿或作为人工关注点入队。</p>
-            <textarea value={selectedText} onChange={(event) => setSelectedText(event.target.value)} placeholder="粘贴 PDF 选中的原文..." />
-            <div className="field-row">
-              <input value={page} onChange={(event) => setPage(event.target.value)} aria-label="PDF 页码" />
-              <button className="ghost-button" type="button" disabled={busy} onClick={() => onRunReview(selectedText, "fast")}>
-                <Send size={15} /> 基于选区审稿
-              </button>
+      {inspectorOpen ? (
+        <aside className="paper-inspector">
+          <div
+            className="inspector-resizer"
+            role="separator"
+            aria-label="调整审稿侧栏宽度"
+            aria-orientation="vertical"
+            onPointerDown={(event) => {
+              resizeState.current = { startX: event.clientX, startWidth: inspectorWidth };
+              document.body.classList.add("is-resizing-panel");
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+          />
+          <div className="inspector-head">
+            <div>
+              <p className="inspector-kicker">智能审稿助手</p>
+              <strong>第 {currentPage} 页</strong>
             </div>
-            <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="人工批注，例如：请作者解释统计显著性阈值..." />
-            <button className="primary-button" type="button" disabled={busy} onClick={() => onSubmitManual(selectedText, note, page)}>
-              <ClipboardCheck size={15} /> 加入证据队列
+            <button className="icon-button" type="button" title="收起审稿侧栏" onClick={() => setInspectorOpen(false)}>
+              <PanelRightClose size={17} />
             </button>
           </div>
-        </div>
-        <div className="panel">
-          <div className="panel-head">
-            <h2>本页审稿线索</h2>
-            <span className="tag">{queueItems.length} 条</span>
+          <div className="inspector-tabs" role="tablist" aria-label="审稿侧栏">
+            <button type="button" role="tab" aria-selected={inspectorTab === "review"} onClick={() => setInspectorTab("review")}>
+              审稿助手
+            </button>
+            <button type="button" role="tab" aria-selected={inspectorTab === "concerns"} onClick={() => setInspectorTab("concerns")}>
+              本页关注 {pageConcerns.length}
+            </button>
           </div>
-          <div className="panel-body concern-list">
-            {queueItems.slice(0, 5).map((item) => (
-              <ConcernCard concern={item} compact key={item.id} />
-            ))}
-          </div>
-        </div>
-      </aside>
+          {inspectorTab === "review" ? (
+            <div className="inspector-body selection-box">
+              <button className="primary-button wide" type="button" disabled={busy} onClick={() => onRunReview("", "fast")}>
+                {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} 快速审阅全文
+              </button>
+              <div className="selection-summary">
+                <span>PDF 选区</span>
+                <small>{selectedText ? `${selectedText.length} 字 · 第 ${page} 页` : "请在论文中拖选文字"}</small>
+              </div>
+              <textarea
+                className="selection-text"
+                value={selectedText}
+                onChange={(event) => setSelectedText(event.target.value)}
+                placeholder="选中的论文原文会自动出现在这里"
+              />
+              <button className="ghost-button wide" type="button" disabled={busy || !selectedText.trim()} onClick={() => onRunReview(selectedText, "fast")}>
+                <Send size={15} /> 基于选区智能审稿
+              </button>
+              <div className="selection-summary">
+                <span>人工批注</span>
+                <small>写入证据队列后逐条确认</small>
+              </div>
+              <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：请作者解释统计显著性阈值与多重比较校正。" />
+              <div className="field-row">
+                <input value={page} onChange={(event) => setPage(event.target.value)} aria-label="PDF 页码" inputMode="numeric" />
+                <button className="primary-button" type="button" disabled={busy || (!selectedText.trim() && !note.trim())} onClick={() => onSubmitManual(selectedText, note, page)}>
+                  <ClipboardCheck size={15} /> 加入证据队列
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="inspector-body concern-list">
+              {(pageConcerns.length ? pageConcerns : queueItems.slice(0, 5)).map((item) => (
+                <ConcernCard concern={item} compact key={item.id} />
+              ))}
+              {!queueItems.length && <p className="muted">当前还没有审稿关注点。</p>}
+            </div>
+          )}
+        </aside>
+      ) : (
+        <button className="inspector-reopen" type="button" title="打开审稿侧栏" onClick={() => setInspectorOpen(true)}>
+          <PanelRightOpen size={18} />
+        </button>
+      )}
     </section>
   );
 }
@@ -475,55 +556,88 @@ function PaperWindow({
 function PdfReviewReader({
   pdfUrl,
   onSelection,
+  onPageChange,
 }: {
   pdfUrl: string;
   onSelection: (payload: { text: string; page: number }) => void;
+  onPageChange: (page: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [pageCount, setPageCount] = useState(0);
   const [scale, setScale] = useState(1.18);
+  const [renderScale, setRenderScale] = useState(1);
+  const [fitWidth, setFitWidth] = useState(true);
+  const [viewportWidth, setViewportWidth] = useState(0);
   const [status, setStatus] = useState("正在加载 PDF");
+  const [loadProgress, setLoadProgress] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const [retryToken, setRetryToken] = useState(0);
+  const [pageInput, setPageInput] = useState("1");
+
+  useEffect(() => {
+    if (!scrollRef.current || !window.ResizeObserver) return;
+    const observer = new ResizeObserver(([entry]) => setViewportWidth(Math.round(entry.contentRect.width)));
+    observer.observe(scrollRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setStatus("正在加载 PDF");
-    const loadingTask = pdfjsLib.getDocument({ url: pdfUrl });
+    setError("");
+    setLoadProgress(null);
+    const loadingTask = pdfjsLib.getDocument({ url: pdfUrl, rangeChunkSize: 64 * 1024 });
+    loadingTask.onProgress = ({ loaded, total }: { loaded: number; total: number }) => {
+      if (!cancelled && total > 0) setLoadProgress(Math.min(100, Math.round((loaded / total) * 100)));
+    };
     loadingTask.promise
       .then((document) => {
         if (cancelled) return;
         setPdfDoc(document);
         setPageCount(document.numPages);
         setPageNumber(1);
+        setPageInput("1");
+        setLoadProgress(100);
         setStatus(`已载入 ${document.numPages} 页`);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setStatus(error instanceof Error ? `PDF 加载失败：${error.message}` : "PDF 加载失败");
+        const message = error instanceof Error ? error.message : "未知错误";
+        setError(message);
+        setStatus("PDF 加载失败");
       });
     return () => {
       cancelled = true;
       loadingTask.destroy();
     };
-  }, [pdfUrl]);
+  }, [pdfUrl, retryToken]);
 
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current || !textLayerRef.current) return;
     let cancelled = false;
+    let renderTask: ReturnType<Awaited<ReturnType<typeof pdfDoc.getPage>>["render"]> | null = null;
+    let textLayerTask: { cancel: () => void; render: () => Promise<void> } | null = null;
     const canvas = canvasRef.current;
     const textLayer = textLayerRef.current;
     const context = canvas.getContext("2d");
     if (!context) return;
     textLayer.replaceChildren();
     setStatus(`正在渲染第 ${pageNumber} 页`);
+    setError("");
     pdfDoc
       .getPage(pageNumber)
       .then(async (page) => {
         if (cancelled) return;
-        const viewport = page.getViewport({ scale });
-        const pixelRatio = window.devicePixelRatio || 1;
+        const naturalViewport = page.getViewport({ scale: 1 });
+        const availableWidth = Math.max(320, (scrollRef.current?.clientWidth || viewportWidth || 900) - 48);
+        const targetScale = fitWidth ? Math.min(2.2, Math.max(0.62, availableWidth / naturalViewport.width)) : scale;
+        const viewport = page.getViewport({ scale: targetScale });
+        const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+        setRenderScale(targetScale);
         canvas.width = Math.floor(viewport.width * pixelRatio);
         canvas.height = Math.floor(viewport.height * pixelRatio);
         canvas.style.width = `${viewport.width}px`;
@@ -531,34 +645,31 @@ function PdfReviewReader({
         textLayer.style.width = `${viewport.width}px`;
         textLayer.style.height = `${viewport.height}px`;
         context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-        await page.render({ canvas, canvasContext: context, viewport }).promise;
+        renderTask = page.render({ canvas, canvasContext: context, viewport });
+        await renderTask.promise;
         const textContent = await page.getTextContent();
         if (cancelled) return;
         textLayer.replaceChildren();
-        for (const rawItem of textContent.items) {
-          if (!("str" in rawItem) || !rawItem.str.trim()) continue;
-          const item = rawItem as PdfTextItem;
-          const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
-          const textNode = document.createElement("span");
-          textNode.className = "pdf-text-item";
-          textNode.textContent = item.str;
-          textNode.style.left = `${transform[4]}px`;
-          textNode.style.top = `${transform[5]}px`;
-          textNode.style.fontSize = `${Math.max(8, Math.hypot(transform[2], transform[3]))}px`;
-          textNode.style.transform = "translateY(-100%)";
-          if (item.width) textNode.style.width = `${item.width * scale}px`;
-          textLayer.appendChild(textNode);
-        }
-        setStatus(`第 ${pageNumber} / ${pdfDoc.numPages} 页`);
+        textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
+        await textLayerTask.render();
+        setStatus(`第 ${pageNumber} / ${pdfDoc.numPages} 页 · ${Math.round(targetScale * 100)}%`);
+        onPageChange(pageNumber);
+        const adjacentPages = [pageNumber - 1, pageNumber + 1].filter((value) => value >= 1 && value <= pdfDoc.numPages);
+        void Promise.allSettled(adjacentPages.map((value) => pdfDoc.getPage(value).then((nextPage) => nextPage.getOperatorList())));
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setStatus(error instanceof Error ? `PDF 渲染失败：${error.message}` : "PDF 渲染失败");
+        if (error instanceof Error && error.name === "RenderingCancelledException") return;
+        const message = error instanceof Error ? error.message : "未知错误";
+        setError(message);
+        setStatus("PDF 渲染失败");
       });
     return () => {
       cancelled = true;
+      renderTask?.cancel();
+      textLayerTask?.cancel();
     };
-  }, [pdfDoc, pageNumber, scale]);
+  }, [fitWidth, onPageChange, pageNumber, pdfDoc, scale, viewportWidth]);
 
   const captureSelection = () => {
     const selection = window.getSelection();
@@ -570,35 +681,64 @@ function PdfReviewReader({
   };
 
   const goToPage = (nextPage: number) => {
-    setPageNumber(Math.max(1, Math.min(pageCount || 1, nextPage)));
+    const boundedPage = Math.max(1, Math.min(pageCount || 1, nextPage));
+    setPageNumber(boundedPage);
+    setPageInput(String(boundedPage));
   };
+
+  const commitPageInput = () => goToPage(Number(pageInput) || pageNumber);
 
   return (
     <div className="pdf-reader">
       <div className="pdf-toolbar">
-        <div className="button-row">
-          <button className="ghost-button" type="button" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
-            上一页
+        <div className="pdf-toolbar-group">
+          <button className="icon-button" title="上一页" type="button" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
+            <ChevronLeft size={18} />
           </button>
-          <button className="ghost-button" type="button" disabled={pageNumber >= pageCount} onClick={() => goToPage(pageNumber + 1)}>
-            下一页
+          <label className="page-jump">
+            <input
+              value={pageInput}
+              onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ""))}
+              onBlur={commitPageInput}
+              onKeyDown={(event) => event.key === "Enter" && commitPageInput()}
+              aria-label="当前 PDF 页码"
+              inputMode="numeric"
+            />
+            <span>/ {pageCount || "--"}</span>
+          </label>
+          <button className="icon-button" title="下一页" type="button" disabled={pageNumber >= pageCount} onClick={() => goToPage(pageNumber + 1)}>
+            <ChevronRight size={18} />
           </button>
         </div>
-        <span className="pdf-status">{status}</span>
-        <div className="button-row">
-          <button className="ghost-button" type="button" onClick={() => setScale((value) => Math.max(0.72, value - 0.12))}>
-            缩小
+        <span className="pdf-status" aria-live="polite">{status}</span>
+        <div className="pdf-toolbar-group">
+          <button className="icon-button" title="缩小" type="button" onClick={() => { setFitWidth(false); setScale(Math.max(0.62, renderScale - 0.12)); }}>
+            <Minus size={17} />
           </button>
-          <button className="ghost-button" type="button" onClick={() => setScale((value) => Math.min(2.2, value + 0.12))}>
-            放大
+          <button className={`icon-button ${fitWidth ? "active" : ""}`} title="适应宽度" type="button" onClick={() => setFitWidth(true)}>
+            <Maximize2 size={16} />
           </button>
+          <button className="icon-button" title="放大" type="button" onClick={() => { setFitWidth(false); setScale(Math.min(2.4, renderScale + 0.12)); }}>
+            <Plus size={17} />
+          </button>
+          <a className="icon-button" title="下载原始 PDF" href={pdfUrl} download><Download size={16} /></a>
+          <a className="icon-button" title="在新窗口打开" href={pdfUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a>
         </div>
       </div>
-      <div className="pdf-scroll">
+      <div className="pdf-scroll" ref={scrollRef}>
         <div className="pdf-page-shell" onMouseUp={captureSelection}>
           <canvas ref={canvasRef} className="pdf-canvas" />
           <div ref={textLayerRef} className="pdf-text-layer" />
         </div>
+        {(!pdfDoc || error) && (
+          <div className={`pdf-loading-state ${error ? "error" : ""}`}>
+            {error ? <FileText size={28} /> : <Loader2 className="spin" size={28} />}
+            <strong>{error ? "PDF 暂时无法显示" : "正在准备论文"}</strong>
+            <span>{error || (loadProgress === null ? "正在连接文档服务" : `已加载 ${loadProgress}%`)}</span>
+            {!error && loadProgress !== null && <div className="loading-track"><span style={{ width: `${loadProgress}%` }} /></div>}
+            {error && <button className="ghost-button" type="button" onClick={() => setRetryToken((value) => value + 1)}>重新加载</button>}
+          </div>
+        )}
       </div>
     </div>
   );

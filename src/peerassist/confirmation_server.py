@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 from datetime import UTC, datetime
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -6109,13 +6110,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHandler]:
     class ConfirmationHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if _is_workspace_route(path):
                 self._send_html(render_workspace_app(run_dir=run_dir, paper_id=paper_id))
                 return
             if path == "/legacy":
-                self._send_html(render_confirmation_page(run_dir=run_dir, paper_id=paper_id))
+                self._send_redirect("/paper")
                 return
             if path.startswith("/workspace/"):
                 self._send_static_asset(path.removeprefix("/workspace/"))
@@ -6154,10 +6157,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 )
                 return
             if path == "/legacy":
-                self._send_html(
-                    render_confirmation_page(run_dir=run_dir, paper_id=paper_id),
-                    head_only=True,
-                )
+                self._send_redirect("/paper", head_only=True)
                 return
             if path.startswith("/workspace/"):
                 self._send_static_asset(path.removeprefix("/workspace/"), head_only=True)
@@ -6228,6 +6228,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -6236,6 +6237,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             body = text.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if head_only:
@@ -6255,11 +6257,14 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 return
             body = asset_path.read_bytes()
             content_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
-            if asset_path.suffix == ".js":
+            if asset_path.suffix in {".js", ".mjs"}:
                 content_type = "text/javascript"
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "no-cache")
+            if relative_path.startswith("assets/"):
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            else:
+                self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if head_only:
@@ -6268,18 +6273,87 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def _send_pdf(self, path: Path, *, head_only: bool = False) -> None:
             try:
-                body = path.read_bytes()
+                stat = path.stat()
             except FileNotFoundError:
                 self.send_error(404, "source PDF not found")
                 return
-            self.send_response(200)
+            size = stat.st_size
+            etag = f'"{size:x}-{stat.st_mtime_ns:x}"'
+            if self.headers.get("If-None-Match") == etag and not self.headers.get("Range"):
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
+            start = 0
+            end = max(0, size - 1)
+            status = 200
+            range_header = self.headers.get("Range", "").strip()
+            if range_header:
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+                if not match or not size:
+                    self._send_unsatisfied_range(size)
+                    return
+                raw_start, raw_end = match.groups()
+                if raw_start:
+                    start = int(raw_start)
+                    end = int(raw_end) if raw_end else end
+                elif raw_end:
+                    suffix_length = int(raw_end)
+                    if suffix_length <= 0:
+                        self._send_unsatisfied_range(size)
+                        return
+                    start = max(0, size - suffix_length)
+                else:
+                    self._send_unsatisfied_range(size)
+                    return
+                if start >= size or end < start:
+                    self._send_unsatisfied_range(size)
+                    return
+                end = min(end, size - 1)
+                status = 206
+
+            content_length = end - start + 1 if size else 0
+            self.send_response(status)
             self.send_header("Content-Type", "application/pdf")
             self.send_header("Content-Disposition", f'inline; filename="{path.name}"')
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", formatdate(stat.st_mtime, usegmt=True))
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(content_length))
             self.end_headers()
             if head_only:
                 return
-            self.wfile.write(body)
+            with path.open("rb") as pdf_file:
+                pdf_file.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk = pdf_file.read(min(256 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
+        def _send_unsatisfied_range(self, size: int) -> None:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _send_redirect(self, location: str, *, head_only: bool = False) -> None:
+            body = b"" if head_only else b"Redirecting to the PeerAssist workspace."
+            self.send_response(308)
+            self.send_header("Location", location)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
 
         def _send_sse_state(self, payload: dict[str, Any]) -> None:
             body = _sse_stream(payload)

@@ -684,7 +684,9 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "pdfjsLib.getDocument" in source
     assert "pdf-text-layer" in source
     assert "onSelection({ text, page: pageNumber })" in source
-    assert "粘贴 PDF 选中的原文" in source
+    assert "请在论文中拖选文字" in source
+    assert "rangeChunkSize: 64 * 1024" in source
+    assert "pdf.worker.min.mjs" in source
 
 
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:
@@ -709,8 +711,9 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
 
         with urllib.request.urlopen(f"{base_url}/legacy", timeout=5) as response:
             legacy_html = response.read().decode("utf-8")
-        assert "PeerAssist 论文审核辅助台" in legacy_html
-        assert "data-peerassist-agent-console" in legacy_html
+            legacy_target = response.geturl()
+        assert legacy_target.endswith("/paper")
+        assert "PeerAssist 智能审稿工作台" in legacy_html
 
         with urllib.request.urlopen(f"{base_url}/api/bootstrap", timeout=5) as response:
             bootstrap = json.loads(response.read().decode("utf-8"))
@@ -840,7 +843,7 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
     _seed_peerassist_stage(run_dir)
     (run_dir / "paper.pdf").write_bytes(b"%PDF-1.4\n% PeerAssist test PDF\n%%EOF\n")
 
-    html = render_confirmation_page(run_dir=run_dir, paper_id="demo")
+    html = render_confirmation_page(run_dir=run_dir, paper_id="paper")
 
     assert "原始 PDF 已导入" in html
     assert 'data-source-pdf-viewer' in html
@@ -866,7 +869,7 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
 
     server = create_confirmation_server(
         run_dir=run_dir,
-        paper_id="demo",
+        paper_id="paper",
         host="127.0.0.1",
         port=0,
     )
@@ -877,8 +880,22 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
         with urllib.request.urlopen(f"{base_url}/paper.pdf", timeout=5) as response:
             body = response.read()
             content_type = response.headers["Content-Type"]
+            accept_ranges = response.headers["Accept-Ranges"]
         assert content_type == "application/pdf"
+        assert accept_ranges == "bytes"
         assert body.startswith(b"%PDF-1.4")
+
+        range_request = urllib.request.Request(
+            f"{base_url}/paper.pdf",
+            headers={"Range": "bytes=0-9"},
+        )
+        with urllib.request.urlopen(range_request, timeout=5) as response:
+            range_body = response.read()
+            content_range = response.headers["Content-Range"]
+            range_status = response.status
+        assert range_status == 206
+        assert content_range.startswith("bytes 0-9/")
+        assert range_body == body[:10]
     finally:
         server.shutdown()
         server.server_close()

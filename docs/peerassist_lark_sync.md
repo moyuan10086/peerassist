@@ -168,3 +168,14 @@ model keys, paper secrets, or reviewer-private material here.
 - Final PeerAssist smoke suite: `445 passed`; citation Ruff checks passed; public service returned HTTP `200`.
 - GitHub branch: `moyuan10086/peerassist@peerassist-mvp`; merge commit `a477fc3`.
 - Remaining scope is explicit: author-year citations, retraction/PubPeer checks, semantic support relation, and frozen `CitationBench-200` evaluation are not yet complete.
+
+## 2026-07-13 - PDF-first workspace performance and UI optimization
+
+- Replaced the independent `/legacy` user interface with a `308` compatibility redirect to the canonical `/paper` React workspace.
+- Added HTTP Range streaming for `/paper.pdf`, plus `Accept-Ranges`, ETag, Last-Modified and private caching. A `bytes=0-1023` request now returns `206` with exactly 1024 bytes instead of the full PDF.
+- Changed hashed frontend assets to one-year immutable caching and switched to the minified PDF.js worker, reducing the worker from about 2.2 MB to about 1.25 MB.
+- Rebuilt the paper window as a PDF-first split workspace: compact Chinese navigation rail, large selectable PDF, resizable/collapsible review inspector, fit-width mode, page input, progress, retry, download/open controls and adjacent-page prefetch.
+- PDF text selection now automatically fills the review inspector with the page number; selection review and manual evidence queue actions remain adjacent to the source text.
+- Browser verification on the current 11-page demo paper: desktop 1440x960 reached rendered PDF plus text layer in about 3.27 s; mobile 390x844 in about 4.09 s; both had zero horizontal overflow. Selection propagation and inspector expansion were also verified.
+- Focused verification: frontend production build passed; three confirmation server tests passed; public `/legacy` redirect, PDF `206`, immutable asset caching and HTTP `200` workspace access were verified.
+- Appended Feishu section `六十二、2026-07-13 PeerAssist PDF 首屏性能与审稿工作台重构`; revision advanced from `94` to `95`. Keyword verification confirmed both sections `六十一` and `六十二` remain present. No overwrite operation was used, and no model key, GitHub token or private review material was written.
