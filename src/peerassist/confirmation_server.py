@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import mimetypes
@@ -5686,7 +5687,12 @@ def _persist_manual_selection_concern(
             "source": "manual_pdf_selection",
             "producer_namespace": "human_pdf_annotator",
             "producer_version": "v1",
-            "issue_anchor": f"page={page}:{selected_text}:{note}",
+            "issue_anchor": evidence_id,
+            "finding_check_type": "manual_annotation",
+            "finding_semantic_key": note,
+            "finding_content_fingerprint": hashlib.sha256(
+                selected_text.encode("utf-8")
+            ).hexdigest(),
             "selected_text": selected_text,
             "page": page,
             "created_at": timestamp,

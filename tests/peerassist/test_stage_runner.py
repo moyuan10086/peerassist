@@ -284,6 +284,8 @@ def test_candidate_stage_writes_profile_queue_and_lineage_without_final_manifest
     assert manual_concern["finding_lineage_id"].startswith("fln_")
     assert manual_concern["finding_id"].startswith("fnd_")
     assert manual_concern["revision"] == 1
+    assert manual_concern["metadata"]["selected_text"] not in manual_concern["metadata"]["issue_anchor"]
+    assert "请核对分母" not in manual_concern["metadata"]["issue_anchor"]
 
 
 def test_candidate_citation_findings_have_distinct_stable_lineages(tmp_path: Path) -> None:
@@ -308,6 +310,7 @@ def test_candidate_citation_findings_have_distinct_stable_lineages(tmp_path: Pat
     assert len(citation_concerns) >= 2
     assert all(row["finding_id"].startswith("fnd_") for row in citation_concerns)
     assert len({row["finding_lineage_id"] for row in citation_concerns}) == len(citation_concerns)
+    assert all("insufficient_evidence" not in row["metadata"]["issue_anchor"] for row in citation_concerns)
 
 
 def test_run_peerassist_stage_off_is_skipped(tmp_path: Path) -> None:

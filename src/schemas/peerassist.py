@@ -348,6 +348,7 @@ class Concern(BaseModel):
     finding_lineage_id: str = ""
     finding_id: str = ""
     revision: int = Field(default=1, ge=1)
+    display_revision: int = Field(default=1, ge=1)
     supersedes: list[str] = Field(default_factory=list)
     reconciles: list[str] = Field(default_factory=list)
     affected_claim_ids: list[str] = Field(default_factory=list)
@@ -386,15 +387,18 @@ class Concern(BaseModel):
             or (self.source_agent_ids[0] if self.source_agent_ids else "peerassist")
         )
         producer_version = str(self.metadata.get("producer_version") or "v1")
+        issue_anchor = str(self.metadata.get("issue_anchor") or self.title)
+        semantic_key = str(self.metadata.get("finding_semantic_key") or issue_anchor)
+        content_fingerprint = str(self.metadata.get("finding_content_fingerprint") or "")
         lineage_id, finding_id = build_finding_identity(
             producer_namespace=producer_namespace,
-            check_type=self.category,
-            issue_anchor=str(self.metadata.get("issue_anchor") or self.title),
+            check_type=str(self.metadata.get("finding_check_type") or self.category),
+            issue_anchor=issue_anchor,
             affected_claim_ids=self.affected_claim_ids,
             evidence_ids=self.evidence_ids,
             severity=self.level.value,
             producer_version=producer_version,
-            issue_semantics=" ".join([self.title, self.impact, self.author_action]),
+            issue_semantics=f"{semantic_key}:{content_fingerprint}",
         )
         self.finding_lineage_id = self.finding_lineage_id or lineage_id
         self.finding_id = self.finding_id or finding_id
@@ -425,6 +429,7 @@ class AgentConcernDraft(BaseModel):
     finding_lineage_id: str = ""
     finding_id: str = ""
     revision: int = Field(default=1, ge=1)
+    display_revision: int = Field(default=1, ge=1)
     supersedes: list[str] = Field(default_factory=list)
     reconciles: list[str] = Field(default_factory=list)
     affected_claim_ids: list[str] = Field(default_factory=list)
@@ -443,15 +448,18 @@ class AgentConcernDraft(BaseModel):
     def ensure_finding_identity(self) -> AgentConcernDraft:
         if self.finding_lineage_id and self.finding_id:
             return self
+        issue_anchor = str(self.metadata.get("issue_anchor") or self.title)
+        semantic_key = str(self.metadata.get("finding_semantic_key") or issue_anchor)
+        content_fingerprint = str(self.metadata.get("finding_content_fingerprint") or "")
         lineage_id, finding_id = build_finding_identity(
             producer_namespace=str(self.metadata.get("producer_namespace") or "peerassist_agent"),
-            check_type=self.category,
-            issue_anchor=str(self.metadata.get("issue_anchor") or self.title),
+            check_type=str(self.metadata.get("finding_check_type") or self.category),
+            issue_anchor=issue_anchor,
             affected_claim_ids=self.affected_claim_ids,
             evidence_ids=self.evidence_ids,
             severity=self.level.value,
             producer_version=str(self.metadata.get("producer_version") or "v1"),
-            issue_semantics=" ".join([self.title, self.impact, self.author_action]),
+            issue_semantics=f"{semantic_key}:{content_fingerprint}",
         )
         self.finding_lineage_id = self.finding_lineage_id or lineage_id
         self.finding_id = self.finding_id or finding_id

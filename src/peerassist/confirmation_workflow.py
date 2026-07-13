@@ -190,10 +190,6 @@ def finalize_confirmed_report(
     pointer_path = out_dir / "current_final_report.json"
     with exclusive_file_lock(_workflow_lock(out_dir)):
         pointer = read_json_file(pointer_path)
-        if pointer.get("confirmation_revision") == expected_confirmation_revision:
-            manifest_path = out_dir / str(pointer.get("manifest_path") or "")
-            if manifest_path.is_file():
-                return _finalize_success(manifest_path, idempotent=True)
         confirmations = read_json_file(confirmations_path)
         observed_revision = _confirmation_revision(confirmations)
         observed_mutation_revision = _mutation_revision(confirmations)
@@ -203,6 +199,9 @@ def finalize_confirmed_report(
     concerns = _load_concerns(out_dir / "peerassist_concerns.json")
     actions = _actions_from_payload(confirmations)
     confirmed_concerns = apply_confirmations(concerns, actions)
+    finding_revisions, finding_snapshot_sha256 = _finding_snapshot(confirmed_concerns)
+    confirmation_actions = [action.model_dump(mode="json") for action in actions]
+    confirmation_actions_sha256 = _canonical_sha256(confirmation_actions)
     unresolved_core = [
         concern
         for concern in confirmed_concerns
@@ -218,6 +217,16 @@ def finalize_confirmed_report(
             "unresolved_finding_ids": [concern.finding_id for concern in unresolved_core],
             "confirmation_revision": observed_revision,
         }
+    if pointer.get("confirmation_revision") == expected_confirmation_revision:
+        current_manifest_path = out_dir / str(pointer.get("manifest_path") or "")
+        current_manifest = read_json_file(current_manifest_path)
+        if (
+            current_manifest.get("finding_snapshot_sha256") == finding_snapshot_sha256
+            and current_manifest.get("confirmation_actions_sha256")
+            == confirmation_actions_sha256
+        ):
+            return _finalize_success(current_manifest_path, idempotent=True)
+        return _finding_snapshot_conflict(observed_revision)
 
     report_version = f"r{observed_revision:06d}"
     reports_dir = out_dir / "reports"
@@ -268,6 +277,10 @@ def finalize_confirmed_report(
             "confirmation_revision": observed_revision,
             "created_at": datetime.now(UTC).isoformat(),
             "override_reason": normalized_override or None,
+            "confirmation_actions": confirmation_actions,
+            "confirmation_actions_sha256": confirmation_actions_sha256,
+            "finding_revisions": finding_revisions,
+            "finding_snapshot_sha256": finding_snapshot_sha256,
             "artifacts": artifacts,
             "artifact_sha256": artifact_sha256,
         }
@@ -294,12 +307,31 @@ def finalize_confirmed_report(
         ):
             shutil.rmtree(temporary_dir, ignore_errors=True)
             return _revision_conflict(observed_revision, current_revision)
+        current_concerns = _load_concerns(out_dir / "peerassist_concerns.json")
+        current_actions = _actions_from_payload(current)
+        current_confirmed = apply_confirmations(current_concerns, current_actions)
+        _, current_finding_snapshot_sha256 = _finding_snapshot(current_confirmed)
+        current_confirmation_actions_sha256 = _canonical_sha256(
+            [action.model_dump(mode="json") for action in current_actions]
+        )
+        if (
+            current_finding_snapshot_sha256 != finding_snapshot_sha256
+            or current_confirmation_actions_sha256 != confirmation_actions_sha256
+        ):
+            shutil.rmtree(temporary_dir, ignore_errors=True)
+            return _finding_snapshot_conflict(observed_revision)
         pointer_before = read_json_file(pointer_path)
         published_new_dir = False
         if final_dir.exists():
             shutil.rmtree(temporary_dir, ignore_errors=True)
             existing_manifest = read_json_file(final_dir / "manifest.json")
-            if existing_manifest.get("confirmation_revision") != observed_revision:
+            if (
+                existing_manifest.get("confirmation_revision") != observed_revision
+                or existing_manifest.get("finding_snapshot_sha256")
+                != finding_snapshot_sha256
+                or existing_manifest.get("confirmation_actions_sha256")
+                != confirmation_actions_sha256
+            ):
                 return {
                     "schema_version": "peerassist.finalize_result.v1",
                     "status": "failed",
@@ -367,6 +399,61 @@ def _revision_conflict(expected: int, current: int) -> dict[str, Any]:
         "expected_revision": expected,
         "current_revision": current,
     }
+
+
+def _finding_snapshot_conflict(confirmation_revision: int) -> dict[str, Any]:
+    return {
+        "schema_version": "peerassist.revision_conflict.v1",
+        "status": "revision_conflict",
+        "error_code": "finding_snapshot_conflict",
+        "expected_revision": confirmation_revision,
+        "current_revision": confirmation_revision,
+    }
+
+
+def _canonical_sha256(payload: Any) -> str:
+    content = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
+def _finding_snapshot(concerns: list[Concern]) -> tuple[list[dict[str, Any]], str]:
+    rows = [
+        {
+            "concern_id": concern.id,
+            "finding_lineage_id": concern.finding_lineage_id,
+            "finding_id": concern.finding_id,
+            "revision": concern.revision,
+            "display_revision": concern.display_revision,
+            "supersedes": list(concern.supersedes),
+            "reconciles": list(concern.reconciles),
+            "status": concern.status.value,
+            "importance": concern.importance.value,
+            "level": concern.level.value,
+            "category": concern.category,
+            "title": concern.title,
+            "evidence_ids": list(concern.evidence_ids),
+            "impact": concern.impact,
+            "benign_explanation": concern.benign_explanation,
+            "author_action": concern.author_action,
+            "source_agent_ids": list(concern.source_agent_ids),
+            "source_check_ids": list(concern.source_check_ids),
+        }
+        for concern in concerns
+    ]
+    rows.sort(
+        key=lambda row: (
+            str(row["finding_lineage_id"]),
+            int(row["revision"]),
+            str(row["finding_id"]),
+            str(row["concern_id"]),
+        )
+    )
+    return rows, _canonical_sha256(rows)
 
 
 def _find_concern(path: Path, concern_id: str) -> Concern:

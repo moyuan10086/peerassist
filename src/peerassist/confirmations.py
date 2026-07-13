@@ -39,16 +39,46 @@ def reconcile_citation_confirmations(
                     concern_ids_by_finding.setdefault(finding_id, set()).add(concern.id)
     current_finding_ids = {finding.id for finding in audit.findings}
     audit_version = f"{audit.schema_version}:{audit.parse_version}"
+    concerns_by_id = {concern.id: concern for concern in concerns}
+    concerns_by_key = {_finding_key(concern): concern for concern in concerns}
+    concerns_by_lineage = {concern.finding_lineage_id: concern for concern in concerns}
     replayable: list[HumanConfirmationAction] = []
     unresolved: list[HumanConfirmationAction] = []
     needs_reconciliation: list[str] = []
     for action in actions:
+        if _has_any_finding_binding(action) and not _has_finding_binding(action):
+            unresolved.append(action)
+            if action.concern_id not in needs_reconciliation:
+                needs_reconciliation.append(action.concern_id)
+            continue
+        if _has_finding_binding(action):
+            matched = concerns_by_key.get(_action_key(action))
+            if matched is not None:
+                replayable.append(action)
+                continue
+            unresolved.append(action)
+            lineage_match = concerns_by_lineage.get(action.finding_lineage_id)
+            concern_id = lineage_match.id if lineage_match is not None else action.concern_id
+            if concern_id not in needs_reconciliation:
+                needs_reconciliation.append(concern_id)
+            continue
+        current = concerns_by_id.get(action.concern_id)
+        legacy_safe = current is not None and current.revision == 1 and not current.supersedes
         if not action.citation_finding_ids:
-            replayable.append(action)
+            if legacy_safe:
+                replayable.append(action)
+            else:
+                unresolved.append(action)
+                if action.concern_id not in needs_reconciliation:
+                    needs_reconciliation.append(action.concern_id)
             continue
         action_findings = set(action.citation_finding_ids)
         current_concerns = set().union(*(concern_ids_by_finding.get(finding_id, set()) for finding_id in action_findings))
-        unchanged = action_findings <= current_finding_ids and action.audit_version == audit_version
+        unchanged = (
+            legacy_safe
+            and action_findings <= current_finding_ids
+            and action.audit_version == audit_version
+        )
         if unchanged and action.concern_id in current_concerns:
             replayable.append(action)
             continue
@@ -93,23 +123,40 @@ def apply_confirmations(
     concerns: list[Concern],
     actions: list[HumanConfirmationAction],
 ) -> list[Concern]:
-    actions_by_concern: dict[str, list[HumanConfirmationAction]] = {}
-    for action in actions:
-        actions_by_concern.setdefault(action.concern_id, []).append(action)
-
     result: list[Concern] = []
     for concern in concerns:
         updated = concern
-        for action in actions_by_concern.get(concern.id, []):
-            if action.finding_lineage_id and action.finding_lineage_id != concern.finding_lineage_id:
+        for action in actions:
+            if _has_any_finding_binding(action) and not _has_finding_binding(action):
                 continue
-            if action.finding_id and action.finding_id != concern.finding_id:
-                continue
-            if action.revision is not None and action.revision != concern.revision:
+            if _has_finding_binding(action):
+                if _action_key(action) != _finding_key(concern):
+                    continue
+            elif (
+                action.concern_id != concern.id
+                or concern.revision != 1
+                or concern.supersedes
+            ):
                 continue
             updated = _apply_action(updated, action)
         result.append(updated)
     return result
+
+
+def _finding_key(concern: Concern) -> tuple[str, str, int]:
+    return concern.finding_lineage_id, concern.finding_id, concern.revision
+
+
+def _action_key(action: HumanConfirmationAction) -> tuple[str, str, int]:
+    return action.finding_lineage_id, action.finding_id, int(action.revision or 0)
+
+
+def _has_finding_binding(action: HumanConfirmationAction) -> bool:
+    return bool(action.finding_lineage_id and action.finding_id and action.revision is not None)
+
+
+def _has_any_finding_binding(action: HumanConfirmationAction) -> bool:
+    return bool(action.finding_lineage_id or action.finding_id or action.revision is not None)
 
 
 def build_confirmation_bundle(

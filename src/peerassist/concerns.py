@@ -11,6 +11,55 @@ from schemas.peerassist import (
     DeterministicCheckStatus,
 )
 
+_DISPLAY_FIELDS = ("title", "impact", "benign_explanation", "author_action")
+
+
+def reconcile_finding_revisions(
+    previous_concerns: list[Concern],
+    candidate_concerns: list[Concern],
+) -> list[Concern]:
+    """Carry stable finding lineage history into a regenerated candidate set."""
+
+    latest_by_lineage: dict[str, Concern] = {}
+    for concern in previous_concerns:
+        previous = latest_by_lineage.get(concern.finding_lineage_id)
+        if previous is None or (concern.revision, concern.display_revision) > (
+            previous.revision,
+            previous.display_revision,
+        ):
+            latest_by_lineage[concern.finding_lineage_id] = concern
+
+    reconciled: list[Concern] = []
+    for candidate in candidate_concerns:
+        previous = latest_by_lineage.get(candidate.finding_lineage_id)
+        if previous is None:
+            reconciled.append(candidate)
+            latest_by_lineage[candidate.finding_lineage_id] = candidate
+            continue
+        updated = candidate.model_copy(deep=True)
+        if candidate.finding_id == previous.finding_id:
+            updated.revision = previous.revision
+            updated.supersedes = list(previous.supersedes)
+            updated.reconciles = list(previous.reconciles)
+            display_changed = any(
+                getattr(candidate, field) != getattr(previous, field) for field in _DISPLAY_FIELDS
+            )
+            updated.display_revision = previous.display_revision + int(display_changed)
+            if display_changed:
+                updated.metadata = dict(updated.metadata)
+                updated.metadata["display_revision_from"] = previous.display_revision
+        else:
+            updated.revision = previous.revision + 1
+            updated.display_revision = 1
+            updated.supersedes = list(
+                dict.fromkeys([*previous.supersedes, previous.finding_id])
+            )
+            updated.metadata = dict(updated.metadata)
+            updated.metadata["reconciled_from_revision"] = previous.revision
+        reconciled.append(updated)
+        latest_by_lineage[updated.finding_lineage_id] = updated
+    return reconciled
+
 
 def _category_for_check(kind: str) -> str:
     if "percentage" in kind or "stat" in kind or "mean" in kind:
@@ -49,6 +98,8 @@ def concerns_from_checks(checks: list[DeterministicCheck]) -> list[Concern]:
                     "producer_namespace": "deterministic_checks",
                     "producer_version": "v1",
                     "issue_anchor": check.id,
+                    "finding_check_type": check.kind,
+                    "finding_semantic_key": check.kind,
                 },
             )
         )
@@ -64,6 +115,7 @@ def concern_from_agent_draft(
         finding_lineage_id=draft.finding_lineage_id,
         finding_id=draft.finding_id,
         revision=draft.revision,
+        display_revision=draft.display_revision,
         supersedes=list(draft.supersedes),
         reconciles=list(draft.reconciles),
         affected_claim_ids=list(draft.affected_claim_ids),

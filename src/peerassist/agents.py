@@ -68,6 +68,8 @@ def _draft_for_check(check: DeterministicCheck) -> AgentConcernDraft:
             "producer_namespace": "deterministic_agent",
             "producer_version": "v1",
             "issue_anchor": check.id,
+            "finding_check_type": check.kind,
+            "finding_semantic_key": check.kind,
         },
     )
 
@@ -250,5 +252,7 @@ def _manual_check_concern(result: AgentReviewResult) -> Concern:
             "producer_namespace": result.agent_id,
             "producer_version": "v1",
             "issue_anchor": "agent_incomplete",
+            "finding_check_type": "agent_incomplete",
+            "finding_semantic_key": result.status.value,
         },
     )

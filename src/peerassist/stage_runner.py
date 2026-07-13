@@ -17,6 +17,7 @@ from common.pipeline_context import (
 from peerassist.agents import integrate_agent_results, run_peerassist_agents
 from peerassist.capabilities import default_capability_registry
 from peerassist.citation_pipeline import run_citation_pipeline
+from peerassist.concerns import reconcile_finding_revisions
 from peerassist.confirmations import (
     apply_confirmations,
     build_confirmation_bundle,
@@ -36,6 +37,7 @@ from peerassist.tool_invocations import CapabilityInvocationRequest, CapabilityI
 from peerassist.tool_trace import ToolTraceRecorder
 from schemas.peerassist import (
     AgentReviewResult,
+    Concern,
     DeterministicCheck,
     EvidenceLedger,
     HumanConfirmationAction,
@@ -397,6 +399,16 @@ def run_peerassist_stage(
     if len({concern.id for concern in concerns}) != len(concerns):
         raise ValueError("citation pipeline produced duplicate concern identifiers")
     concerns_path = out_dir / "peerassist_concerns.json"
+    previous_payload = read_json_file(concerns_path)
+    previous_rows = (
+        previous_payload.get("concerns")
+        if isinstance(previous_payload.get("concerns"), list)
+        else []
+    )
+    previous_concerns = [
+        Concern.model_validate(row) for row in previous_rows if isinstance(row, dict)
+    ]
+    concerns = reconcile_finding_revisions(previous_concerns, concerns)
     write_json_file(
         concerns_path,
         {
