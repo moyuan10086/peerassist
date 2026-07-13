@@ -266,3 +266,15 @@ model keys, paper secrets, or reviewer-private material here.
 - Replaced ad-hoc background shells with restart-on-failure transient systemd services for ports `8766` and `8767`; the public health endpoint returned `ok` after restart.
 - Local commit: `74db628 feat: upload papers into durable review jobs`.
 - Appended Feishu section `七十二、2026-07-14 真实论文上传与持久化审稿任务联动`; revision advanced from `104` to `105`. Append-only keyword verification confirmed sections `七十一` and `七十二` remain intact, with no credentials or private manuscript content stored.
+
+## 2026-07-14 - Durable Paper PDF-first reading connection
+
+- Added `GET/HEAD /api/papers/<sha256>/source` with repository-confined path resolution, ETag/Last-Modified metadata, byte ranges, suffix ranges, `416` handling and bounded file streaming.
+- Updated the public `8766` proxy to stream request and response bodies and forward Range, conditional-cache and PDF response headers instead of buffering complete uploads or papers in memory.
+- Upload completion now stores the active Paper identity locally and navigates directly to the PDF-first reading workspace. Every durable ReviewJob card also has a Chinese `阅读论文` action.
+- The reader distinguishes durable task papers from the legacy demo run. It keeps text selection available while disabling legacy-run review writes, preventing concerns from being attached to the wrong manuscript.
+- Fixed PDF.js compatibility for current Chromium by installing missing Map/WeakMap methods in the page and using the official legacy PDF worker for the separate worker realm.
+- Focused verification: 3 Review Job API tests passed, Ruff passed, and the production frontend build passed. Public Range returned `206` with 1024 bytes and a valid `%PDF-1.7` header.
+- Browser verification opened the persisted arXiv Paper from its task card, rendered page 1 of 11 at 151%, produced 111 selectable text nodes, matched the real paper title, and had no horizontal overflow or console errors.
+- Local commits: `eab7fdc feat: open durable papers in the PDF workspace` and `b56a7ca fix: support PDF.js range loading in current browsers`.
+- Appended Feishu section `七十三、2026-07-14 持久化论文与 PDF 首屏阅读打通`; revision advanced from `105` to `106`. Append-only keyword verification confirmed sections `七十二` and `七十三` remain intact.
