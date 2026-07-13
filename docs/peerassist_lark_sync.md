@@ -206,3 +206,13 @@ model keys, paper secrets, or reviewer-private material here.
 - Task 5 passed specification review and independent code-quality review. The focused Milestone A regression suite reached 171 passing tests; the independent reviewer also ran the complete `tests/peerassist` suite with 555 passing tests. Ruff and `git diff --check` were clean.
 - Non-blocking follow-ups remain explicit: split multiple datasets listed in one sentence, and introduce an `unknown` relation distinct from `supported_by` for semantically indeterminate double-negation cases.
 - Appended Feishu section `六十五、2026-07-13 本地解析与证据化论文画像完成`; revision advanced from `97` to `98`. Append-only keyword verification confirmed sections `六十四` and `六十五` remain present. No overwrite, credentials, manuscript-private content or reviewer-private material was used.
+
+## 2026-07-14 - Candidate review and versioned final report separation
+
+- Candidate execution now stops at the human-confirmation queue and does not create a final report. Finalization is a separate revision-checked operation.
+- Unified deterministic, agent, citation and manual concerns under stable finding lineage, finding revision, supersedes/reconciliation and display revision semantics.
+- Confirmation actions bind to `finding_lineage_id + finding_id + revision`; both the legacy console and React workspace submit the current triple, preventing stale-page confirmation after candidate regeneration.
+- Final reports are immutable bilingual JSON/Markdown versions under `reports/<version>/`; the manifest freezes confirmation actions and every finding revision, including rewritten and deleted concerns.
+- Finalization blocks unresolved core findings without an override, detects stale confirmation/finding snapshots, is idempotent only for an identical snapshot, and preserves the previous pointer on failure.
+- Focused verification: 29 Task 6 tests and 63 related producer/confirmation tests passed during implementation; final stale-binding/reference-lineage checks passed 4 focused tests, Ruff passed, and the frontend production build passed.
+- Appended Feishu section `六十六、2026-07-14 候选审稿与版本化最终报告分离`; append-only verification must confirm sections `六十五` and `六十六` remain present.
