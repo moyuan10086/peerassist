@@ -134,14 +134,25 @@ def _resolve_cutoff(*, args: argparse.Namespace, paper_source: str) -> CutoffDat
     return derive_cutoff_from_source(paper_source)
 
 
+def _resolve_run_directory(args: argparse.Namespace, paper_key: str) -> tuple[str, Path]:
+    override = str(getattr(args, "run_dir_override", "") or "").strip()
+    if override:
+        run_dir = Path(override)
+        run_id = run_dir.parent.name if run_dir.name == "run" else run_dir.name
+        if not run_id:
+            raise ValueError("run_dir_override must identify a stable run directory")
+        return run_id, run_dir
+    run_id = make_run_id()
+    return run_id, build_run_dir(args.run_root, paper_key, run_id)
+
+
 def run_full_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     pipeline_t0 = time.monotonic()
     repo_root = Path(__file__).resolve().parents[1]
     settings = get_settings()
     paper_source = str(args.paper_pdf or "").strip()
     paper_key = (args.paper_key or "").strip() or infer_paper_key(paper_source)
-    run_id = make_run_id()
-    run_dir = build_run_dir(args.run_root, paper_key, run_id)
+    run_id, run_dir = _resolve_run_directory(args, paper_key)
     layout = ensure_run_subdirs(run_dir)
     stats_path = run_dir / "run_stats.json"
     run_stats.initialize(stats_path)
