@@ -31,7 +31,7 @@ _WORKSPACE_ROUTES = {"/", "/paper", "/agent", "/queue", "/trace", "/confirm", "/
 
 def _is_review_job_api_path(path: str) -> bool:
     return (
-        path in {"/api/health", "/api/reviews", "/api/jobs"}
+        path in {"/api/health", "/api/reviews", "/api/jobs", "/api/papers/upload"}
         or path.startswith("/api/jobs/")
     )
 

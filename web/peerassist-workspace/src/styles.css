@@ -970,6 +970,61 @@ input:focus {
   gap: 10px;
 }
 
+.upload-bar {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 14px;
+}
+
+.upload-copy {
+  min-width: 0;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: var(--accent);
+}
+
+.upload-copy div {
+  min-width: 0;
+}
+
+.upload-copy strong,
+.upload-copy span {
+  display: block;
+}
+
+.upload-copy strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.upload-copy span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.upload-actions {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.upload-picker {
+  max-width: 240px;
+}
+
+.upload-picker span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .job-card {
   border: 1px solid var(--line-strong);
   border-radius: 7px;
@@ -1120,6 +1175,19 @@ input:focus {
 
   .status-strip {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .upload-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(150px, auto);
+  }
+
+  .upload-picker {
+    max-width: none;
   }
 
   .paper-grid,

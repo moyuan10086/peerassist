@@ -10,6 +10,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  FileUp,
   FolderDown,
   GitBranch,
   Loader2,
@@ -370,6 +371,32 @@ function App() {
     }
   }
 
+  async function uploadPaper(file: File) {
+    setBusy(true);
+    setStreamLines((lines) => [...lines.slice(-80), `upload: 正在上传 ${file.name}`]);
+    try {
+      const body = new FormData();
+      body.append("file", file, file.name);
+      const response = await fetch("/api/papers/upload", { method: "POST", body });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "论文上传失败");
+      showToast("论文已上传，后台审稿任务已启动");
+      setStreamLines((lines) => [
+        ...lines.slice(-80),
+        `upload: 已创建任务 ${String(result.job?.id || "")}`,
+      ]);
+      await refreshJobs();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "论文上传失败";
+      showToast(message);
+      setStreamLines((lines) => [...lines.slice(-80), `upload-error: ${message}`]);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const activeLabel = bootstrap.windows.find((item) => item.id === activeWindow)?.label || "论文阅读";
 
   return (
@@ -442,6 +469,7 @@ function App() {
             reviewJobs={reviewJobs}
             onRunReview={runAgentReview}
             onJobAction={runJobAction}
+            onUploadPaper={uploadPaper}
           />
         )}
         {activeWindow === "queue" && (
@@ -824,6 +852,7 @@ function AgentWindow({
   reviewJobs,
   onRunReview,
   onJobAction,
+  onUploadPaper,
 }: {
   busy: boolean;
   model: string;
@@ -834,8 +863,20 @@ function AgentWindow({
   reviewJobs: ReviewJob[];
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void;
+  onUploadPaper: (file: File) => Promise<boolean>;
 }) {
   const [mode, setMode] = useState("fast");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const uploadInput = useRef<HTMLInputElement>(null);
+
+  const submitUpload = async () => {
+    if (!uploadFile) return;
+    if (await onUploadPaper(uploadFile)) {
+      setUploadFile(null);
+      if (uploadInput.current) uploadInput.current.value = "";
+    }
+  };
+
   return (
     <section className="agent-grid">
       <div className="panel full-span">
@@ -843,10 +884,37 @@ function AgentWindow({
           <h2>后台审稿任务</h2>
           <span className="tag">{reviewJobs.length} 个 Review Job</span>
         </div>
-        <div className="panel-body job-list">
-          {reviewJobs.length ? reviewJobs.map((job) => (
-            <ReviewJobCard job={job} busy={busy} onAction={onJobAction} key={job.id} />
-          )) : <div className="draft-empty">暂无持久化审稿任务。</div>}
+        <div className="panel-body">
+          <div className="upload-bar">
+            <div className="upload-copy">
+              <FileText size={20} />
+              <div>
+                <strong>上传真实论文</strong>
+                <span>上传 PDF 后自动解析全文、建立证据索引并启动审稿任务</span>
+              </div>
+            </div>
+            <div className="upload-actions">
+              <input
+                ref={uploadInput}
+                type="file"
+                accept="application/pdf,.pdf"
+                hidden
+                onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
+              />
+              <button className="ghost-button upload-picker" type="button" disabled={busy} onClick={() => uploadInput.current?.click()}>
+                <FileUp size={16} /> <span>{uploadFile?.name || "选择 PDF"}</span>
+              </button>
+              <button className="primary-button" type="button" disabled={busy || !uploadFile} onClick={submitUpload}>
+                {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />}
+                {busy ? "正在处理" : "上传并开始审稿"}
+              </button>
+            </div>
+          </div>
+          <div className="job-list">
+            {reviewJobs.length ? reviewJobs.map((job) => (
+              <ReviewJobCard job={job} busy={busy} onAction={onJobAction} key={job.id} />
+            )) : <div className="draft-empty">暂无持久化审稿任务，请先上传一篇 PDF。</div>}
+          </div>
         </div>
       </div>
       <div className="panel">

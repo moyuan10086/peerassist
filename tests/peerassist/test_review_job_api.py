@@ -35,6 +35,16 @@ def _paper(data_dir: Path) -> str:
     return paper_id
 
 
+def _pdf_bytes(tmp_path: Path) -> bytes:
+    source = tmp_path / "upload.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Uploaded PeerAssist Study\nWe show recall improves.")
+    document.save(source)
+    document.close()
+    return source.read_bytes()
+
+
 def _json(url: str, *, method: str = "GET", payload=None):
     body = None if payload is None else json.dumps(payload).encode()
     request = Request(
@@ -95,6 +105,43 @@ def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path) -> None:
                 break
             sleep(0.02)
         assert snapshot["job"]["status"] == "awaiting_human_confirmation"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_multipart_upload_creates_paper_and_review_job(tmp_path: Path) -> None:
+    content = _pdf_bytes(tmp_path)
+    boundary = "peerassist-http-upload"
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="file"; filename="paper.pdf"\r\n',
+            b"Content-Type: application/pdf\r\n\r\n",
+            content,
+            f"\r\n--{boundary}--\r\n".encode(),
+        ]
+    )
+    server = create_review_job_server(data_dir=tmp_path, host="127.0.0.1", port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_address[1]}/api/papers/upload",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Connection": "close",
+            },
+        )
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode())
+        expected = hashlib.sha256(content).hexdigest()
+        assert payload["paper"]["paper_id"] == expected
+        assert payload["job"]["paper_id"] == expected
+        assert (tmp_path / "papers" / expected / "source" / "source.pdf").read_bytes() == content
     finally:
         server.shutdown()
         server.server_close()

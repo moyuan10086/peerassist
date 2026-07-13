@@ -13,6 +13,13 @@ from uuid import UUID, uuid4
 from peerassist.job_adapters import build_local_stage_adapters
 from peerassist.job_repository import PaperRepository, ReviewJobRepository
 from peerassist.job_runner import RecoverableReviewJobRunner, ReviewJobScheduler
+from peerassist.upload import (
+    UploadInterruptedError,
+    UploadParseError,
+    UploadTooLargeError,
+    UploadValidationError,
+    persist_multipart_upload,
+)
 from schemas.peerassist_jobs import ReviewJobState
 
 _JOB_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)(?P<action>/events|/cancel|/retry|/finalize)?$")
@@ -109,6 +116,9 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         self._send_json({"job": self._job(job_id)})
 
     def do_POST(self) -> None:
+        if self.path == "/api/papers/upload":
+            self._upload_paper()
+            return
         try:
             payload = self._read_json()
         except ValueError as exc:
@@ -163,6 +173,58 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not_found"}, status=404)
             return
         self._send_json({"job": state.model_dump(mode="json")})
+
+    def _upload_paper(self) -> None:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self._send_json({"error": "length_required"}, status=411)
+            return
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._send_json({"error": "invalid_request_framing"}, status=400)
+            return
+        if length < 0:
+            self._send_json({"error": "invalid_request_framing"}, status=400)
+            return
+
+        def chunks():
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+        try:
+            record = persist_multipart_upload(
+                chunks(),
+                content_type=str(self.headers.get("Content-Type") or ""),
+                content_length=length,
+                repository=self.service.paper_repository,
+            )
+            state = self.service.create_review(
+                paper_id=record.paper_id,
+                mode="fast",
+                idempotency_key=f"upload:{record.paper_id}",
+            )
+        except UploadTooLargeError as exc:
+            self._send_json({"error": str(exc)}, status=413)
+            return
+        except (UploadValidationError, UploadParseError, UploadInterruptedError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        self._send_json(
+            {
+                "paper": record.model_dump(mode="json"),
+                "job": state.model_dump(mode="json"),
+            },
+            status=202,
+        )
 
     def _read_json(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length")
