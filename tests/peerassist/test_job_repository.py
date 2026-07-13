@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import multiprocessing
+import os
+import stat
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from queue import Empty
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
+from common.storage import write_json_atomic
 from common.types import JobState
+from peerassist.job_repository import (
+    ManifestValidationError,
+    PaperRepository,
+    RepositoryConflictError,
+    RepositoryCorruptionError,
+    ReviewJobRepository,
+)
 from schemas.peerassist_jobs import (
     ExternalServiceConsent,
     FinalReportManifest,
@@ -24,6 +40,75 @@ from schemas.peerassist_jobs import (
 
 PAPER_SHA = "a" * 64
 ARTIFACT_SHA = "b" * 64
+
+
+def _cas_process(
+    data_dir: str,
+    job_id: str,
+    barrier: multiprocessing.synchronize.Barrier,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    repository = ReviewJobRepository(Path(data_dir))
+    barrier.wait()
+    try:
+        state = repository.update(
+            job_id,
+            expected_revision=0,
+            status=ReviewJobStatus.PARSING,
+        )
+    except RepositoryConflictError:
+        results.put("conflict")
+    else:
+        results.put(f"updated:{state.revision}")
+
+
+def _append_events_process(
+    data_dir: str,
+    job_id: str,
+    process_name: str,
+    count: int,
+    barrier: multiprocessing.synchronize.Barrier,
+) -> None:
+    repository = ReviewJobRepository(Path(data_dir))
+    barrier.wait()
+    for index in range(count):
+        repository.append_event(
+            job_id,
+            "process_event",
+            payload={"process": process_name, "index": index},
+        )
+
+
+def _claim_process(
+    data_dir: str,
+    job_id: str,
+    owner: str,
+    barrier: multiprocessing.synchronize.Barrier,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    repository = ReviewJobRepository(Path(data_dir))
+    barrier.wait()
+    claim = repository.claim(job_id, owner=owner, lease_seconds=30)
+    results.put(None if claim is None else claim.model_dump(mode="json"))
+
+
+def _atomic_writer_process(
+    destination: str,
+    value: int,
+    barrier: multiprocessing.synchronize.Barrier,
+    temp_paths: multiprocessing.queues.Queue,
+) -> None:
+    import common.storage as storage
+
+    original_replace = storage.os.replace
+
+    def synchronized_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        temp_paths.put(os.fspath(source))
+        barrier.wait()
+        original_replace(source, target)
+
+    storage.os.replace = synchronized_replace
+    storage.write_json_atomic(Path(destination), {"value": value})
 
 
 def _job_contract(**overrides: object) -> ReviewJobState:
@@ -327,3 +412,398 @@ def test_legacy_job_state_load_contract_preserves_artifacts_and_accepts_migratio
     assert migrated.schema_version == "legacy.job_state.v1"
     assert migrated.migrated_to_schema_version == "peerassist.review_job.v2"
     assert migrated.revision == 7
+
+
+def test_paper_repository_create_or_get_uses_complete_source_sha(tmp_path: Path) -> None:
+    repository = PaperRepository(tmp_path)
+    original = PaperRecord(
+        paper_id=PAPER_SHA,
+        source_pdf_name="original.pdf",
+        source_pdf_path="source/source.pdf",
+        size_bytes=123,
+    )
+
+    created = repository.create_or_get(original)
+    deduplicated = repository.create_or_get(
+        original.model_copy(update={"source_pdf_name": "renamed.pdf"})
+    )
+
+    assert created == original
+    assert deduplicated == original
+    assert repository.get(PAPER_SHA) == original
+    assert (tmp_path / "papers" / PAPER_SHA / "paper.json").is_file()
+    assert not (tmp_path / "papers" / PAPER_SHA[:16]).exists()
+
+
+def test_paper_repository_rejects_symlinked_identity_directory(tmp_path: Path) -> None:
+    repository = PaperRepository(tmp_path)
+    outside = tmp_path / "outside-paper"
+    outside.mkdir()
+    (tmp_path / "papers" / PAPER_SHA).symlink_to(outside, target_is_directory=True)
+    record = PaperRecord(paper_id=PAPER_SHA)
+
+    with pytest.raises(RepositoryCorruptionError, match="symlink"):
+        repository.create_or_get(record)
+
+    assert not (outside / "paper.json").exists()
+
+
+def test_review_job_repository_create_read_list_and_cas(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    first = _job_contract()
+    second = _job_contract()
+
+    assert repository.create(first) == first
+    assert repository.create(second) == second
+    assert repository.get(first.id) == first
+    assert [job.id for job in repository.list()] == sorted([first.id, second.id], key=str)
+
+    updated = repository.update(
+        first.id,
+        expected_revision=0,
+        status=ReviewJobStatus.PARSING,
+        stage=ReviewStage.PARSE,
+    )
+
+    assert updated.revision == 1
+    assert updated.status is ReviewJobStatus.PARSING
+    assert updated.stage is ReviewStage.PARSE
+
+    with pytest.raises(RepositoryConflictError):
+        repository.update(
+            first.id,
+            expected_revision=0,
+            status=ReviewJobStatus.FAILED,
+        )
+
+    assert repository.get(first.id) == updated
+
+
+def test_review_job_repository_rejects_symlinked_job_directory(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = _job_contract()
+    outside = tmp_path / "outside-job"
+    outside.mkdir()
+    (tmp_path / "jobs" / str(job.id)).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RepositoryCorruptionError, match="symlink"):
+        repository.create(job)
+
+    assert not (outside / "job.json").exists()
+
+
+def test_stale_cas_across_processes_has_one_winner_without_mutation(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(target=_cas_process, args=(str(tmp_path), str(job.id), barrier, results))
+        for _ in range(2)
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(results.get(timeout=1) for _ in processes) == ["conflict", "updated:1"]
+    assert repository.get(job.id).revision == 1
+
+
+def test_event_ids_are_monotonic_and_unique_across_processes(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    processes = [
+        context.Process(
+            target=_append_events_process,
+            args=(str(tmp_path), str(job.id), name, 20, barrier),
+        )
+        for name in ("first", "second")
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    events = repository.replay_events(job.id)
+    assert [event.event_id for event in events] == list(range(1, 41))
+    assert len({event.event_id for event in events}) == 40
+    assert {event.payload["process"] for event in events} == {"first", "second"}
+    assert repository.get(job.id).last_event_id == 40
+
+
+def test_event_replay_after_last_event_id_and_damaged_tail_recovery(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    repository.append_event(job.id, "created")
+    repository.append_event(job.id, "started")
+    repository.append_event(job.id, "checkpoint")
+
+    replay = repository.replay_events(job.id, after_event_id=1)
+    assert [event.event_type for event in replay] == ["started", "checkpoint"]
+
+    events_path = tmp_path / "jobs" / str(job.id) / "events.jsonl"
+    valid_size = events_path.stat().st_size
+    with events_path.open("ab") as stream:
+        stream.write(b'{"event_id": 4, "event_type": "damaged"')
+        stream.flush()
+        os.fsync(stream.fileno())
+
+    recovered = repository.replay_events(job.id)
+
+    assert [event.event_id for event in recovered] == [1, 2, 3]
+    assert events_path.stat().st_size == valid_size
+    assert repository.append_event(job.id, "resumed").event_id == 4
+
+
+def test_worker_claim_is_exclusive_across_processes_and_releasable(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_process,
+            args=(str(tmp_path), str(job.id), owner, barrier, results),
+        )
+        for owner in ("worker-1", "worker-2")
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    claims = [results.get(timeout=1) for _ in processes]
+    winners = [claim for claim in claims if claim is not None]
+    assert len(winners) == 1
+    winner = winners[0]
+    assert winner["owner"] in {"worker-1", "worker-2"}
+    assert winner["token"]
+    assert repository.release_claim(job.id, owner=winner["owner"], token="wrong") is False
+    assert repository.release_claim(
+        job.id,
+        owner=winner["owner"],
+        token=winner["token"],
+    )
+    assert repository.claim(job.id, owner="worker-3", lease_seconds=30) is not None
+
+
+def test_expired_worker_claim_can_be_reclaimed(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+
+    first = repository.claim(job.id, owner="worker-1", lease_seconds=0.01)
+    assert first is not None
+    time.sleep(0.03)
+    second = repository.claim(job.id, owner="worker-2", lease_seconds=30)
+
+    assert second is not None
+    assert second.owner == "worker-2"
+    assert second.token != first.token
+
+
+def test_atomic_writes_use_unique_temporary_files_across_processes(tmp_path: Path) -> None:
+    destination = tmp_path / "state.json"
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    temp_paths = context.Queue()
+    processes = [
+        context.Process(
+            target=_atomic_writer_process,
+            args=(str(destination), value, barrier, temp_paths),
+        )
+        for value in (1, 2)
+    ]
+
+    for process in processes:
+        process.start()
+    try:
+        paths = [Path(temp_paths.get(timeout=5)) for _ in processes]
+    except Empty:
+        for process in processes:
+            process.terminate()
+        pytest.fail("atomic writers did not reach replacement")
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert len(set(paths)) == 2
+    assert all(path.parent == destination.parent for path in paths)
+    assert json.loads(destination.read_text(encoding="utf-8"))["value"] in {1, 2}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def _stage_manifest(
+    job_id: object,
+    *,
+    attempt_id: str,
+    content: bytes,
+) -> StageManifest:
+    relative_output = f"attempts/{attempt_id}/stages/parse/outputs"
+    return StageManifest(
+        stage=ReviewStage.PARSE,
+        attempt_id=attempt_id,
+        checkpoint_path=f"attempts/{attempt_id}/stages/parse/checkpoint.json",
+        output_dir=relative_output,
+        artifacts={"paper": "paper.json"},
+        artifact_sha256={"paper": hashlib.sha256(content).hexdigest()},
+        artifact_sizes={"paper": len(content)},
+    )
+
+
+def _write_stage_output(
+    data_dir: Path,
+    job_id: object,
+    attempt_id: str,
+    content: bytes,
+) -> Path:
+    output = (
+        data_dir
+        / "jobs"
+        / str(job_id)
+        / "attempts"
+        / attempt_id
+        / "stages"
+        / "parse"
+        / "outputs"
+        / "paper.json"
+    )
+    output.parent.mkdir(parents=True)
+    output.write_bytes(content)
+    return output
+
+
+def test_commit_stage_manifest_validates_then_materializes_read_only_view(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    attempt_output = _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+
+    committed = repository.commit_stage_outputs(job.id, manifest)
+
+    pointer = tmp_path / "jobs" / str(job.id) / "current_stages" / "parse.json"
+    immutable = (
+        tmp_path / "jobs" / str(job.id) / "manifests" / "parse" / "attempt-1.json"
+    )
+    compatibility = tmp_path / "jobs" / str(job.id) / "run" / "stages" / "parse" / "paper.json"
+    assert committed == manifest
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) == manifest
+    assert StageManifest.model_validate_json(pointer.read_text(encoding="utf-8")) == manifest
+    assert StageManifest.model_validate_json(immutable.read_text(encoding="utf-8")) == manifest
+    assert compatibility.read_bytes() == content
+    assert stat.S_IMODE(compatibility.stat().st_mode) & 0o222 == 0
+    assert attempt_output.read_bytes() == content
+
+
+def test_manifest_pointer_failure_preserves_previous_commit_and_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    first_content = b'{"attempt": 1}\n'
+    second_content = b'{"attempt": 2}\n'
+    first_output = _write_stage_output(tmp_path, job.id, "attempt-1", first_content)
+    second_output = _write_stage_output(tmp_path, job.id, "attempt-2", second_content)
+    first_manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=first_content)
+    second_manifest = _stage_manifest(job.id, attempt_id="attempt-2", content=second_content)
+    repository.commit_stage_outputs(job.id, first_manifest)
+
+    def fail_before_replace(*args: object, **kwargs: object) -> None:
+        raise OSError("injected pointer failure")
+
+    monkeypatch.setattr(repository, "_replace_current_stage_pointer", fail_before_replace)
+
+    with pytest.raises(OSError, match="injected pointer failure"):
+        repository.commit_stage_outputs(job.id, second_manifest)
+
+    compatibility = tmp_path / "jobs" / str(job.id) / "run" / "stages" / "parse" / "paper.json"
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) == first_manifest
+    assert compatibility.read_bytes() == first_content
+    assert first_output.read_bytes() == first_content
+    assert second_output.read_bytes() == second_content
+    assert (
+        tmp_path / "jobs" / str(job.id) / "manifests" / "parse" / "attempt-2.json"
+    ).is_file()
+
+
+def test_manifest_validation_rejects_hash_mismatch_and_symlink_escape(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    output = _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+
+    output.write_bytes(b"tampered")
+    with pytest.raises(ManifestValidationError, match=r"size|SHA"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(content)
+    output.unlink()
+    output.symlink_to(outside)
+    with pytest.raises(ManifestValidationError, match=r"symlink|escape"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) is None
+
+
+def test_manifest_validation_rejects_symlinked_attempt_output_directory(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"outside": true}\n'
+    outside = tmp_path / "outside-outputs"
+    outside.mkdir()
+    (outside / "paper.json").write_bytes(content)
+    output_dir = (
+        tmp_path
+        / "jobs"
+        / str(job.id)
+        / "attempts"
+        / "attempt-1"
+        / "stages"
+        / "parse"
+        / "outputs"
+    )
+    output_dir.parent.mkdir(parents=True)
+    output_dir.symlink_to(outside, target_is_directory=True)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+
+    with pytest.raises(ManifestValidationError, match=r"symlink|escape"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) is None
+
+
+def test_current_manifest_reader_rejects_symlinked_pointer(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    outside = tmp_path / "outside-manifest.json"
+    write_json_atomic(outside, manifest.model_dump(mode="json"))
+    pointer_dir = tmp_path / "jobs" / str(job.id) / "current_stages"
+    pointer_dir.mkdir()
+    (pointer_dir / "parse.json").symlink_to(outside)
+
+    with pytest.raises(ManifestValidationError, match="symlink"):
+        repository.current_stage_manifest(job.id, ReviewStage.PARSE)
+
+
+def test_legacy_atomic_writer_still_accepts_dict_payload(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.json"
+
+    write_json_atomic(path, {"legacy": True})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"legacy": True}

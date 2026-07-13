@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .config import get_settings
 
@@ -45,22 +49,62 @@ def annotations_path(job_id: UUID | str) -> Path:
     return job_dir(job_id) / "annotations.json"
 
 
-def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _unique_temp_path(path: Path) -> Path:
+    return path.parent / f".{path.name}.{uuid4().hex}.tmp"
+
+
+def write_bytes_atomic(path: Path, content: bytes, *, mode: int | None = None) -> None:
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    temporary = _unique_temp_path(path)
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode or 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    write_bytes_atomic(path, content)
 
 
 def write_text_atomic(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
+    write_bytes_atomic(path, content.encode("utf-8"))
 
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@contextmanager
+def exclusive_file_lock(path: Path) -> Iterator[None]:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def append_event(job_id: UUID | str, event: str, **extra: Any) -> None:
@@ -72,5 +116,11 @@ def append_event(job_id: UUID | str, event: str, **extra: Any) -> None:
     }
     events_file = events_path(job_id)
     events_file.parent.mkdir(parents=True, exist_ok=True)
-    with events_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with (
+        exclusive_file_lock(events_file.parent / ".legacy-events.lock"),
+        events_file.open("a", encoding="utf-8") as stream,
+    ):
+        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_directory(events_file.parent)
