@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import peerassist.upload as upload
-from peerassist.job_repository import PaperRepository
+from peerassist.job_repository import PaperRepository, RepositoryCorruptionError
 from peerassist.upload import (
     UploadInterruptedError,
     UploadParseError,
@@ -20,6 +20,7 @@ from peerassist.upload import (
     persist_multipart_upload,
     persist_pdf_upload,
 )
+from schemas.peerassist_jobs import PaperRecord
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 BOUNDARY = "peerassist-boundary"
@@ -103,6 +104,33 @@ def test_duplicate_content_returns_the_original_record_and_one_source(tmp_path: 
     assert duplicate == first
     assert first.source_pdf_name == "first.pdf"
     assert len(list((tmp_path / "papers").rglob("source.pdf"))) == 1
+
+
+def test_existing_record_with_mismatched_source_fields_is_rejected(tmp_path: Path) -> None:
+    repository = PaperRepository(tmp_path)
+    paper_id = hashlib.sha256(PDF).hexdigest()
+    source = tmp_path / "papers" / paper_id / "source" / "source.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(PDF)
+    repository.create_or_get(
+        PaperRecord(
+            paper_id=paper_id,
+            source_pdf_name="original.pdf",
+            source_pdf_path="source/source.pdf",
+            size_bytes=1,
+            content_type="application/pdf",
+        )
+    )
+
+    with pytest.raises(RepositoryCorruptionError, match="record"):
+        persist_pdf_upload(
+            [PDF],
+            filename="paper.pdf",
+            content_type="application/pdf",
+            repository=repository,
+        )
+
+    assert source.read_bytes() == PDF
 
 
 @pytest.mark.parametrize(
@@ -266,6 +294,22 @@ def test_declared_oversize_multipart_is_rejected_before_stream_consumption(
     _assert_no_partial_upload(tmp_path)
 
 
+def test_multipart_header_buffer_has_independent_overhead_limit(tmp_path: Path) -> None:
+    repository = PaperRepository(tmp_path)
+    oversized_filename = "a" * (upload.MAX_MULTIPART_OVERHEAD_BYTES + 1) + ".pdf"
+    body = _multipart_body(PDF, filename=oversized_filename)
+
+    with pytest.raises(UploadTooLargeError, match="overhead"):
+        persist_multipart_upload(
+            _chunks(body),
+            content_type=f"multipart/form-data; boundary={BOUNDARY}",
+            content_length=None,
+            repository=repository,
+        )
+
+    _assert_no_partial_upload(tmp_path)
+
+
 def test_chunk_crossing_limit_is_removed(tmp_path: Path) -> None:
     repository = PaperRepository(tmp_path)
     chunks = [PDF[:10], PDF[10:20], PDF[20:]]
@@ -298,6 +342,45 @@ def test_interrupted_stream_cleans_temp_and_durable_state(tmp_path: Path) -> Non
         )
 
     _assert_no_partial_upload(tmp_path)
+
+
+def test_upload_temporary_directory_symlink_is_rejected(tmp_path: Path) -> None:
+    repository = PaperRepository(tmp_path)
+    outside = tmp_path / "outside-uploads"
+    outside.mkdir()
+    uploads = tmp_path / "papers" / ".uploads"
+    uploads.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RepositoryCorruptionError, match="directory"):
+        persist_pdf_upload(
+            [PDF],
+            filename="paper.pdf",
+            content_type="application/pdf",
+            repository=repository,
+        )
+
+    assert not list(outside.iterdir())
+
+
+def test_paper_source_directory_symlink_is_rejected(tmp_path: Path) -> None:
+    repository = PaperRepository(tmp_path)
+    paper_id = hashlib.sha256(PDF).hexdigest()
+    identity = tmp_path / "papers" / paper_id
+    outside = tmp_path / "outside-source"
+    identity.mkdir()
+    outside.mkdir()
+    (identity / "source").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RepositoryCorruptionError, match="directory"):
+        persist_pdf_upload(
+            [PDF],
+            filename="paper.pdf",
+            content_type="application/pdf",
+            repository=repository,
+        )
+
+    assert not (outside / "source.pdf").exists()
+    assert not (identity / "paper.json").exists()
 
 
 def test_malformed_multipart_cleans_temp_and_durable_state(tmp_path: Path) -> None:

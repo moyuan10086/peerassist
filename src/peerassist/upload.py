@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import stat
 from collections.abc import Iterable
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -41,14 +43,6 @@ class UploadParseError(UploadError):
     """The multipart request is malformed or incomplete."""
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _safe_filename(filename: str) -> str:
     value = str(filename or "").strip()
     if not value or "\x00" in value or "/" in value or "\\" in value:
@@ -72,12 +66,64 @@ def _configured_limit(max_pdf_bytes: int | None) -> int:
     return int(value)
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _directory_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_child_directory(parent_fd: int, name: str) -> int:
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        pass
+    try:
+        return os.open(name, _directory_flags(), dir_fd=parent_fd)
+    except OSError as exc:
+        raise RepositoryCorruptionError(f"repository directory is unsafe: {name}") from exc
+
+
+def _read_record_at(identity_fd: int) -> PaperRecord | None:
+    try:
+        descriptor = os.open(
+            "paper.json",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=identity_fd,
+        )
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as stream:
+        return PaperRecord.model_validate_json(stream.read())
+
+
+def _write_record_at(identity_fd: int, record: PaperRecord) -> None:
+    temporary = f".paper.json.{uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=identity_fd,
+    )
+    try:
+        payload = json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2).encode(
+            "utf-8"
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, "paper.json", src_dir_fd=identity_fd, dst_dir_fd=identity_fd)
+        os.fsync(identity_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=identity_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _validate_record_source(existing: PaperRecord, expected: PaperRecord) -> None:
+    immutable_fields = ("paper_id", "source_pdf_path", "size_bytes", "content_type")
+    if any(getattr(existing, field) != getattr(expected, field) for field in immutable_fields):
+        raise RepositoryCorruptionError("existing paper record does not match verified source")
 
 
 class _PdfUploadSink:
@@ -100,22 +146,25 @@ class _PdfUploadSink:
             if content_length > max_pdf_bytes:
                 raise UploadTooLargeError("declared PDF size exceeds the configured limit")
 
-        uploads_dir = repository.papers_dir / ".uploads"
-        if uploads_dir.is_symlink():
-            raise RepositoryCorruptionError("upload temporary directory is a symlink")
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        _fsync_directory(repository.papers_dir)
-        self.temp_path = uploads_dir / f"{uuid4().hex}.tmp"
+        papers_fd = os.open(repository.papers_dir, _directory_flags())
+        try:
+            self.uploads_fd = _open_child_directory(papers_fd, ".uploads")
+        finally:
+            os.close(papers_fd)
+        self.temp_name = f"{uuid4().hex}.tmp"
+        self.temp_path = repository.papers_dir / ".uploads" / self.temp_name
         descriptor = os.open(
-            self.temp_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            self.temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600,
+            dir_fd=self.uploads_fd,
         )
         self.stream = os.fdopen(descriptor, "wb")
         self.digest = hashlib.sha256()
         self.prefix = bytearray()
         self.size = 0
         self.closed = False
+        self.uploads_closed = False
 
     def write(self, chunk: bytes) -> None:
         if self.closed:
@@ -139,7 +188,17 @@ class _PdfUploadSink:
         if not self.closed:
             self.stream.close()
             self.closed = True
-        self.temp_path.unlink(missing_ok=True)
+        if not self.uploads_closed:
+            try:
+                os.unlink(self.temp_name, dir_fd=self.uploads_fd)
+            except FileNotFoundError:
+                pass
+            self._close_uploads_directory()
+
+    def _close_uploads_directory(self) -> None:
+        if not self.uploads_closed:
+            os.close(self.uploads_fd)
+            self.uploads_closed = True
 
     def finish(self) -> PaperRecord:
         if self.size == 0:
@@ -158,44 +217,88 @@ class _PdfUploadSink:
             size_bytes=self.size,
             content_type="application/pdf",
         )
-        source_created = False
         lock_path = self.repository.locks_dir / f"{paper_id}.lock"
         try:
             with exclusive_file_lock(lock_path):
-                identity_dir = self.repository.papers_dir / paper_id
-                source_dir = identity_dir / "source"
-                source_path = source_dir / "source.pdf"
-                if identity_dir.is_symlink() or source_dir.is_symlink() or source_path.is_symlink():
-                    raise RepositoryCorruptionError("paper source path is a symlink")
-                identity_created = not identity_dir.exists()
-                source_dir.mkdir(parents=True, exist_ok=True)
-                if identity_created:
-                    _fsync_directory(self.repository.papers_dir)
-                _fsync_directory(identity_dir)
-                if source_path.exists():
-                    if not source_path.is_file():
-                        raise RepositoryCorruptionError("paper source is not a regular file")
-                    if source_path.stat().st_size != self.size:
-                        raise RepositoryCorruptionError("existing paper source size does not match")
-                    existing_digest = _sha256_file(source_path)
-                    if existing_digest != paper_id:
-                        raise RepositoryCorruptionError("existing paper source hash does not match")
-                    self.temp_path.unlink(missing_ok=True)
-                else:
-                    os.replace(self.temp_path, source_path)
-                    os.chmod(source_path, 0o600)
-                    _fsync_directory(source_dir)
-                    source_created = True
-            return self.repository.create_or_get(record)
+                papers_fd = os.open(self.repository.papers_dir, _directory_flags())
+                identity_fd = -1
+                source_fd = -1
+                source_created = False
+                try:
+                    identity_fd = _open_child_directory(papers_fd, paper_id)
+                    source_fd = _open_child_directory(identity_fd, "source")
+                    try:
+                        source_descriptor = os.open(
+                            "source.pdf",
+                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                            dir_fd=source_fd,
+                        )
+                    except FileNotFoundError:
+                        os.rename(
+                            self.temp_name,
+                            "source.pdf",
+                            src_dir_fd=self.uploads_fd,
+                            dst_dir_fd=source_fd,
+                        )
+                        os.chmod(
+                            "source.pdf",
+                            0o600,
+                            dir_fd=source_fd,
+                            follow_symlinks=False,
+                        )
+                        os.fsync(source_fd)
+                        source_created = True
+                    else:
+                        with os.fdopen(source_descriptor, "rb") as source_stream:
+                            metadata = os.fstat(source_stream.fileno())
+                            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != self.size:
+                                raise RepositoryCorruptionError(
+                                    "existing paper source size does not match"
+                                )
+                            digest = hashlib.sha256()
+                            for chunk in iter(lambda: source_stream.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                            if digest.hexdigest() != paper_id:
+                                raise RepositoryCorruptionError(
+                                    "existing paper source hash does not match"
+                                )
+                        try:
+                            os.unlink(self.temp_name, dir_fd=self.uploads_fd)
+                        except FileNotFoundError:
+                            pass
+
+                    existing = _read_record_at(identity_fd)
+                    if existing is not None:
+                        try:
+                            _validate_record_source(existing, record)
+                        except Exception:
+                            if source_created:
+                                os.unlink("source.pdf", dir_fd=source_fd)
+                                os.fsync(source_fd)
+                            raise
+                        return existing
+                    try:
+                        _write_record_at(identity_fd, record)
+                    except Exception:
+                        if source_created:
+                            os.unlink("source.pdf", dir_fd=source_fd)
+                            os.fsync(source_fd)
+                        raise
+                    return record
+                finally:
+                    if source_fd >= 0:
+                        os.close(source_fd)
+                    if identity_fd >= 0:
+                        os.close(identity_fd)
+                    os.close(papers_fd)
         except Exception:
-            self.temp_path.unlink(missing_ok=True)
-            if source_created:
-                with exclusive_file_lock(lock_path):
-                    paper_path = self.repository.papers_dir / paper_id / "paper.json"
-                    source_path = self.repository.papers_dir / paper_id / "source" / "source.pdf"
-                    if not paper_path.exists():
-                        source_path.unlink(missing_ok=True)
+            try:
+                os.unlink(self.temp_name, dir_fd=self.uploads_fd)
+            except FileNotFoundError:
+                pass
             raise
+        finally:
+            self._close_uploads_directory()
 
 
 def persist_pdf_upload(
@@ -220,7 +323,7 @@ def persist_pdf_upload(
         for chunk in chunks:
             sink.write(chunk)
         return sink.finish()
-    except UploadError:
+    except (UploadError, RepositoryCorruptionError):
         sink.abort()
         raise
     except Exception as exc:
@@ -250,6 +353,7 @@ def persist_multipart_upload(
         raise UploadTooLargeError("declared multipart size exceeds the configured limit")
     current_header_name = bytearray()
     current_header_value = bytearray()
+    header_buffer_bytes = 0
     headers: dict[bytes, bytes] = {}
     current_is_file = False
     file_seen = False
@@ -267,9 +371,17 @@ def persist_multipart_upload(
         current_header_value.clear()
 
     def on_header_field(data: bytes, start: int, end: int) -> None:
+        nonlocal header_buffer_bytes
+        header_buffer_bytes += end - start
+        if header_buffer_bytes > MAX_MULTIPART_OVERHEAD_BYTES:
+            raise UploadTooLargeError("multipart overhead exceeds the configured limit")
         current_header_name.extend(data[start:end])
 
     def on_header_value(data: bytes, start: int, end: int) -> None:
+        nonlocal header_buffer_bytes
+        header_buffer_bytes += end - start
+        if header_buffer_bytes > MAX_MULTIPART_OVERHEAD_BYTES:
+            raise UploadTooLargeError("multipart overhead exceeds the configured limit")
         current_header_value.extend(data[start:end])
 
     def on_header_end() -> None:
@@ -321,7 +433,11 @@ def persist_multipart_upload(
         "on_part_end": on_part_end,
         "on_end": on_end,
     }
-    parser = MultipartParser(parameters[b"boundary"], callbacks)
+    parser = MultipartParser(
+        parameters[b"boundary"],
+        callbacks,
+        max_header_size=MAX_MULTIPART_OVERHEAD_BYTES,
+    )
     request_size = 0
     try:
         for chunk in chunks:
@@ -330,17 +446,22 @@ def persist_multipart_upload(
             if request_size > max_request_bytes:
                 raise UploadTooLargeError("actual multipart size exceeds the configured limit")
             parser.write(data)
+            file_bytes = sink.size if sink is not None else 0
+            if request_size - file_bytes > MAX_MULTIPART_OVERHEAD_BYTES:
+                raise UploadTooLargeError("multipart overhead exceeds the configured limit")
         parser.finalize()
         if not ended or not file_seen or not file_ended or sink is None:
             raise UploadParseError("multipart request is incomplete")
         return sink.finish()
-    except (UploadError, UnicodeDecodeError):
+    except (UploadError, RepositoryCorruptionError, UnicodeDecodeError):
         if sink is not None:
             sink.abort()
         raise
     except MultipartParseError as exc:
         if sink is not None:
             sink.abort()
+        if "header size" in str(exc).lower():
+            raise UploadTooLargeError("multipart overhead exceeds the configured limit") from exc
         raise UploadParseError(str(exc)) from exc
     except Exception as exc:
         if sink is not None:
