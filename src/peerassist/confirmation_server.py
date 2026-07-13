@@ -21,6 +21,7 @@ from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
 from peerassist.review_context import build_review_context
+from peerassist.review_job_api import create_review_job_server as create_review_job_server
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
 _FRONTEND_APP_ROOT = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace"
