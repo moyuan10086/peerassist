@@ -232,4 +232,4 @@ model keys, paper secrets, or reviewer-private material here.
 - Jobs can be submitted in the background, deduplicated in-process, recovered after an interrupted service process, and waited on without losing durable stage state.
 - Cancellation requests are persisted before the Worker observes them. Finalization now records `exporting_report` and transitions to completed, awaiting confirmation, or failed based on the versioned finalizer result.
 - Focused review-runner verification reached 10 passing tests with Ruff clean.
-- Appended Feishu section `六十八、2026-07-14 后台调度与孤儿任务恢复`; append-only verification must confirm sections `六十七` and `六十八` remain present.
+- Appended Feishu section `六十八、2026-07-14 后台调度与孤儿任务恢复`; revision advanced from `100` to `101`. Append-only verification confirmed sections `六十七` and `六十八` remain present.
