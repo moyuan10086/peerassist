@@ -255,4 +255,4 @@ model keys, paper secrets, or reviewer-private material here.
 - Task cards show durable status, current stage, revision, degradation/error state and a stable twelve-stage progress track, with model-consent, cancel, retry and final-report controls.
 - Registered arXiv `2607.08522v1` under its full SHA-256 and created a real public ReviewJob. It completed validate, parse, evidence, profile, plan, deterministic and citation stages and is durably parked at `agents / approval_required` without sending the manuscript to a model.
 - Browser screenshot verification confirmed the real task card, progress track and authorization controls render correctly in the public `/agent` workspace.
-- Appended Feishu section `七十一、2026-07-14 持久化审稿任务时间线 UI`; append-only verification must confirm sections `七十` and `七十一` remain present.
+- Appended Feishu section `七十一、2026-07-14 持久化审稿任务时间线 UI`; revision advanced from `103` to `104`. Append-only verification confirmed sections `七十` and `七十一` remain present.
