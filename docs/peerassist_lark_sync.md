@@ -247,4 +247,4 @@ model keys, paper secrets, or reviewer-private material here.
 - A real PDF lifecycle test creates a job through HTTP, observes the persisted model-consent block, replays durable stage events, grants consent and reaches human confirmation.
 - Started the backend worker service on local port 8767 and proxied `/api/health`, `/api/reviews`, and `/api/jobs/*` through the existing public Chinese workspace on port 8766.
 - Public health endpoint verified: `http://101.47.158.17:8766/api/health`; the main workspace continues to return HTTP 200.
-- Appended Feishu section `七十、2026-07-14 Review Job HTTP 与 SSE 公网接口`; append-only verification must confirm sections `六十九` and `七十` remain present.
+- Appended Feishu section `七十、2026-07-14 Review Job HTTP 与 SSE 公网接口`; revision advanced from `102` to `103`. Append-only verification confirmed sections `六十九` and `七十` remain present.
