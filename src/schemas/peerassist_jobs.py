@@ -100,9 +100,11 @@ class ConsentDecision(StrEnum):
 
 
 class ExternalServiceConsent(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "peerassist.external_service_consent.v1"
+    schema_version: Literal["peerassist.external_service_consent.v1"] = (
+        "peerassist.external_service_consent.v1"
+    )
     decision: ConsentDecision = ConsentDecision.PENDING
     service: str = ""
     decided_by: str | None = None
@@ -111,9 +113,9 @@ class ExternalServiceConsent(BaseModel):
 
 
 class PaperRecord(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = PAPER_SCHEMA_VERSION
+    schema_version: Literal["peerassist.paper.v1"] = PAPER_SCHEMA_VERSION
     paper_id: str
     source_pdf_name: str = "paper.pdf"
     source_pdf_path: str = "source.pdf"
@@ -135,9 +137,9 @@ class PaperRecord(BaseModel):
 
 
 class StageManifest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = STAGE_MANIFEST_SCHEMA_VERSION
+    schema_version: Literal["peerassist.stage_manifest.v1"] = STAGE_MANIFEST_SCHEMA_VERSION
     stage: ReviewStage
     attempt_id: str
     checkpoint_path: str
@@ -188,9 +190,9 @@ class StageManifest(BaseModel):
 
 
 class StageCheckpoint(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = STAGE_CHECKPOINT_SCHEMA_VERSION
+    schema_version: Literal["peerassist.stage_checkpoint.v1"] = STAGE_CHECKPOINT_SCHEMA_VERSION
     stage: ReviewStage
     attempt_id: str
     status: ReviewJobStatus
@@ -234,9 +236,9 @@ class StageCheckpoint(BaseModel):
 
 
 class ReviewJobState(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = REVIEW_JOB_SCHEMA_VERSION
+    schema_version: Literal["peerassist.review_job.v2"] = REVIEW_JOB_SCHEMA_VERSION
     id: UUID = Field(default_factory=uuid4)
     paper_id: str
     run_dir: str
@@ -275,7 +277,7 @@ class ReviewJobState(BaseModel):
     @field_validator("run_dir")
     @classmethod
     def validate_run_dir(cls, value: str) -> str:
-        return _validate_path(value, field_name="run_dir", allow_absolute=True)
+        return _validate_path(value, field_name="run_dir", allow_absolute=False)
 
     @field_validator("attempt_id")
     @classmethod
@@ -291,6 +293,9 @@ class ReviewJobState(BaseModel):
 
     @model_validator(mode="after")
     def validate_durable_state(self) -> ReviewJobState:
+        run_dir_parts = PurePosixPath(self.run_dir).parts
+        if len(run_dir_parts) < 2 or run_dir_parts[-2:] != (str(self.id), "run"):
+            raise ValueError("run_dir must end with the current job id followed by /run")
         for stage, manifest in self.current_stage_manifests.items():
             if stage != manifest.stage:
                 raise ValueError("current stage manifest key must match manifest stage")
@@ -303,9 +308,9 @@ class ReviewJobState(BaseModel):
 
 
 class ReviewJobEvent(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = REVIEW_JOB_EVENT_SCHEMA_VERSION
+    schema_version: Literal["peerassist.review_job_event.v1"] = REVIEW_JOB_EVENT_SCHEMA_VERSION
     job_id: UUID
     event_id: int = Field(ge=1)
     event_type: str
@@ -325,9 +330,9 @@ class ReviewJobEvent(BaseModel):
 
 
 class FinalReportManifest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = FINAL_REPORT_MANIFEST_SCHEMA_VERSION
+    schema_version: Literal["peerassist.final_report_manifest.v1"] = FINAL_REPORT_MANIFEST_SCHEMA_VERSION
     job_id: UUID
     paper_id: str
     report_version: str
@@ -370,9 +375,9 @@ class FinalReportManifest(BaseModel):
 
 
 class Principal(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = AUTH_SCHEMA_VERSION
+    schema_version: Literal["peerassist.auth.v1"] = AUTH_SCHEMA_VERSION
     principal_id: str
     display_name: str = ""
     created_at: datetime = Field(default_factory=utcnow)
@@ -386,9 +391,9 @@ class Principal(BaseModel):
 
 
 class SessionRecord(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = AUTH_SCHEMA_VERSION
+    schema_version: Literal["peerassist.auth.v1"] = AUTH_SCHEMA_VERSION
     session_id: UUID = Field(default_factory=uuid4)
     principal_id: str
     token_hash: str
@@ -417,9 +422,9 @@ class ResourceRole(StrEnum):
 
 
 class ResourceGrant(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = AUTH_SCHEMA_VERSION
+    schema_version: Literal["peerassist.auth.v1"] = AUTH_SCHEMA_VERSION
     grant_id: UUID = Field(default_factory=uuid4)
     principal_id: str
     resource_type: Literal["paper", "job"]

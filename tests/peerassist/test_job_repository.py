@@ -9,9 +9,15 @@ from pydantic import ValidationError
 from common.types import JobState
 from schemas.peerassist_jobs import (
     ExternalServiceConsent,
+    FinalReportManifest,
+    PaperRecord,
+    Principal,
+    ResourceGrant,
+    ReviewJobEvent,
     ReviewJobState,
     ReviewJobStatus,
     ReviewStage,
+    SessionRecord,
     StageCheckpoint,
     StageManifest,
 )
@@ -47,6 +53,97 @@ def test_review_job_contract_requires_full_paper_sha_and_safe_run_directory() ->
         _job_contract(paper_id="A" * 64)
     with pytest.raises(ValidationError, match="run_dir"):
         _job_contract(run_dir="../outside")
+
+
+def test_review_job_contract_rejects_absolute_run_directory() -> None:
+    job_id = uuid4()
+
+    with pytest.raises(ValidationError, match="run_dir"):
+        _job_contract(id=job_id, run_dir=f"/data/jobs/{job_id}/run")
+
+
+def test_review_job_contract_rejects_run_directory_for_another_job() -> None:
+    job_id = uuid4()
+
+    with pytest.raises(ValidationError, match="run_dir"):
+        _job_contract(id=job_id, run_dir=f"data/jobs/{uuid4()}/run")
+
+
+@pytest.mark.parametrize("unknown_field", ["expected_revision", "last_eventd_id"])
+def test_review_job_contract_rejects_unknown_cas_and_event_fields(unknown_field: str) -> None:
+    with pytest.raises(ValidationError, match=unknown_field):
+        _job_contract(**{unknown_field: 0})
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (ExternalServiceConsent, {}),
+        (PaperRecord, {"paper_id": PAPER_SHA}),
+        (
+            StageManifest,
+            {
+                "stage": "parse",
+                "attempt_id": "attempt-1",
+                "checkpoint_path": "attempts/attempt-1/stages/parse/checkpoint.json",
+                "output_dir": "attempts/attempt-1/stages/parse/outputs",
+            },
+        ),
+        (StageCheckpoint, {"stage": "parse", "attempt_id": "attempt-1", "status": "queued"}),
+        (
+            ReviewJobState,
+            {
+                "paper_id": PAPER_SHA,
+                "run_dir": "data/jobs/00000000-0000-0000-0000-000000000001/run",
+                "attempt_id": "attempt-1",
+                "id": "00000000-0000-0000-0000-000000000001",
+            },
+        ),
+        (
+            ReviewJobEvent,
+            {
+                "job_id": "00000000-0000-0000-0000-000000000001",
+                "event_id": 1,
+                "event_type": "created",
+            },
+        ),
+        (
+            FinalReportManifest,
+            {
+                "job_id": "00000000-0000-0000-0000-000000000001",
+                "paper_id": PAPER_SHA,
+                "report_version": "report-1",
+                "confirmation_revision": 1,
+                "artifacts": {},
+            },
+        ),
+        (Principal, {"principal_id": "reviewer-1"}),
+        (
+            SessionRecord,
+            {
+                "principal_id": "reviewer-1",
+                "token_hash": "token-hash",
+                "csrf_token_hash": "csrf-hash",
+                "expires_at": datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
+                "created_at": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+            },
+        ),
+        (
+            ResourceGrant,
+            {
+                "principal_id": "reviewer-1",
+                "resource_type": "job",
+                "resource_id": "00000000-0000-0000-0000-000000000001",
+                "role": "owner",
+            },
+        ),
+    ],
+)
+def test_durable_contract_rejects_future_schema_version(
+    model: type[object], payload: dict[str, object]
+) -> None:
+    with pytest.raises(ValidationError, match="schema_version"):
+        model.model_validate({**payload, "schema_version": "peerassist.future.v999"})
 
 
 def test_review_job_contract_defaults_revisions_and_persists_consent_gate() -> None:
