@@ -263,6 +263,9 @@ class ReviewJobState(BaseModel):
     blocked_reason: str | None = None
     required_consents: list[Literal["parse", "search", "model"]] = Field(default_factory=list)
     resume_stage: ReviewStage | None = None
+    degradation_code: str | None = None
+    degraded_services: list[Literal["parse", "search", "model"]] = Field(default_factory=list)
+    degraded_at: datetime | None = None
     error_code: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)

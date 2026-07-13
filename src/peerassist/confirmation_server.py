@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
+from peerassist.review_context import build_review_context
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
 _FRONTEND_APP_ROOT = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace"
@@ -5866,12 +5867,24 @@ def _build_full_paper_review_context(
     out_dir = peerassist_stage_dir(run_dir)
     ledger_payload = read_json_safely(out_dir / "evidence_ledger.json")
     checks_payload = read_json_safely(out_dir / "deterministic_checks.json")
+    profile_payload = read_json_safely(out_dir / "paper_profile.json")
+    claim_graph_payload = read_json_safely(out_dir / "claim_graph.json")
+    experiment_payload = read_json_safely(out_dir / "experiment_inventory.json")
+    review_plan_payload = read_json_safely(out_dir / "review_plan.json")
     agent_payload = read_json_safely(out_dir / "agent_results.json")
     queue_payload = read_json_safely(out_dir / "confirmation_review_queue.json")
     ledger_items = ledger_payload.get("items") if isinstance(ledger_payload.get("items"), list) else []
     checks = checks_payload.get("checks") if isinstance(checks_payload.get("checks"), list) else []
     agent_results = agent_payload.get("results") if isinstance(agent_payload.get("results"), list) else []
     queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), list) else []
+    priority_context = build_review_context(
+        ledger=ledger_payload,
+        paper_profile=profile_payload,
+        claim_graph=claim_graph_payload,
+        experiment_inventory=experiment_payload,
+        review_plan=review_plan_payload,
+        deterministic_checks=checks_payload,
+    )
     return {
         "schema_version": "peerassist.full_paper_review_prompt.v1",
         "paper_id": paper_id,
@@ -5906,8 +5919,14 @@ def _build_full_paper_review_context(
             "agent_results": len(agent_results),
             "queue_items": len(queue_items),
             "selected_text_chars": len(selected_text),
+            "selected_evidence_items": len(priority_context["selected_evidence_ids"]),
         },
-        "paper_outline_and_evidence": _summarize_evidence_for_review(ledger_items),
+        "paper_profile": priority_context["paper_profile"],
+        "claim_graph": priority_context["claim_graph"],
+        "experiment_inventory": priority_context["experiment_inventory"],
+        "review_plan": priority_context["review_plan"],
+        "selected_evidence_ids": priority_context["selected_evidence_ids"],
+        "paper_outline_and_evidence": priority_context["selected_evidence"],
         "deterministic_checks": _summarize_checks_for_review(checks),
         "local_agent_results": _summarize_agent_results_for_review(agent_results),
         "existing_confirmation_queue": queue_items[:8],
