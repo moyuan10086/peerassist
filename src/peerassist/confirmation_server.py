@@ -33,6 +33,7 @@ def _is_review_job_api_path(path: str) -> bool:
     return (
         path in {"/api/health", "/api/reviews", "/api/jobs", "/api/papers/upload"}
         or path.startswith("/api/jobs/")
+        or path.startswith("/api/papers/")
     )
 
 
@@ -6185,6 +6186,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_HEAD(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_review_job_api_path(path):
+                self._proxy_review_job_api()
+                return
             if path == "/paper.pdf":
                 source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
                 if source_pdf_path is None:
@@ -6272,12 +6276,29 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def _proxy_review_job_api(self) -> None:
             length = int(self.headers.get("Content-Length") or "0")
-            body = self.rfile.read(length) if length else None
             headers = {"Connection": "close"}
-            if self.headers.get("Content-Type"):
-                headers["Content-Type"] = str(self.headers["Content-Type"])
-            if self.headers.get("Last-Event-ID"):
-                headers["Last-Event-ID"] = str(self.headers["Last-Event-ID"])
+            for name in (
+                "Content-Type",
+                "Last-Event-ID",
+                "Range",
+                "If-None-Match",
+                "If-Modified-Since",
+            ):
+                if self.headers.get(name):
+                    headers[name] = str(self.headers[name])
+
+            def body_chunks():
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+            body = body_chunks() if length else None
+            if length:
+                headers["Content-Length"] = str(length)
             request = Request(
                 f"http://127.0.0.1:8767{self.path}",
                 data=body,
@@ -6292,17 +6313,32 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 self._send_json({"error": "review_job_api_unavailable", "detail": str(exc)}, status=503)
                 return
             with response:
-                payload = response.read()
                 self.send_response(response.status)
-                self.send_header(
+                forwarded_headers = (
                     "Content-Type",
-                    response.headers.get("Content-Type", "application/json; charset=utf-8"),
+                    "Content-Length",
+                    "Content-Range",
+                    "Content-Disposition",
+                    "Accept-Ranges",
+                    "Cache-Control",
+                    "ETag",
+                    "Last-Modified",
                 )
-                self.send_header("Cache-Control", "no-store")
+                for name in forwarded_headers:
+                    if response.headers.get(name):
+                        self.send_header(name, str(response.headers[name]))
+                if not response.headers.get("Content-Type"):
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                if not response.headers.get("Cache-Control"):
+                    self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "close")
-                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                if self.command != "HEAD":
+                    while True:
+                        chunk = response.read(256 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
                 self.close_connection = True
 
         def _read_json(self) -> dict[str, Any]:

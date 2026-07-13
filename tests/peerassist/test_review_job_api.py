@@ -146,3 +146,26 @@ def test_multipart_upload_creates_paper_and_review_job(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_paper_source_supports_byte_ranges(tmp_path: Path) -> None:
+    paper_id = _paper(tmp_path)
+    content = (tmp_path / "paper.pdf").read_bytes()
+    server = create_review_job_server(data_dir=tmp_path, host="127.0.0.1", port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_address[1]}/api/papers/{paper_id}/source",
+            headers={"Range": "bytes=0-31", "Connection": "close"},
+        )
+        with urlopen(request, timeout=5) as response:
+            assert response.status == 206
+            assert response.headers["Accept-Ranges"] == "bytes"
+            assert response.headers["Content-Range"] == f"bytes 0-31/{len(content)}"
+            assert response.headers["Content-Type"] == "application/pdf"
+            assert response.read() == content[:32]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

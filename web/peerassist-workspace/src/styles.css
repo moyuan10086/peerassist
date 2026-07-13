@@ -679,6 +679,32 @@ h1 {
   margin-top: 4px;
 }
 
+.linked-job-banner {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border-left: 3px solid var(--accent);
+  background: #edf7f4;
+  color: var(--accent);
+  padding: 9px 10px;
+}
+
+.linked-job-banner strong,
+.linked-job-banner span {
+  display: block;
+}
+
+.linked-job-banner strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.linked-job-banner span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .selection-summary span {
   font-weight: 850;
 }

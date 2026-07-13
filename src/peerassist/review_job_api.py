@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ _JOB_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)(?P<action>/events|/cancel|
 _CONSENT_RE = re.compile(
     r"^/api/jobs/(?P<job>[0-9a-f-]+)/consents/(?P<service>parse|search|model)$"
 )
+_PAPER_SOURCE_RE = re.compile(r"^/api/papers/(?P<paper>[0-9a-f]{64})/source$")
 
 
 class ReviewJobService:
@@ -73,6 +75,15 @@ class ReviewJobService:
     def close(self) -> None:
         self.scheduler.shutdown(wait=True)
 
+    def paper_source(self, paper_id: str) -> tuple[Path, str]:
+        record = self.paper_repository.get(paper_id)
+        paper_root = (self.paper_repository.papers_dir / record.paper_id).resolve(strict=True)
+        source = (paper_root / record.source_pdf_path).resolve(strict=True)
+        source.relative_to(paper_root)
+        if not source.is_file():
+            raise FileNotFoundError("paper source is not a regular file")
+        return source, record.paper_id
+
 
 class ReviewJobHttpServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], data_dir: Path) -> None:
@@ -92,10 +103,11 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         return self.server.review_service  # type: ignore[attr-defined,no-any-return]
 
     def do_GET(self) -> None:
-        if self.path == "/api/health":
+        path = self.path.split("?", 1)[0]
+        if path == "/api/health":
             self._send_json({"status": "ok", "service": "peerassist-review-jobs"})
             return
-        if self.path == "/api/jobs":
+        if path == "/api/jobs":
             self._send_json(
                 {
                     "jobs": [
@@ -105,7 +117,11 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
                 }
             )
             return
-        match = _JOB_RE.match(self.path)
+        paper_match = _PAPER_SOURCE_RE.match(path)
+        if paper_match is not None:
+            self._send_paper_source(paper_match.group("paper"))
+            return
+        match = _JOB_RE.match(path)
         if match is None:
             self._send_json({"error": "not_found"}, status=404)
             return
@@ -114,6 +130,13 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
             self._send_events(job_id)
             return
         self._send_json({"job": self._job(job_id)})
+
+    def do_HEAD(self) -> None:
+        match = _PAPER_SOURCE_RE.match(self.path.split("?", 1)[0])
+        if match is None:
+            self._send_json({"error": "not_found"}, status=404, head_only=True)
+            return
+        self._send_paper_source(match.group("paper"), head_only=True)
 
     def do_POST(self) -> None:
         if self.path == "/api/papers/upload":
@@ -270,7 +293,91 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.close_connection = True
 
-    def _send_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
+    def _send_paper_source(self, paper_id: str, *, head_only: bool = False) -> None:
+        try:
+            path, digest = self.service.paper_source(paper_id)
+            stat = path.stat()
+        except (FileNotFoundError, ValueError):
+            self._send_json({"error": "paper_source_not_found"}, status=404, head_only=head_only)
+            return
+
+        size = stat.st_size
+        etag = f'"sha256-{digest}"'
+        if self.headers.get("If-None-Match") == etag and not self.headers.get("Range"):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            self.close_connection = True
+            return
+
+        start = 0
+        end = max(0, size - 1)
+        status = 200
+        range_header = self.headers.get("Range", "").strip()
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            if not match or not size:
+                self._send_unsatisfied_range(size)
+                return
+            raw_start, raw_end = match.groups()
+            if raw_start:
+                start = int(raw_start)
+                end = int(raw_end) if raw_end else end
+            elif raw_end:
+                suffix_length = int(raw_end)
+                if suffix_length <= 0:
+                    self._send_unsatisfied_range(size)
+                    return
+                start = max(0, size - suffix_length)
+            else:
+                self._send_unsatisfied_range(size)
+                return
+            if start >= size or end < start:
+                self._send_unsatisfied_range(size)
+                return
+            end = min(end, size - 1)
+            status = 206
+
+        content_length = end - start + 1 if size else 0
+        self.send_response(status)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Disposition", 'inline; filename="paper.pdf"')
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", formatdate(stat.st_mtime, usegmt=True))
+        self.send_header("Connection", "close")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Content-Length", str(content_length))
+        self.end_headers()
+        if not head_only:
+            with path.open("rb") as pdf_file:
+                pdf_file.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk = pdf_file.read(min(256 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        self.close_connection = True
+
+    def _send_unsatisfied_range(self, size: int) -> None:
+        self.send_response(416)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Range", f"bytes */{size}")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        self.close_connection = True
+
+    def _send_json(
+        self, payload: dict[str, Any], *, status: int = 200, head_only: bool = False
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -278,7 +385,8 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not head_only:
+            self.wfile.write(body)
         self.close_connection = True
 
     def log_message(self, _format: str, *_args: Any) -> None:

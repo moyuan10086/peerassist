@@ -192,6 +192,11 @@ function App() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
+  const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
+  const [activePdfUrl, setActivePdfUrl] = useState(() => {
+    const storedPaperId = window.localStorage.getItem("peerassist.activePaperId") || "";
+    return storedPaperId ? `/api/papers/${storedPaperId}/source` : initial.assets.pdf_url || "";
+  });
 
   const state = bootstrap.state || {};
   const queueItems = state.queue?.items || [];
@@ -254,6 +259,15 @@ function App() {
   const navigate = (windowId: WindowId, path: string) => {
     window.history.pushState({}, "", path);
     setActiveWindow(windowId);
+  };
+
+  const openPaperById = (paperId: string) => {
+    const normalized = paperId.trim();
+    if (!/^[0-9a-f]{64}$/.test(normalized)) return;
+    window.localStorage.setItem("peerassist.activePaperId", normalized);
+    setActivePaperId(normalized);
+    setActivePdfUrl(`/api/papers/${normalized}/source`);
+    navigate("paper", "/paper");
   };
 
   useEffect(() => {
@@ -386,6 +400,7 @@ function App() {
         `upload: 已创建任务 ${String(result.job?.id || "")}`,
       ]);
       await refreshJobs();
+      openPaperById(String(result.paper?.paper_id || ""));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "论文上传失败";
@@ -451,9 +466,10 @@ function App() {
 
         {activeWindow === "paper" && (
           <PaperWindow
-            pdfUrl={bootstrap.assets.pdf_url || ""}
-            queueItems={queueItems}
+            pdfUrl={activePdfUrl}
+            queueItems={activePaperId ? [] : queueItems}
             busy={busy}
+            linkedReviewJob={Boolean(activePaperId)}
             onRunReview={runAgentReview}
             onSubmitManual={submitManualConcern}
           />
@@ -470,6 +486,7 @@ function App() {
             onRunReview={runAgentReview}
             onJobAction={runJobAction}
             onUploadPaper={uploadPaper}
+            onOpenPaper={openPaperById}
           />
         )}
         {activeWindow === "queue" && (
@@ -507,12 +524,14 @@ function PaperWindow({
   pdfUrl,
   queueItems,
   busy,
+  linkedReviewJob,
   onRunReview,
   onSubmitManual,
 }: {
   pdfUrl: string;
   queueItems: Concern[];
   busy: boolean;
+  linkedReviewJob: boolean;
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onSubmitManual: (selectedText: string, note: string, page: string) => void;
 }) {
@@ -605,8 +624,14 @@ function PaperWindow({
           </div>
           {inspectorTab === "review" ? (
             <div className="inspector-body selection-box">
-              <button className="primary-button wide" type="button" disabled={busy} onClick={() => onRunReview("", "fast")}>
-                {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} 快速审阅全文
+              {linkedReviewJob && (
+                <div className="linked-job-banner">
+                  <GitBranch size={17} />
+                  <div><strong>已连接后台审稿任务</strong><span>本地解析与核查按持久化阶段运行</span></div>
+                </div>
+              )}
+              <button className="primary-button wide" type="button" disabled={busy || linkedReviewJob} onClick={() => onRunReview("", "fast")}>
+                {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} {linkedReviewJob ? "后台任务审稿中" : "快速审阅全文"}
               </button>
               <div className="selection-summary">
                 <span>PDF 选区</span>
@@ -618,7 +643,7 @@ function PaperWindow({
                 onChange={(event) => setSelectedText(event.target.value)}
                 placeholder="选中的论文原文会自动出现在这里"
               />
-              <button className="ghost-button wide" type="button" disabled={busy || !selectedText.trim()} onClick={() => onRunReview(selectedText, "fast")}>
+              <button className="ghost-button wide" type="button" disabled={busy || linkedReviewJob || !selectedText.trim()} onClick={() => onRunReview(selectedText, "fast")}>
                 <Send size={15} /> 基于选区智能审稿
               </button>
               <div className="selection-summary">
@@ -628,7 +653,7 @@ function PaperWindow({
               <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：请作者解释统计显著性阈值与多重比较校正。" />
               <div className="field-row">
                 <input value={page} onChange={(event) => setPage(event.target.value)} aria-label="PDF 页码" inputMode="numeric" />
-                <button className="primary-button" type="button" disabled={busy || (!selectedText.trim() && !note.trim())} onClick={() => onSubmitManual(selectedText, note, page)}>
+                <button className="primary-button" type="button" disabled={busy || linkedReviewJob || (!selectedText.trim() && !note.trim())} onClick={() => onSubmitManual(selectedText, note, page)}>
                   <ClipboardCheck size={15} /> 加入证据队列
                 </button>
               </div>
@@ -853,6 +878,7 @@ function AgentWindow({
   onRunReview,
   onJobAction,
   onUploadPaper,
+  onOpenPaper,
 }: {
   busy: boolean;
   model: string;
@@ -864,6 +890,7 @@ function AgentWindow({
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void;
   onUploadPaper: (file: File) => Promise<boolean>;
+  onOpenPaper: (paperId: string) => void;
 }) {
   const [mode, setMode] = useState("fast");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -912,7 +939,7 @@ function AgentWindow({
           </div>
           <div className="job-list">
             {reviewJobs.length ? reviewJobs.map((job) => (
-              <ReviewJobCard job={job} busy={busy} onAction={onJobAction} key={job.id} />
+              <ReviewJobCard job={job} busy={busy} onAction={onJobAction} onOpenPaper={onOpenPaper} key={job.id} />
             )) : <div className="draft-empty">暂无持久化审稿任务，请先上传一篇 PDF。</div>}
           </div>
         </div>
@@ -984,7 +1011,7 @@ function AgentWindow({
 
 const reviewStages = ["validate", "parse", "evidence", "profile", "plan", "deterministic", "citation", "agents", "integrate", "await_confirmation", "finalize", "complete"];
 
-function ReviewJobCard({ job, busy, onAction }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void }) {
+function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void; onOpenPaper: (paperId: string) => void }) {
   const current = Math.max(0, reviewStages.indexOf(job.stage));
   const canCancel = !["completed", "cancelled", "failed", "awaiting_human_confirmation"].includes(job.status);
   return (
@@ -996,6 +1023,7 @@ function ReviewJobCard({ job, busy, onAction }: { job: ReviewJob; busy: boolean;
           <code>{job.id}</code>
         </div>
         <div className="job-actions">
+          <button className="ghost-button" type="button" onClick={() => onOpenPaper(job.paper_id)}><FileText size={15} /> 阅读论文</button>
           {job.status === "blocked" && job.required_consents?.includes("model") && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "consent")}>授权模型并继续</button>}
           {canCancel && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "cancel")}>取消</button>}
           {["failed", "cancelled", "interrupted"].includes(job.status) && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "retry")}>重试</button>}
