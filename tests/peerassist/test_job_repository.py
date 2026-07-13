@@ -1005,6 +1005,31 @@ def test_manifest_commit_rejects_injected_regular_compatibility_artifact(
     assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) is None
 
 
+def test_manifest_commit_rejects_undeclared_compatibility_artifact(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    _write_stage_checkpoint(tmp_path, job.id, manifest)
+    injected = (
+        tmp_path
+        / "jobs"
+        / str(job.id)
+        / "compatibility_views"
+        / "parse"
+        / "attempt-1"
+        / "undeclared.txt"
+    )
+    injected.parent.mkdir(parents=True)
+    injected.write_text("not in manifest", encoding="utf-8")
+
+    with pytest.raises(ManifestValidationError, match="undeclared"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+    assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) is None
+
+
 def test_manifest_validation_rejects_hash_mismatch_and_symlink_escape(tmp_path: Path) -> None:
     repository = ReviewJobRepository(tmp_path)
     job = repository.create(_job_contract())

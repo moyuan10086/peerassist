@@ -641,6 +641,21 @@ class ReviewJobRepository:
             root,
             PurePosixPath("compatibility_views", manifest.stage.value, manifest.attempt_id),
         )
+        expected_files = {PurePosixPath(path) for path in manifest.artifacts.values()}
+        expected_directories = {PurePosixPath(".")}
+        for artifact_path in expected_files:
+            expected_directories.update(artifact_path.parents)
+        for existing in view_dir.rglob("*"):
+            relative = PurePosixPath(existing.relative_to(view_dir).as_posix())
+            if existing.is_symlink():
+                raise ManifestValidationError("compatibility view contains an undeclared symlink")
+            if existing.is_dir():
+                if relative not in expected_directories:
+                    raise ManifestValidationError(
+                        "compatibility view contains an undeclared directory"
+                    )
+            elif relative not in expected_files:
+                raise ManifestValidationError("compatibility view contains an undeclared artifact")
         for relative_path in manifest.artifacts.values():
             artifact = self._validate_owned_regular_file(output_dir, relative_path)
             relative = PurePosixPath(relative_path)
