@@ -100,6 +100,16 @@ class JobState(BaseModel):
     artifacts: JobArtifacts = Field(default_factory=JobArtifacts)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    schema_version: str | None = None
+    migrated_to_schema_version: str | None = None
+    paper_id: str | None = None
+    run_dir: str | None = None
+    mode: str | None = None
+    stage: str | None = None
+    revision: int | None = None
+    checkpoint: dict[str, Any] | str | None = None
+    error_code: str | None = None
+
 
 class SubmitPayload(BaseModel):
     job_id: UUID
