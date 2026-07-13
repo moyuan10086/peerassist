@@ -42,12 +42,16 @@
 - `src/pipeline_full.py`: accept a preallocated run directory without generating another run ID.
 - `src/peerassist/stage_runner.py`: split candidate generation from final report export.
 - `src/peerassist/confirmation_workflow.py`: expose confirmation revision and unresolved core-finding counts.
+- `src/peerassist/report_export.py`: versioned bilingual final reports and atomic current pointer.
+- `src/schemas/peerassist.py`: unified Finding lineage/revision fields shared by all concern producers.
 - `src/peerassist/concerns.py`, `src/peerassist/agents.py`, `src/peerassist/citation_concerns.py`, `src/peerassist/confirmations.py`: emit and consume the unified Finding identity.
+- `src/schemas/citation.py`, `src/peerassist/citation_audit.py`, `src/peerassist/citation_pipeline.py`, `src/peerassist/citation_verification.py`, `src/fact_generation/refcheck/stage_runner.py`: versioned citation observations and one canonical finding path.
 - `src/peerassist/confirmation_server.py`: upload, paper, job, event, cancel, retry and finalize endpoints.
 - `web/peerassist-workspace/src/main.tsx`: paper selector/upload, task timeline, cancel/retry/finalize and paper profile UI.
 - `web/peerassist-workspace/src/styles.css`: task/upload/profile responsive layouts.
-- `pyproject.toml`: add `python-multipart`.
+- `pyproject.toml`: add required `python-multipart` and PyMuPDF dependencies for Milestone A.
 - `web/peerassist-workspace/package.json`: add a focused Playwright test script and dev dependency.
+- `web/peerassist-workspace/package-lock.json`: lock the Playwright dependency and scripts reproducibly.
 - `README.md`, `docs/peerassist_operation_manual.md`, `docs/peerassist_lark_sync.md`.
 
 ---
@@ -304,6 +308,7 @@ git commit -m "feat: separate candidate review from final export"
 
 - Create: `src/peerassist/job_runner.py`
 - Create: `src/peerassist/review_context.py`
+- Modify: `src/schemas/peerassist_jobs.py`
 - Modify: `src/peerassist/confirmation_server.py` (replace the legacy first-80 evidence context builder)
 - Modify: `src/schemas/citation.py`
 - Modify: `src/peerassist/citation_audit.py`
@@ -315,7 +320,9 @@ git commit -m "feat: separate candidate review from final export"
 
 - [ ] **Step 1: Write failing runner tests**
 
-Use fake stages to test every state transition, successful stop at `awaiting_human_confirmation`, cancellation before the next stage, retry with a new attempt, downstream invalidation after an upstream hash change, orphan recovery, concurrent Worker claims, finalize `exporting_report → completed`, and export failure `exporting_report → failed`. Add approval-wait tests proving local parse, evidence, deterministic profile, claims, experiment inventory, review plan and deterministic checks are committed before the first consent gate. Missing consent commits `blocked_reason=approval_required`, required service and exact `resume_stage`, releases the Worker lease, and performs zero external calls; grant atomically clears the block and requeues from that persisted stage; denial preserves all local artifacts and commits a durable audited degraded result that can proceed without the denied service; concurrent repeated grants are idempotent.
+Use fake stages to test every state transition, successful stop at `awaiting_human_confirmation`, cancellation before the next stage, retry with a new attempt, downstream invalidation after an upstream hash change, orphan recovery, concurrent Worker claims, finalize `exporting_report → completed`, and export failure `exporting_report → failed`. Add approval-wait tests proving local parse, evidence, deterministic profile, claims, experiment inventory, review plan and deterministic checks are committed before the first consent gate. Missing consent commits `blocked_reason=approval_required`, required service and exact `resume_stage`, releases the Worker lease, and performs zero external calls; grant atomically clears the block and requeues from that persisted stage; concurrent repeated grants are idempotent.
+
+Define the denial/degradation contract in `ReviewJobState`: the denied `ExternalServiceConsent` persists service, actor, UTC decision time and reason; `degradation_code=service_denied_local_fallback`, `degraded_services`, and `degraded_at` are durable fields. For model denial, preserve byte-identical committed parse/evidence/profile/claim/experiment/plan/check pointers, emit one durable consent-denied/degraded event, commit a no-model agent result, and proceed through the local fallback. A denied service must not be invoked or resumed later unless a new explicit grant replaces the denial.
 
 Add a context regression fixture with more than 80 evidence items and place the highest-centrality claim evidence at the end. Assert the model input still contains that evidence plus paper profile, claim graph, experiment inventory, review plan and selected evidence IDs; assert the old sequential first-80 builder is no longer used.
 
@@ -359,7 +366,7 @@ The local path must commit parse, evidence, deterministic profile/claims/experim
 .venv/bin/pytest -q tests/peerassist/test_review_job_runner.py
 .venv/bin/pytest -q tests/peerassist/test_citation_pipeline.py -k 'observation or canonical'
 .venv/bin/ruff check src/peerassist/job_runner.py src/peerassist/review_context.py src/peerassist/confirmation_server.py src/peerassist/citation_audit.py src/peerassist/citation_pipeline.py src/peerassist/citation_verification.py src/fact_generation/refcheck/stage_runner.py
-git add src/peerassist/job_runner.py src/peerassist/review_context.py src/peerassist/confirmation_server.py src/schemas/citation.py src/peerassist/citation_audit.py src/peerassist/citation_pipeline.py src/peerassist/citation_verification.py src/fact_generation/refcheck/stage_runner.py tests/peerassist/test_review_job_runner.py tests/peerassist/test_citation_pipeline.py
+git add src/peerassist/job_runner.py src/peerassist/review_context.py src/peerassist/confirmation_server.py src/schemas/peerassist_jobs.py src/schemas/citation.py src/peerassist/citation_audit.py src/peerassist/citation_pipeline.py src/peerassist/citation_verification.py src/fact_generation/refcheck/stage_runner.py tests/peerassist/test_review_job_runner.py tests/peerassist/test_citation_pipeline.py
 git commit -m "feat: run recoverable review stage DAG"
 ```
 
@@ -410,7 +417,7 @@ git commit -m "feat: authorize remote manuscript access"
 
 - [ ] **Step 1: Write failing API tests**
 
-Cover upload/list/detail, idempotent review start, active-review conflict, job status, event replay, cancel, retry, finalize, authorized PDF access, deletion audit, and per-task external-service consent grant/deny/revoke. Add request-boundary tests for oversized JSON with an honest `Content-Length`, missing or forged `Content-Length`, and chunked bodies that cross the configured limit after parsing starts. Every overflow path must stop reading, remove temporary/request artifacts, and return the same structured `413 payload_too_large` response without invoking a route handler.
+Cover upload/list/detail, idempotent review start, active-review conflict, job status, event replay, cancel, retry, finalize, authorized PDF access, deletion audit, and per-task external-service consent grant/deny/revoke. Add request-framing tests: an honestly declared oversized body and a decoded chunked body crossing the limit return structured `413 payload_too_large`; a body without either valid `Content-Length` or chunked framing returns `411 length_required`; malformed, negative, nonnumeric, duplicate or conflicting framing returns `400 invalid_request_framing`. A suspicious low-length request with trailing bytes must never reuse the connection for another request. Every rejection bypasses route handlers, removes temporary/request artifacts and closes the connection when framing is ambiguous.
 
 Add server-lifecycle tests that persist every nonterminal state, construct a fresh application/server instance, and run startup recovery using this matrix:
 
@@ -422,21 +429,22 @@ Add server-lifecycle tests that persist every nonterminal state, construct a fre
 | `cancel_requested` | preserve committed and incomplete attempt artifacts, durably transition the orphaned request to `cancelled`, and start no stage worker |
 | `approval_required` | remain parked with required consent and exact resume stage; start no worker |
 | `awaiting_human_confirmation` | remain parked for the reviewer; start no worker |
+| `exporting_report` | inspect the frozen confirmation revision and versioned report manifest; publish an already complete immutable report idempotently, otherwise retry from the last committed pre-export pointer exactly once |
 
 Starting the server repeatedly or concurrently must not enqueue, claim or create a stage attempt for the same job more than once.
 
 - [ ] **Step 2: Verify RED**
 
 ```bash
-.venv/bin/pytest -q tests/peerassist/test_review_job_api.py -k 'paper or job or event or finalize'
-.venv/bin/pytest -q tests/peerassist/test_review_job_runner.py -k 'startup or recover or cancel_requested or duplicate'
+.venv/bin/pytest -q tests/peerassist/test_review_job_api.py
+.venv/bin/pytest -q tests/peerassist/test_review_job_runner.py
 ```
 
 - [ ] **Step 3: Implement thin routes**
 
 Route state changes through repository and runner services. Add `POST /api/jobs/{job_id}/consents/{service}` with grant/deny/revoke and actor/reason audit. Parse, search and model nodes must read committed consent before any external request; absent or denied consent returns `approval_required` or uses an explicitly tested local fallback. Return structured errors: `mode_unavailable`, `review_in_progress`, `revision_conflict`, `approval_required`, `unresolved_core_findings`, and `forbidden`.
 
-Apply one bounded streaming request reader to JSON endpoints before decoding. Treat `Content-Length` only as an early rejection hint, never as proof of size; count actual bytes for fixed-length and chunked bodies, reject overflow consistently, and clean up parser/request state in `finally` blocks.
+Apply one bounded streaming request reader to JSON endpoints before decoding. Validate HTTP framing before reading, use `Content-Length` only for the declared fixed-length frame, count decoded chunked bytes, reject overflow consistently, and clean up parser/request state in `finally` blocks. Every framing rejection or overflow response must send `Connection: close` and close the socket. Accepted fixed-length JSON requests are also non-reusable in Milestone A, so unread trailing bytes can never become a smuggled next request. Never read beyond a declared fixed-length frame in an attempt to detect forgery.
 
 - [ ] **Step 4: Recover persisted jobs during server startup**
 
@@ -450,7 +458,7 @@ Honor `Last-Event-ID`, replay durable events, emit heartbeat, then close/reconne
 
 ```bash
 .venv/bin/pytest -q tests/peerassist/test_review_job_api.py -k 'paper or job or event or finalize or consent'
-.venv/bin/pytest -q tests/peerassist/test_review_job_api.py -k 'payload_too_large or content_length or chunked'
+.venv/bin/pytest -q tests/peerassist/test_review_job_api.py -k 'payload_too_large or length_required or request_framing or chunked'
 .venv/bin/pytest -q tests/peerassist/test_review_job_runner.py -k 'startup or recover or duplicate'
 .venv/bin/pytest -q tests/peerassist/test_confirmation_workflow.py -k finalize
 .venv/bin/ruff check src/peerassist/confirmation_server.py src/peerassist/job_runner.py tests/peerassist/test_review_job_api.py tests/peerassist/test_review_job_runner.py
@@ -469,7 +477,9 @@ git commit -m "feat: expose manuscript review job API"
 - Modify: `web/peerassist-workspace/src/main.tsx`
 - Modify: `web/peerassist-workspace/src/styles.css`
 - Modify: `web/peerassist-workspace/package.json`
+- Modify: `web/peerassist-workspace/package-lock.json`
 - Create: `web/peerassist-workspace/src/review-workspace.spec.ts`
+- Create: `web/peerassist-workspace/playwright.config.ts`
 
 - [ ] **Step 0: Prepare test infrastructure**
 
