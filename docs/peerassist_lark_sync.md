@@ -195,3 +195,14 @@ model keys, paper secrets, or reviewer-private material here.
 - Focused upload verification reached 28 passing tests. The contract, repository and upload suite reached 86 passing tests with Ruff clean.
 - Appended Feishu section `六十四、2026-07-13 有界 PDF 流式上传完成`; revision advanced from `96` to `97`. Keyword verification confirmed both sections `六十三` and `六十四` remain present.
 - Sync used `block_insert_after` only and stored no credentials or private manuscript content.
+
+## 2026-07-13 - Local parsing and evidence-linked paper understanding
+
+- Added exact preallocated run-directory support so durable ReviewJobs and the legacy pipeline share one authoritative run path.
+- Added a local-first PyMuPDF subprocess parser for selectable PDFs, with isolated invocation artifacts, timeout/resource limits, encrypted/corrupted/OCR-required states, and line-level page/locator/bbox preservation into the EvidenceLedger.
+- Added four deterministic paper-understanding artifacts: `paper_profile.json`, `claim_graph.json`, `experiment_inventory.json`, and `review_plan.json`.
+- The review plan now prioritizes parser uncertainty, central claims and important experiments before supporting claims; minor evidence is filtered from the primary route and agent context while remaining explicitly traceable.
+- Claim support excludes self-support and uses directional comparison semantics for positive, negative and reversed comparisons. Multiple experiments keep datasets, figures and tables separated, including multiword dataset names with connectors.
+- Task 5 passed specification review and independent code-quality review. The focused Milestone A regression suite reached 171 passing tests; the independent reviewer also ran the complete `tests/peerassist` suite with 555 passing tests. Ruff and `git diff --check` were clean.
+- Non-blocking follow-ups remain explicit: split multiple datasets listed in one sentence, and introduce an `unknown` relation distinct from `supported_by` for semantically indeterminate double-negation cases.
+- Appended Feishu section `六十五、2026-07-13 本地解析与证据化论文画像完成`; revision advanced from `97` to `98`. Append-only keyword verification confirmed sections `六十四` and `六十五` remain present. No overwrite, credentials, manuscript-private content or reviewer-private material was used.
