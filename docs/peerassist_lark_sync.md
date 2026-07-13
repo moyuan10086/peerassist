@@ -224,4 +224,4 @@ model keys, paper secrets, or reviewer-private material here.
 - Added durable degradation fields for denied services and a claim-prioritized review context containing paper profile, claim graph, experiment inventory, review plan, deterministic checks and selected evidence IDs.
 - Replaced the sequential first-80 evidence model context with core-claim/reading-route/experiment/check prioritization, so high-centrality evidence at the end of a large ledger is retained.
 - Focused verification passed 8 relevant runner/context/agent-review tests and Ruff checks.
-- Appended Feishu section `六十七、2026-07-14 可恢复审稿 DAG 核心`; append-only verification must confirm sections `六十六` and `六十七` remain present.
+- Appended Feishu section `六十七、2026-07-14 可恢复审稿 DAG 核心`; revision advanced from `99` to `100`. Append-only verification confirmed sections `六十六` and `六十七` remain present.
