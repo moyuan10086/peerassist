@@ -29,6 +29,10 @@ from schemas.peerassist import (
 
 SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
+REFERENCE_RE = re.compile(
+    r"\b((?i:dataset|benchmark|corpus|experiment|evaluation))\s*[-:#]?\s*"
+    r"([A-Z0-9][A-Za-z0-9_-]*)\b"
+)
 
 
 def _normalized_section(section: str) -> str:
@@ -145,6 +149,40 @@ def _overlap(left: str, right: str) -> int:
     right_words = {normalize(word) for word in WORD_RE.findall(right)}
     stop = {"the", "and", "with", "that", "this", "from", "are", "for", "our", "we"}
     return len((left_words - stop) & (right_words - stop))
+
+
+def _reference_markers(text: str) -> set[str]:
+    return {
+        f"{kind.lower()}:{identifier.lower()}"
+        for kind, identifier in REFERENCE_RE.findall(text)
+    }
+
+
+def _items_related(candidate: EvidenceItem, base_items: list[EvidenceItem]) -> bool:
+    base_text = " ".join(item.text for item in base_items)
+    base_markers = _reference_markers(base_text)
+    candidate_markers = _reference_markers(f"{candidate.section} {candidate.text}")
+    if base_markers and candidate_markers:
+        return bool(base_markers & candidate_markers)
+    return any(_overlap(candidate.text, base.text) >= 2 for base in base_items)
+
+
+def _is_conflicting_support(claim_text: str, support_text: str) -> bool:
+    del claim_text
+    normalized = support_text.lower()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "does not",
+            "did not",
+            "failed to",
+            "fails to",
+            "no improvement",
+            "worse than",
+            "contradict",
+            "conflict",
+        )
+    )
 
 
 def _dedupe_items(items: list[EvidenceItem]) -> list[EvidenceItem]:
@@ -279,11 +317,9 @@ def _extract_claim_graph(
             conflicting_support = [
                 support
                 for support in supporting
-                if any(
-                    token in support.text.lower()
-                    for token in ("does not", "did not", "failed to", "decrease", "worse", "conflict")
-                )
+                if _is_conflicting_support(sentence, support.text)
             ]
+            conflicting_ids = {support.id for support in conflicting_support}
             result_support = [
                 support for support in supporting if "result" in _normalized_section(support.section)
             ]
@@ -326,6 +362,9 @@ def _extract_claim_graph(
                 ClaimSupportEdge(
                     source_evidence_id=support.id,
                     target_claim_id=claim_id,
+                    relation=(
+                        "conflicts_with" if support.id in conflicting_ids else "supported_by"
+                    ),
                     evidence_ids=[support.id, item.id],
                 )
                 for support in supporting
@@ -366,12 +405,15 @@ def _associated_media(
         if media_section == section:
             associated.append(item)
             continue
+        if media_section.startswith(f"{section} "):
+            associated.append(item)
+            continue
         if any(token in media_section for token in ("experiment", "evaluation")):
             continue
         if single_experiment and "result" in media_section:
             associated.append(item)
             continue
-        if any(_overlap(item.text, evidence.text) >= 1 for evidence in base_items):
+        if _items_related(item, base_items):
             associated.append(item)
     return associated
 
@@ -419,13 +461,13 @@ def _extract_experiments(
             item
             for item in result_items
             if len(specific_groups) == 1
-            or any(_overlap(item.text, base.text) >= 1 for base in base_items)
+            or _items_related(item, base_items)
         ]
         related_data = [
             item
             for item in data_items
             if len(specific_groups) == 1
-            or any(_overlap(item.text, base.text) >= 1 for base in base_items)
+            or _items_related(item, base_items)
         ]
         experiment_items = _dedupe_items([*base_items, *related_data, *related_results])
         associated_figures = _associated_media(
@@ -524,62 +566,123 @@ def _build_review_plan(
     claim_graph: ClaimGraph,
     inventory: ExperimentInventory,
 ) -> ReviewPlan:
-    core_claims = [claim for claim in claim_graph.claims if claim.centrality >= 0.8][:3]
-    if not core_claims and claim_graph.claims:
-        core_claims = claim_graph.claims[:1]
-    core_ids = [claim.claim_id for claim in core_claims]
-    route = [
-        ReviewRouteItem(
-            rank=index,
-            priority="core" if claim.claim_id in core_ids else "supporting",
-            reason=(
-                "High-centrality claim with incomplete support."
-                if claim.support_status is not ClaimSupportStatus.SUPPORTED
-                else "High-centrality claim and its supporting evidence."
-            ),
-            claim_ids=[claim.claim_id],
-            evidence_ids=[*claim.evidence_ids, *claim.support_evidence_ids],
+    collapsed_ids = [
+        item.id
+        for item in ledger.items
+        if str(item.metadata.get("importance") or "").lower() == "minor"
+        or (
+            not item.metadata.get("importance")
+            and any(
+                token in _normalized_section(item.section)
+                for token in ("writing", "style")
+            )
         )
-        for index, claim in enumerate(claim_graph.claims, start=1)
     ]
-    next_rank = len(route) + 1
-    for experiment in sorted(
-        inventory.experiments,
-        key=lambda item: (-item.importance_score, item.experiment_id),
-    ):
+    collapsed = set(collapsed_ids)
+    active_claims = [
+        claim
+        for claim in claim_graph.claims
+        if any(evidence_id not in collapsed for evidence_id in claim.evidence_ids)
+    ]
+    core_claims = [claim for claim in active_claims if claim.centrality >= 0.8][:3]
+    if not core_claims and active_claims:
+        core_claims = active_claims[:1]
+    core_ids = [claim.claim_id for claim in core_claims]
+    route_candidates: list[tuple[int, float, int, str, ReviewRouteItem]] = []
+    for claim in active_claims:
+        evidence_ids = [
+            evidence_id
+            for evidence_id in [*claim.evidence_ids, *claim.support_evidence_ids]
+            if evidence_id not in collapsed
+        ]
+        priority = "core" if claim.claim_id in core_ids else "supporting"
+        route_candidates.append(
+            (
+                0 if priority == "core" else 1,
+                -claim.centrality,
+                1,
+                claim.claim_id,
+                ReviewRouteItem(
+                    rank=1,
+                    priority=priority,
+                    reason=(
+                        "High-centrality claim with incomplete support."
+                        if claim.support_status is not ClaimSupportStatus.SUPPORTED
+                        else "High-centrality claim and its supporting evidence."
+                    ),
+                    claim_ids=[claim.claim_id],
+                    evidence_ids=evidence_ids,
+                ),
+            )
+        )
+    for experiment in inventory.experiments:
         evidence_ids = list(
             dict.fromkeys(
                 evidence_id
                 for field in experiment.grounded_fields()
                 for evidence_id in field.evidence_ids
+                if evidence_id not in collapsed
             )
         )
-        route.append(
-            ReviewRouteItem(
-                rank=next_rank,
-                priority="core" if experiment.importance_score >= 0.7 else "supporting",
-                reason="Inspect experiment design and its support for the central claims.",
-                claim_ids=core_ids,
-                evidence_ids=evidence_ids,
+        priority = "core" if experiment.importance_score >= 0.7 else "supporting"
+        route_candidates.append(
+            (
+                0 if priority == "core" else 1,
+                -experiment.importance_score,
+                2,
+                experiment.experiment_id,
+                ReviewRouteItem(
+                    rank=1,
+                    priority=priority,
+                    reason="Inspect experiment design and its support for the central claims.",
+                    claim_ids=core_ids,
+                    evidence_ids=evidence_ids,
+                ),
             )
         )
-        next_rank += 1
-    parse_warnings = list(ledger.metadata.get("warnings") or [])
+    parse_warnings = [str(warning) for warning in ledger.metadata.get("warnings") or []]
     if parse_warnings:
-        route.append(
-            ReviewRouteItem(
-                rank=next_rank,
-                priority="core",
-                reason="Resolve parser uncertainty before relying on affected evidence.",
-                claim_ids=core_ids,
-                evidence_ids=[],
+        warning_text = " ".join(parse_warnings).lower()
+        warning_pages = {
+            int(page)
+            for warning in parse_warnings
+            for page in re.findall(r"page[_\s-]?(\d+)", warning.lower())
+        }
+        warning_evidence_ids = [
+            item.id
+            for item in ledger.items
+            if item.id not in collapsed
+            and (item.page in warning_pages or item.id.lower() in warning_text)
+        ]
+        route_candidates.append(
+            (
+                0,
+                -1.1,
+                0,
+                "parse-warnings",
+                ReviewRouteItem(
+                    rank=1,
+                    priority="core",
+                    reason=(
+                        "Resolve parser uncertainty before relying on affected evidence: "
+                        + "; ".join(parse_warnings)
+                    ),
+                    claim_ids=core_ids,
+                    evidence_ids=warning_evidence_ids,
+                    warning_codes=parse_warnings,
+                    needs_human_review=True,
+                ),
             )
         )
+    route = []
+    for rank, (*_, item) in enumerate(sorted(route_candidates), start=1):
+        route.append(item.model_copy(update={"rank": rank}))
     all_evidence = list(
         dict.fromkeys(
             evidence_id
-            for claim in claim_graph.claims
+            for claim in active_claims
             for evidence_id in [*claim.evidence_ids, *claim.support_evidence_ids]
+            if evidence_id not in collapsed
         )
     )
     assignments = [
@@ -587,7 +690,11 @@ def _build_review_plan(
             agent_id="structure",
             focus="research question, contributions, and argument structure",
             claim_ids=core_ids,
-            evidence_ids=[item.id for item in ledger.items if "abstract" in item.section.lower()],
+            evidence_ids=[
+                item.id
+                for item in ledger.items
+                if "abstract" in item.section.lower() and item.id not in collapsed
+            ],
         ),
         AgentReviewAssignment(
             agent_id="method",
@@ -609,6 +716,7 @@ def _build_review_plan(
                             for experiment in inventory.experiments
                             for field in experiment.grounded_fields()
                             for evidence_id in field.evidence_ids
+                            if evidence_id not in collapsed
                         )
                     ),
                 ),
@@ -626,17 +734,12 @@ def _build_review_plan(
                                 experiment.statistics,
                             )
                             for evidence_id in field.evidence_ids
+                            if evidence_id not in collapsed
                         )
                     ),
                 ),
             ]
         )
-    collapsed_ids = [
-        item.id
-        for item in ledger.items
-        if str(item.metadata.get("importance") or "").lower() == "minor"
-        or any(token in _normalized_section(item.section) for token in ("writing", "style"))
-    ]
     return ReviewPlan(
         paper_id=ledger.paper_id,
         core_claim_ids=core_ids,

@@ -13,14 +13,17 @@ def _item(
     *,
     section: str,
     item_type: EvidenceType = EvidenceType.TEXT_SPAN,
+    page: int = 1,
+    importance: str | None = None,
 ) -> EvidenceItem:
     return EvidenceItem(
         id=item_id,
         type=item_type,
-        page=1,
+        page=page,
         section=section,
-        locator=f"page 1, {item_id}",
+        locator=f"page {page}, {item_id}",
         text=text,
+        metadata={"importance": importance} if importance else {},
     )
 
 
@@ -218,6 +221,28 @@ def test_claim_support_detects_conflict_without_self_support(tmp_path: Path) -> 
     assert claim.support_evidence_ids == ["conflict"]
     assert claim.conclusion_boundaries.needs_human_review is True
     assert artifacts.claim_graph.edges[0].source_evidence_id == "conflict"
+    assert artifacts.claim_graph.edges[0].relation == "conflicts_with"
+
+
+def test_decrease_is_not_unconditionally_treated_as_conflict(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-decrease",
+        source_sha256="e" * 64,
+        items=[
+            _item("claim", "We show validation loss decreases after training.", section="Abstract"),
+            _item(
+                "result",
+                "Validation loss decreases after training in the held-out results.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value != "conflicting"
+    assert artifacts.claim_graph.edges[0].relation == "supported_by"
 
 
 def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: Path) -> None:
@@ -243,13 +268,14 @@ def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: P
             ),
             _item(
                 "exp-b",
-                "Experiment B compares the second configuration with baseline Beta.",
+                "Experiment B compares Dataset B with baseline Beta.",
                 section="Experiment B",
             ),
+            _item("data-b", "Dataset B contains n=80 samples.", section="Dataset B"),
             _item(
                 "fig-a",
                 "Figure A: F1 for Experiment A.",
-                section="Experiment A",
+                section="Experiment A Results",
                 item_type=EvidenceType.FIGURE_CAPTION,
             ),
             _item(
@@ -258,9 +284,21 @@ def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: P
                 section="Experiment B",
                 item_type=EvidenceType.TABLE,
             ),
+            _item(
+                "minor-claim",
+                "We show a minor wording improvement.",
+                section="Abstract",
+                importance="minor",
+            ),
+            _item(
+                "core-writing",
+                "The writing section documents a core protocol constraint.",
+                section="Writing Style",
+                importance="core",
+            ),
             minor,
         ],
-        metadata={"warnings": ["page_2_bbox_uncertain"]},
+        metadata={"warnings": ["page_1_bbox_uncertain"]},
     )
 
     artifacts = build_paper_understanding(ledger, tmp_path)
@@ -273,11 +311,29 @@ def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: P
     first = by_label["experiment a"]
     second = by_label["experiment b"]
     assert first.datasets.provenance is ProvenanceKind.REPORTED
+    assert "data" in first.datasets.evidence_ids
+    assert "data-b" not in first.datasets.evidence_ids
     assert first.key_figures.evidence_ids == ["fig-a"]
-    assert second.datasets.provenance is ProvenanceKind.INFERRED
+    assert second.datasets.provenance is ProvenanceKind.REPORTED
+    assert "data-b" in second.datasets.evidence_ids
+    assert "data" not in second.datasets.evidence_ids
     assert second.metrics.provenance is ProvenanceKind.INFERRED
     assert second.key_tables.evidence_ids == ["table-b"]
     assert "fig-a" not in second.key_figures.evidence_ids
     assert "minor-writing" in artifacts.review_plan.collapsed_evidence_ids
-    assert any("parser uncertainty" in item.reason for item in artifacts.review_plan.reading_route)
+    assert "minor-claim" in artifacts.review_plan.collapsed_evidence_ids
+    assert "core-writing" not in artifacts.review_plan.collapsed_evidence_ids
+    warning_route = next(
+        item for item in artifacts.review_plan.reading_route if "parser uncertainty" in item.reason
+    )
+    assert warning_route.warning_codes == ["page_1_bbox_uncertain"]
+    assert warning_route.needs_human_review is True
+    assert warning_route.evidence_ids
+    priorities = [item.priority for item in artifacts.review_plan.reading_route]
+    assert priorities == sorted(priorities, key=lambda value: value != "core")
     assert all("minor-writing" not in item.evidence_ids for item in artifacts.review_plan.reading_route)
+    assert all("minor-claim" not in item.evidence_ids for item in artifacts.review_plan.reading_route)
+    assert all(
+        "minor-claim" not in assignment.evidence_ids
+        for assignment in artifacts.review_plan.agent_assignments
+    )

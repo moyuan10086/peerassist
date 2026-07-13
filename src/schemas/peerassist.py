@@ -212,6 +212,8 @@ class ReviewRouteItem(BaseModel):
     reason: str
     claim_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+    warning_codes: list[str] = Field(default_factory=list)
+    needs_human_review: bool = False
 
 
 class AgentReviewAssignment(BaseModel):
