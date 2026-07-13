@@ -29,6 +29,10 @@ _FRONTEND_DIST_ROOT = _FRONTEND_APP_ROOT / "dist"
 _WORKSPACE_ROUTES = {"/", "/paper", "/agent", "/queue", "/trace", "/confirm", "/artifacts"}
 
 
+def _is_review_job_api_path(path: str) -> bool:
+    return path == "/api/health" or path == "/api/reviews" or path.startswith("/api/jobs/")
+
+
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     state = load_confirmation_state(run_dir=run_dir)
     source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
@@ -6146,6 +6150,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_review_job_api_path(path):
+                self._proxy_review_job_api()
+                return
             if _is_workspace_route(path):
                 self._send_html(render_workspace_app(run_dir=run_dir, paper_id=paper_id))
                 return
@@ -6197,6 +6204,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             self.send_error(404, "not found")
 
         def do_POST(self) -> None:
+            if _is_review_job_api_path(self.path.split("?", 1)[0]):
+                self._proxy_review_job_api()
+                return
             if self.path == "/api/agent-review":
                 try:
                     payload = self._read_json()
@@ -6256,6 +6266,41 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
+
+        def _proxy_review_job_api(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length) if length else None
+            headers = {"Connection": "close"}
+            if self.headers.get("Content-Type"):
+                headers["Content-Type"] = str(self.headers["Content-Type"])
+            if self.headers.get("Last-Event-ID"):
+                headers["Last-Event-ID"] = str(self.headers["Last-Event-ID"])
+            request = Request(
+                f"http://127.0.0.1:8767{self.path}",
+                data=body,
+                method=self.command,
+                headers=headers,
+            )
+            try:
+                response = urlopen(request, timeout=300)
+            except HTTPError as exc:
+                response = exc
+            except (URLError, TimeoutError) as exc:
+                self._send_json({"error": "review_job_api_unavailable", "detail": str(exc)}, status=503)
+                return
+            with response:
+                payload = response.read()
+                self.send_response(response.status)
+                self.send_header(
+                    "Content-Type",
+                    response.headers.get("Content-Type", "application/json; charset=utf-8"),
+                )
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                self.close_connection = True
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or "0")
