@@ -134,6 +134,7 @@ def test_builds_grounded_profile_claims_experiments_and_review_plan(tmp_path: Pa
     )
     assert artifacts.review_plan.core_claim_ids[0] == claims[0].claim_id
     assert artifacts.review_plan.reading_route[0].priority == "core"
+    assert artifacts.review_plan.schema_version == "peerassist.review_plan.v2"
 
     experiment = artifacts.experiment_inventory.experiments[0]
     assert "PeerAssist-Eval-v1" in " ".join(experiment.datasets.value)
@@ -285,6 +286,88 @@ def test_worse_than_same_direction_conflicts_with_outperformance(tmp_path: Path)
     claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
     assert claim.support_status.value == "conflicting"
     assert artifacts.claim_graph.edges[0].relation == "conflicts_with"
+
+
+def test_reverse_negated_outperformance_is_not_a_conflict(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-negated-comparison",
+        source_sha256="1" * 64,
+        items=[
+            _item("claim", "Our method outperforms baseline X.", section="Abstract"),
+            _item(
+                "result",
+                "Baseline X does not outperform our method.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value != "conflicting"
+    assert artifacts.claim_graph.edges[0].relation == "supported_by"
+
+
+def test_reverse_outperformance_with_scope_is_a_conflict(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-scoped-comparison",
+        source_sha256="2" * 64,
+        items=[
+            _item("claim", "Our method outperforms baseline X.", section="Abstract"),
+            _item(
+                "result",
+                "Baseline X outperforms our method on Benchmark Y.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(candidate for candidate in artifacts.claim_graph.claims if "claim" in candidate.evidence_ids)
+    assert claim.support_status.value == "conflicting"
+    assert artifacts.claim_graph.edges[0].relation == "conflicts_with"
+
+
+def test_multiword_dataset_names_with_shared_prefix_do_not_cross_link(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-multiword-datasets",
+        source_sha256="3" * 64,
+        items=[
+            _item(
+                "exp-train",
+                "Experiment A evaluates Dataset Alpha Train with metric F1.",
+                section="Experiment A",
+            ),
+            _item(
+                "exp-test",
+                "Experiment B evaluates Dataset Alpha Test with metric accuracy.",
+                section="Experiment B",
+            ),
+            _item(
+                "data-train",
+                "Dataset Alpha Train contains n=100 samples.",
+                section="Dataset Alpha Train",
+            ),
+            _item(
+                "data-test",
+                "Dataset Alpha Test contains n=80 samples.",
+                section="Dataset Alpha Test",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+    by_label = {
+        experiment.label.value: experiment
+        for experiment in artifacts.experiment_inventory.experiments
+    }
+
+    assert "data-train" in by_label["experiment a"].datasets.evidence_ids
+    assert "data-test" not in by_label["experiment a"].datasets.evidence_ids
+    assert "data-test" in by_label["experiment b"].datasets.evidence_ids
+    assert "data-train" not in by_label["experiment b"].datasets.evidence_ids
 
 
 def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: Path) -> None:

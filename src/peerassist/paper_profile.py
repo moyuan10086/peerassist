@@ -31,17 +31,23 @@ SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 REFERENCE_RE = re.compile(
     r"\b((?i:dataset|benchmark|corpus|experiment|evaluation))\s*[-:#]?\s*"
-    r"([A-Z0-9][A-Za-z0-9_-]*)\b"
+    r"([A-Z0-9][A-Za-z0-9_-]*(?:\s+[A-Z0-9][A-Za-z0-9_-]*)*)\b"
 )
 OUTPERFORM_RE = re.compile(
-    r"(?P<left>[A-Za-z][A-Za-z0-9 _-]*?)\s+outperform(?:s|ed|ing)?\s+"
-    r"(?P<right>[A-Za-z0-9][A-Za-z0-9 _-]*?)(?:[.;]|$)",
+    r"(?P<left>[A-Za-z][A-Za-z0-9 _-]*?)\s+"
+    r"(?:(?P<negation>does not|did not|fails to|failed to)\s+)?"
+    r"outperform(?:s|ed|ing)?\s+"
+    r"(?P<right>[A-Za-z0-9][A-Za-z0-9 _-]*?)"
+    r"(?=\s+(?:on|in|using|for)\s+(?:the\s+)?"
+    r"(?:benchmark|dataset|corpus|test|held-out)\b|[.;]|$)",
     re.IGNORECASE,
 )
 COMPARATIVE_RE = re.compile(
     r"(?P<left>[A-Za-z][A-Za-z0-9 _-]*?)\s+(?:is|are|was|were)\s+"
     r"(?P<direction>better|worse)\s+than\s+"
-    r"(?P<right>[A-Za-z0-9][A-Za-z0-9 _-]*?)(?:\s+in\s+the\b|[.;]|$)",
+    r"(?P<right>[A-Za-z0-9][A-Za-z0-9 _-]*?)"
+    r"(?=\s+(?:on|in|using|for)\s+(?:the\s+)?"
+    r"(?:benchmark|dataset|corpus|test|held-out)\b|[.;]|$)",
     re.IGNORECASE,
 )
 
@@ -163,16 +169,25 @@ def _overlap(left: str, right: str) -> int:
 
 
 def _reference_markers(text: str) -> set[str]:
-    return {
-        f"{kind.lower()}:{identifier.lower()}"
-        for kind, identifier in REFERENCE_RE.findall(text)
-    }
+    markers: set[str] = set()
+    for kind, identifier in REFERENCE_RE.findall(text):
+        normalized_identifier = re.sub(r"\s+", " ", identifier.lower()).strip()
+        markers.add(f"{kind.lower()}:{normalized_identifier}")
+    return markers
 
 
 def _items_related(candidate: EvidenceItem, base_items: list[EvidenceItem]) -> bool:
-    base_text = " ".join(item.text for item in base_items)
-    base_markers = _reference_markers(base_text)
-    candidate_markers = _reference_markers(f"{candidate.section} {candidate.text}")
+    base_markers = {
+        marker
+        for item in base_items
+        for value in (item.section, item.text)
+        for marker in _reference_markers(value)
+    }
+    candidate_markers = {
+        marker
+        for value in (candidate.section, candidate.text)
+        for marker in _reference_markers(value)
+    }
     if base_markers and candidate_markers:
         return bool(base_markers & candidate_markers)
     return any(_overlap(candidate.text, base.text) >= 2 for base in base_items)
@@ -187,13 +202,16 @@ def _entity_tokens(value: str) -> frozenset[str]:
     )
 
 
-def _comparison(text: str) -> tuple[frozenset[str], frozenset[str], int] | None:
+def _comparison(
+    text: str,
+) -> tuple[frozenset[str], frozenset[str], int, bool] | None:
     match = OUTPERFORM_RE.search(text)
     if match:
         return (
             _entity_tokens(match.group("left")),
             _entity_tokens(match.group("right")),
             1,
+            bool(match.group("negation")),
         )
     match = COMPARATIVE_RE.search(text)
     if not match:
@@ -202,6 +220,7 @@ def _comparison(text: str) -> tuple[frozenset[str], frozenset[str], int] | None:
         _entity_tokens(match.group("left")),
         _entity_tokens(match.group("right")),
         1 if match.group("direction").lower() == "better" else -1,
+        False,
     )
 
 
@@ -210,17 +229,26 @@ def _comparison_conflicts(claim_text: str, support_text: str) -> bool | None:
     support = _comparison(support_text)
     if claim is None or support is None:
         return None
-    claim_left, claim_right, claim_direction = claim
-    support_left, support_right, support_direction = support
+    claim_left, claim_right, claim_direction, claim_negated = claim
+    support_left, support_right, support_direction, support_negated = support
+    if claim_negated:
+        return None
     if claim_left == support_left and claim_right == support_right:
-        return claim_direction != support_direction
-    if claim_left == support_right and claim_right == support_left:
-        return claim_direction != -support_direction
-    return None
+        aligned_direction = support_direction
+    elif claim_left == support_right and claim_right == support_left:
+        aligned_direction = -support_direction
+    else:
+        return None
+    if support_negated:
+        return aligned_direction == claim_direction
+    return aligned_direction != claim_direction
 
 
 def _is_conflicting_support(claim_text: str, support_text: str) -> bool:
     normalized = support_text.lower()
+    comparison_conflict = _comparison_conflicts(claim_text, support_text)
+    if comparison_conflict is not None:
+        return comparison_conflict
     explicit_negation = any(
         phrase in normalized
         for phrase in (
@@ -233,10 +261,7 @@ def _is_conflicting_support(claim_text: str, support_text: str) -> bool:
             "conflict",
         )
     )
-    if explicit_negation:
-        return True
-    comparison_conflict = _comparison_conflicts(claim_text, support_text)
-    return comparison_conflict is True
+    return bool(explicit_negation)
 
 
 def _dedupe_items(items: list[EvidenceItem]) -> list[EvidenceItem]:

@@ -228,7 +228,7 @@ class AgentReviewAssignment(BaseModel):
 class ReviewPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "peerassist.review_plan.v1"
+    schema_version: str = "peerassist.review_plan.v2"
     paper_id: str
     core_claim_ids: list[str] = Field(default_factory=list)
     reading_route: list[ReviewRouteItem] = Field(default_factory=list)
