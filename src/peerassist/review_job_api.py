@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -213,3 +214,34 @@ def create_review_job_server(
     *, data_dir: Path, host: str = "127.0.0.1", port: int = 0
 ) -> ReviewJobHttpServer:
     return ReviewJobHttpServer((host, port), Path(data_dir))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Serve the PeerAssist Review Job API.")
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8767)
+    args = parser.parse_args(argv)
+    server = create_review_job_server(
+        data_dir=Path(args.data_dir),
+        host=args.host,
+        port=args.port,
+    )
+    print(
+        json.dumps(
+            {"url": f"http://{args.host}:{server.server_address[1]}", "data_dir": args.data_dir},
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
