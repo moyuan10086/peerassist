@@ -137,7 +137,7 @@ def _metadata_for_finding(
         "producer_namespace": "citation_audit",
         "producer_version": audit.schema_version,
         "issue_anchor": "|".join(stable_targets),
-        "finding_check_type": "citation_verification",
+        "finding_check_type": f"citation_{finding.status.value}",
         "finding_semantic_key": finding.status.value,
         "citation_finding_ids": [finding.id],
         "citation_link_ids": list(finding.citation_link_ids),

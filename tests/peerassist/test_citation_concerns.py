@@ -117,6 +117,18 @@ def test_reference_only_findings_use_conservative_levels(status: str, level: Con
     assert concern.metadata["citation_link_ids"] == []
 
 
+def test_distinct_reference_problem_types_use_distinct_lineages() -> None:
+    uncited = concerns_from_citation_audit(
+        _audit("uncited_reference"), source_agent_id="citation_audit"
+    )[0]
+    malformed = concerns_from_citation_audit(
+        _audit("malformed_reference"), source_agent_id="citation_audit"
+    )[0]
+
+    assert uncited.metadata["issue_anchor"] == malformed.metadata["issue_anchor"]
+    assert uncited.finding_lineage_id != malformed.finding_lineage_id
+
+
 def test_converter_preserves_verification_provenance_without_inventing_metadata() -> None:
     concern = concerns_from_citation_audit(_audit("verification_failed"), source_agent_id="citation_agent")[0]
 

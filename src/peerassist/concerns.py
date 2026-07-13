@@ -21,6 +21,7 @@ def reconcile_finding_revisions(
     """Carry stable finding lineage history into a regenerated candidate set."""
 
     latest_by_lineage: dict[str, Concern] = {}
+    previous_by_id = {concern.id: concern for concern in previous_concerns}
     for concern in previous_concerns:
         previous = latest_by_lineage.get(concern.finding_lineage_id)
         if previous is None or (concern.revision, concern.display_revision) > (
@@ -33,8 +34,16 @@ def reconcile_finding_revisions(
     for candidate in candidate_concerns:
         previous = latest_by_lineage.get(candidate.finding_lineage_id)
         if previous is None:
-            reconciled.append(candidate)
-            latest_by_lineage[candidate.finding_lineage_id] = candidate
+            replaced = previous_by_id.get(candidate.id)
+            updated = candidate.model_copy(deep=True)
+            if replaced is not None and replaced.finding_lineage_id != candidate.finding_lineage_id:
+                updated.supersedes = list(
+                    dict.fromkeys([*replaced.supersedes, replaced.finding_id])
+                )
+                updated.metadata = dict(updated.metadata)
+                updated.metadata["lineage_replaced_from"] = replaced.finding_lineage_id
+            reconciled.append(updated)
+            latest_by_lineage[updated.finding_lineage_id] = updated
             continue
         updated = candidate.model_copy(deep=True)
         if candidate.finding_id == previous.finding_id:

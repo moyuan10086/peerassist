@@ -111,6 +111,9 @@ def apply_confirmation_decision(
     new_text: str = "",
     reason: str = "",
     expected_revision: int | None = None,
+    expected_finding_lineage_id: str = "",
+    expected_finding_id: str = "",
+    expected_finding_revision: int | None = None,
     before_commit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     out_dir = peerassist_stage_dir(run_dir)
@@ -123,6 +126,17 @@ def apply_confirmation_decision(
         return _revision_conflict(expected_revision, observed_revision)
     rows = confirmations.get("actions") if isinstance(confirmations.get("actions"), list) else []
     concern = _find_concern(out_dir / "peerassist_concerns.json", concern_id)
+    expected_binding = (
+        expected_finding_lineage_id,
+        expected_finding_id,
+        expected_finding_revision,
+    )
+    if any(value not in ("", None) for value in expected_binding) and expected_binding != (
+        concern.finding_lineage_id,
+        concern.finding_id,
+        concern.revision,
+    ):
+        return _finding_binding_conflict(concern)
 
     confirmation_action = confirmation_action_from_queue_decision(
         concern_id=concern_id,
@@ -150,6 +164,17 @@ def apply_confirmation_decision(
             or current_mutation_revision != observed_mutation_revision
         ):
             return _revision_conflict(observed_revision, current_revision)
+        current_concern = _find_concern(out_dir / "peerassist_concerns.json", concern_id)
+        if (
+            current_concern.finding_lineage_id,
+            current_concern.finding_id,
+            current_concern.revision,
+        ) != (
+            concern.finding_lineage_id,
+            concern.finding_id,
+            concern.revision,
+        ):
+            return _finding_binding_conflict(current_concern)
         rows = candidate_rows
         committed_revision = observed_revision + 1
         write_json_atomic(
@@ -408,6 +433,17 @@ def _finding_snapshot_conflict(confirmation_revision: int) -> dict[str, Any]:
         "error_code": "finding_snapshot_conflict",
         "expected_revision": confirmation_revision,
         "current_revision": confirmation_revision,
+    }
+
+
+def _finding_binding_conflict(concern: Concern) -> dict[str, Any]:
+    return {
+        "schema_version": "peerassist.revision_conflict.v1",
+        "status": "revision_conflict",
+        "error_code": "finding_binding_conflict",
+        "current_finding_lineage_id": concern.finding_lineage_id,
+        "current_finding_id": concern.finding_id,
+        "current_finding_revision": concern.revision,
     }
 
 

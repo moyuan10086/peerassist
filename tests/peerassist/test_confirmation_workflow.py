@@ -319,6 +319,57 @@ def test_legacy_action_is_not_replayed_after_finding_revision_changes() -> None:
     assert reconciliation.concern_ids_needing_reconciliation == [concern.id]
 
 
+def test_legacy_action_is_not_replayed_after_lineage_replacement() -> None:
+    previous = Concern(
+        id="concern_reused",
+        level=ConcernLevel.CLARIFICATION_NEEDED,
+        category="statistics",
+        title="Old issue",
+        evidence_ids=["E1"],
+        metadata={"issue_anchor": "old-anchor"},
+    )
+    replacement = Concern(
+        id="concern_reused",
+        level=ConcernLevel.CLARIFICATION_NEEDED,
+        category="statistics",
+        title="Different issue",
+        evidence_ids=["E2"],
+        metadata={"issue_anchor": "new-anchor"},
+    )
+    replacement = reconcile_finding_revisions([previous], [replacement])[0]
+    legacy = HumanConfirmationAction(
+        concern_id=previous.id,
+        action="confirm",
+        timestamp="2026-07-10T00:00:00Z",
+    )
+
+    applied = apply_confirmations([replacement], [legacy])[0]
+
+    assert previous.finding_id in replacement.supersedes
+    assert applied.status is ConcernStatus.PENDING_HUMAN_CONFIRMATION
+
+
+def test_apply_decision_rejects_stale_finding_binding(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    out_dir = _seed_peerassist_stage(run_dir)
+    concern = json.loads((out_dir / "peerassist_concerns.json").read_text(encoding="utf-8"))["concerns"][0]
+
+    result = apply_confirmation_decision(
+        run_dir=run_dir,
+        paper_id="demo",
+        concern_id=concern["id"],
+        action="confirm",
+        reviewer_id="reviewer",
+        timestamp="2026-07-10T00:00:00Z",
+        expected_finding_lineage_id="fln_stale",
+        expected_finding_id="fnd_stale",
+        expected_finding_revision=99,
+    )
+
+    assert result["status"] == "revision_conflict"
+    assert result["error_code"] == "finding_binding_conflict"
+
+
 def test_finalize_rejects_unresolved_core_without_override(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     out_dir = _seed_peerassist_stage(run_dir)

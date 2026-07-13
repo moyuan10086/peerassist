@@ -48,6 +48,9 @@ type Evidence = {
 
 type Concern = {
   id: string;
+  finding_lineage_id?: string;
+  finding_id?: string;
+  revision?: number;
   level?: string;
   category?: string;
   title?: string;
@@ -284,6 +287,9 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           concern_id: concern.id,
+          finding_lineage_id: concern.finding_lineage_id || "",
+          finding_id: concern.finding_id || "",
+          finding_revision: concern.revision || 1,
           action,
           reviewer_id: "local-reviewer",
           timestamp: new Date().toISOString(),

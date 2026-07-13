@@ -3300,6 +3300,9 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
       const action = button.dataset.action;
       const payload = {{
         concern_id: item.dataset.concernId,
+        finding_lineage_id: item.dataset.findingLineageId,
+        finding_id: item.dataset.findingId,
+        finding_revision: Number(item.dataset.findingRevision || 0),
         action,
         reviewer_id: 'local-reviewer',
         timestamp: new Date().toISOString(),
@@ -6218,6 +6221,13 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                     previous_text=str(payload.get("previous_text") or ""),
                     new_text=str(payload.get("new_text") or ""),
                     reason=str(payload.get("reason") or ""),
+                    expected_finding_lineage_id=str(payload.get("finding_lineage_id") or ""),
+                    expected_finding_id=str(payload.get("finding_id") or ""),
+                    expected_finding_revision=(
+                        int(payload["finding_revision"])
+                        if payload.get("finding_revision") is not None
+                        else None
+                    ),
                 )
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=400)
@@ -6413,6 +6423,9 @@ def _render_item(item: dict[str, Any]) -> str:
     level = str(item.get("level") or "")
     category = str(item.get("category") or "")
     status = str(item.get("status") or "")
+    finding_lineage_id = str(item.get("finding_lineage_id") or "")
+    finding_id = str(item.get("finding_id") or "")
+    finding_revision = int(item.get("revision") or 1)
     title = _localized_copy(str(item.get("title") or "未命名关注点"))
     impact = _localized_copy(str(item.get("impact") or ""))
     benign_explanation = _localized_copy(str(item.get("benign_explanation") or ""))
@@ -6460,7 +6473,7 @@ def _render_item(item: dict[str, Any]) -> str:
     )
     previous_text = html.escape(str(item.get("author_action") or ""), quote=True)
     return f"""
-<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-previous-text="{previous_text}" data-concern-level="{html.escape(level, quote=True)}" data-concern-category="{html.escape(category, quote=True)}" data-concern-status="{html.escape(status, quote=True)}" data-concern-title="{html.escape(title, quote=True)}" data-concern-search="{html.escape(search_blob, quote=True)}"{pdf_page_attr}>
+<section class="item" id="concern-{html.escape(concern_id, quote=True)}" data-concern-id="{html.escape(concern_id, quote=True)}" data-finding-lineage-id="{html.escape(finding_lineage_id, quote=True)}" data-finding-id="{html.escape(finding_id, quote=True)}" data-finding-revision="{finding_revision}" data-previous-text="{previous_text}" data-concern-level="{html.escape(level, quote=True)}" data-concern-category="{html.escape(category, quote=True)}" data-concern-status="{html.escape(status, quote=True)}" data-concern-title="{html.escape(title, quote=True)}" data-concern-search="{html.escape(search_blob, quote=True)}"{pdf_page_attr}>
   <div>
     <div class="tags">
       <span class="tag">{html.escape(_localized_status(status))}</span>
