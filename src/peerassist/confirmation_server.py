@@ -30,7 +30,10 @@ _WORKSPACE_ROUTES = {"/", "/paper", "/agent", "/queue", "/trace", "/confirm", "/
 
 
 def _is_review_job_api_path(path: str) -> bool:
-    return path == "/api/health" or path == "/api/reviews" or path.startswith("/api/jobs/")
+    return (
+        path in {"/api/health", "/api/reviews", "/api/jobs"}
+        or path.startswith("/api/jobs/")
+    )
 
 
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:

@@ -88,6 +88,16 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         if self.path == "/api/health":
             self._send_json({"status": "ok", "service": "peerassist-review-jobs"})
             return
+        if self.path == "/api/jobs":
+            self._send_json(
+                {
+                    "jobs": [
+                        state.model_dump(mode="json")
+                        for state in self.service.repository.list()
+                    ]
+                }
+            )
+            return
         match = _JOB_RE.match(self.path)
         if match is None:
             self._send_json({"error": "not_found"}, status=404)

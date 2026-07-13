@@ -965,6 +965,68 @@ input:focus {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.job-list {
+  display: grid;
+  gap: 10px;
+}
+
+.job-card {
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 14px;
+  background: var(--panel-soft);
+}
+
+.job-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.job-card h3 {
+  margin: 7px 0 2px;
+  font-size: 15px;
+}
+
+.job-card code {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.job-actions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.job-stage-track {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(8px, 1fr));
+  gap: 4px;
+  margin: 14px 0 9px;
+}
+
+.job-stage-track span {
+  height: 5px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+
+.job-stage-track span[data-state="done"] { background: var(--accent); }
+.job-stage-track span[data-state="active"] { background: var(--blue); box-shadow: 0 0 0 3px rgba(36, 88, 166, 0.12); }
+
+.job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.job-error { color: var(--danger); }
+
 @media (max-width: 1180px) {
   .app-shell {
     grid-template-columns: 74px minmax(0, 1fr);

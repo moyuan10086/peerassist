@@ -86,6 +86,21 @@ type AgentRun = {
   drafts?: Concern[];
 };
 
+type ReviewJob = {
+  id: string;
+  paper_id: string;
+  status: string;
+  stage: string;
+  revision: number;
+  confirmation_revision?: number;
+  required_consents?: string[];
+  resume_stage?: string | null;
+  degradation_code?: string | null;
+  degraded_services?: string[];
+  error?: string | null;
+  updated_at?: string;
+};
+
 type ConfirmationState = {
   schema_version?: string;
   runtime?: {
@@ -175,6 +190,7 @@ function App() {
   const [lastReviewDraft, setLastReviewDraft] = useState("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
+  const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
 
   const state = bootstrap.state || {};
   const queueItems = state.queue?.items || [];
@@ -195,9 +211,26 @@ function App() {
     return payload;
   }, []);
 
+  const refreshJobs = useCallback(async () => {
+    const response = await fetch("/api/jobs", { cache: "no-store" });
+    if (!response.ok) throw new Error("无法读取后台审稿任务");
+    const payload = (await response.json()) as { jobs?: ReviewJob[] };
+    const jobs = payload.jobs || [];
+    jobs.sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
+    setReviewJobs(jobs);
+    return jobs;
+  }, []);
+
   useEffect(() => {
-    refresh().catch(() => setStreamLines((lines) => [...lines, "初始状态读取失败，保留本地壳"]));
-  }, [refresh]);
+    Promise.all([refresh(), refreshJobs()]).catch(() =>
+      setStreamLines((lines) => [...lines, "初始状态读取失败，保留本地壳"]),
+    );
+  }, [refresh, refreshJobs]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => refreshJobs().catch(() => undefined), 3000);
+    return () => window.clearInterval(timer);
+  }, [refreshJobs]);
 
   useEffect(() => {
     if (!window.EventSource) return;
@@ -308,6 +341,35 @@ function App() {
     }
   }
 
+  async function runJobAction(job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") {
+    setBusy(true);
+    try {
+      const path =
+        action === "consent"
+          ? `/api/jobs/${job.id}/consents/model`
+          : `/api/jobs/${job.id}/${action}`;
+      const payload =
+        action === "consent"
+          ? { decision: "granted", actor: "local-reviewer" }
+          : action === "finalize"
+            ? { confirmation_revision: job.confirmation_revision || 0 }
+            : {};
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "任务操作失败");
+      showToast(jobActionLabel(action));
+      await refreshJobs();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "任务操作失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const activeLabel = bootstrap.windows.find((item) => item.id === activeWindow)?.label || "论文阅读";
 
   return (
@@ -377,7 +439,9 @@ function App() {
             agentRuns={agentRuns}
             streamLines={streamLines}
             lastReviewDraft={lastReviewDraft}
+            reviewJobs={reviewJobs}
             onRunReview={runAgentReview}
+            onJobAction={runJobAction}
           />
         )}
         {activeWindow === "queue" && (
@@ -757,7 +821,9 @@ function AgentWindow({
   agentRuns,
   streamLines,
   lastReviewDraft,
+  reviewJobs,
   onRunReview,
+  onJobAction,
 }: {
   busy: boolean;
   model: string;
@@ -765,11 +831,24 @@ function AgentWindow({
   agentRuns: AgentRun[];
   streamLines: string[];
   lastReviewDraft: string;
+  reviewJobs: ReviewJob[];
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
+  onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void;
 }) {
   const [mode, setMode] = useState("fast");
   return (
     <section className="agent-grid">
+      <div className="panel full-span">
+        <div className="panel-head">
+          <h2>后台审稿任务</h2>
+          <span className="tag">{reviewJobs.length} 个 Review Job</span>
+        </div>
+        <div className="panel-body job-list">
+          {reviewJobs.length ? reviewJobs.map((job) => (
+            <ReviewJobCard job={job} busy={busy} onAction={onJobAction} key={job.id} />
+          )) : <div className="draft-empty">暂无持久化审稿任务。</div>}
+        </div>
+      </div>
       <div className="panel">
         <div className="panel-head">
           <h2>智能审稿控制台</h2>
@@ -832,6 +911,39 @@ function AgentWindow({
         </div>
       </div>
     </section>
+  );
+}
+
+const reviewStages = ["validate", "parse", "evidence", "profile", "plan", "deterministic", "citation", "agents", "integrate", "await_confirmation", "finalize", "complete"];
+
+function ReviewJobCard({ job, busy, onAction }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void }) {
+  const current = Math.max(0, reviewStages.indexOf(job.stage));
+  const canCancel = !["completed", "cancelled", "failed", "awaiting_human_confirmation"].includes(job.status);
+  return (
+    <article className="job-card">
+      <div className="job-card-head">
+        <div>
+          <span className={`tag ${job.status === "failed" ? "danger" : job.status === "blocked" ? "warn" : "good"}`}>{labelJobStatus(job.status)}</span>
+          <h3>{job.paper_id.slice(0, 16)}</h3>
+          <code>{job.id}</code>
+        </div>
+        <div className="job-actions">
+          {job.status === "blocked" && job.required_consents?.includes("model") && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "consent")}>授权模型并继续</button>}
+          {canCancel && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "cancel")}>取消</button>}
+          {["failed", "cancelled", "interrupted"].includes(job.status) && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "retry")}>重试</button>}
+          {job.status === "awaiting_human_confirmation" && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "finalize")}>导出最终报告</button>}
+        </div>
+      </div>
+      <div className="job-stage-track" aria-label="审稿任务阶段">
+        {reviewStages.map((stage, index) => <span key={stage} data-state={index < current ? "done" : index === current ? "active" : "pending"} title={labelJobStage(stage)} />)}
+      </div>
+      <div className="job-meta">
+        <span>当前阶段：{labelJobStage(job.stage)}</span>
+        <span>状态版本：{job.revision}</span>
+        {job.degradation_code && <span>本地降级：{(job.degraded_services || []).join("、")}</span>}
+        {job.error && <span className="job-error">{job.error}</span>}
+      </div>
+    </article>
   );
 }
 
@@ -1117,6 +1229,55 @@ function labelAction(value: string) {
 
 function labelMode(value: string) {
   return ({ fast: "快速", standard: "标准", deep: "深入" } as Record<string, string>)[value] || value;
+}
+
+function labelJobStatus(value: string) {
+  return ({
+    queued: "等待调度",
+    validating_input: "校验论文",
+    parsing: "解析 PDF",
+    evidence_building: "构建证据",
+    profiling: "理解论文",
+    planning_review: "规划审稿",
+    deterministic_checking: "确定性核查",
+    citation_checking: "引用核查",
+    agents_running: "智能体审稿",
+    integrating: "整合意见",
+    blocked: "等待授权",
+    awaiting_human_confirmation: "等待人工确认",
+    exporting_report: "导出报告",
+    completed: "已完成",
+    failed: "失败",
+    cancel_requested: "正在取消",
+    cancelled: "已取消",
+    interrupted: "等待恢复",
+  } as Record<string, string>)[value] || value;
+}
+
+function labelJobStage(value: string) {
+  return ({
+    validate: "文件校验",
+    parse: "文档解析",
+    evidence: "证据台账",
+    profile: "论文画像",
+    plan: "审稿计划",
+    deterministic: "确定性核查",
+    citation: "引用核查",
+    agents: "智能体评审",
+    integrate: "意见整合",
+    await_confirmation: "人工确认",
+    finalize: "报告导出",
+    complete: "完成",
+  } as Record<string, string>)[value] || value;
+}
+
+function jobActionLabel(value: string) {
+  return ({
+    cancel: "已请求取消任务",
+    retry: "任务已重新排队",
+    consent: "模型授权已记录",
+    finalize: "最终报告导出已启动",
+  } as Record<string, string>)[value] || "任务状态已更新";
 }
 
 function artifactLabel(value: string) {

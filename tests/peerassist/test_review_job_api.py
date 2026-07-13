@@ -64,6 +64,8 @@ def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path) -> None:
         )
         assert status == 202
         job_id = created["job"]["id"]
+        _, listed = _json(f"{base}/api/jobs")
+        assert any(job["id"] == job_id for job in listed["jobs"])
 
         for _ in range(100):
             _, snapshot = _json(f"{base}/api/jobs/{job_id}")
