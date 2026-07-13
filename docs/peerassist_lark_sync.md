@@ -256,3 +256,13 @@ model keys, paper secrets, or reviewer-private material here.
 - Registered arXiv `2607.08522v1` under its full SHA-256 and created a real public ReviewJob. It completed validate, parse, evidence, profile, plan, deterministic and citation stages and is durably parked at `agents / approval_required` without sending the manuscript to a model.
 - Browser screenshot verification confirmed the real task card, progress track and authorization controls render correctly in the public `/agent` workspace.
 - Appended Feishu section `七十一、2026-07-14 持久化审稿任务时间线 UI`; revision advanced from `103` to `104`. Append-only verification confirmed sections `七十` and `七十一` remain present.
+
+## 2026-07-14 - Real PDF upload to durable review job
+
+- Added `POST /api/papers/upload` with bounded multipart streaming, existing PDF validation and persistence, stable SHA-256 Paper identity, and automatic fast-mode ReviewJob creation.
+- Public port `8766` now proxies the upload route to the durable worker API on `8767`; invalid PDF content returns a structured `400`, oversized requests return `413`, and missing request length returns `411`.
+- Added a Chinese upload bar to the intelligent-review window. Reviewers can select a PDF, see the selected filename, upload it, and immediately observe the new durable task card without leaving the page.
+- Focused verification passed both Review Job API tests and Ruff checks; the production frontend build passed. Desktop and mobile Playwright checks found no horizontal overflow or console errors.
+- Replaced ad-hoc background shells with restart-on-failure transient systemd services for ports `8766` and `8767`; the public health endpoint returned `ok` after restart.
+- Local commit: `74db628 feat: upload papers into durable review jobs`.
+- Appended Feishu section `七十二、2026-07-14 真实论文上传与持久化审稿任务联动`; revision advanced from `104` to `105`. Append-only keyword verification confirmed sections `七十一` and `七十二` remain intact, with no credentials or private manuscript content stored.
