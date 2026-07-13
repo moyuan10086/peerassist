@@ -216,3 +216,12 @@ model keys, paper secrets, or reviewer-private material here.
 - Finalization blocks unresolved core findings without an override, detects stale confirmation/finding snapshots, is idempotent only for an identical snapshot, and preserves the previous pointer on failure.
 - Focused verification: 29 Task 6 tests and 63 related producer/confirmation tests passed during implementation; final stale-binding/reference-lineage checks passed 4 focused tests, Ruff passed, and the frontend production build passed.
 - Appended Feishu section `六十六、2026-07-14 候选审稿与版本化最终报告分离`; revision advanced from `98` to `99`. Append-only verification confirmed sections `六十五` and `六十六` remain present.
+
+## 2026-07-14 - Recoverable review DAG core
+
+- Added a repository-backed review runner that executes durable stages under an exclusive Worker lease and commits attempt-isolated stage outputs before advancing state.
+- The core runner now supports cancellation before the next stage, model-consent blocking and persisted resume stage, explicit consent grant, model-denied local fallback, and retry with a new attempt ID while retaining prior artifacts.
+- Added durable degradation fields for denied services and a claim-prioritized review context containing paper profile, claim graph, experiment inventory, review plan, deterministic checks and selected evidence IDs.
+- Replaced the sequential first-80 evidence model context with core-claim/reading-route/experiment/check prioritization, so high-centrality evidence at the end of a large ledger is retained.
+- Focused verification passed 8 relevant runner/context/agent-review tests and Ruff checks.
+- Appended Feishu section `六十七、2026-07-14 可恢复审稿 DAG 核心`; append-only verification must confirm sections `六十六` and `六十七` remain present.
