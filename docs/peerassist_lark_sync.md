@@ -215,4 +215,4 @@ model keys, paper secrets, or reviewer-private material here.
 - Final reports are immutable bilingual JSON/Markdown versions under `reports/<version>/`; the manifest freezes confirmation actions and every finding revision, including rewritten and deleted concerns.
 - Finalization blocks unresolved core findings without an override, detects stale confirmation/finding snapshots, is idempotent only for an identical snapshot, and preserves the previous pointer on failure.
 - Focused verification: 29 Task 6 tests and 63 related producer/confirmation tests passed during implementation; final stale-binding/reference-lineage checks passed 4 focused tests, Ruff passed, and the frontend production build passed.
-- Appended Feishu section `六十六、2026-07-14 候选审稿与版本化最终报告分离`; append-only verification must confirm sections `六十五` and `六十六` remain present.
+- Appended Feishu section `六十六、2026-07-14 候选审稿与版本化最终报告分离`; revision advanced from `98` to `99`. Append-only verification confirmed sections `六十五` and `六十六` remain present.
