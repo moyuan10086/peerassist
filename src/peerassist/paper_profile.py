@@ -135,10 +135,27 @@ def _claim_centrality(item: EvidenceItem, text: str) -> float:
 
 
 def _overlap(left: str, right: str) -> int:
-    left_words = {word.lower() for word in WORD_RE.findall(left)}
-    right_words = {word.lower() for word in WORD_RE.findall(right)}
+    def normalize(word: str) -> str:
+        value = word.lower()
+        if len(value) > 4 and value.endswith("s"):
+            value = value[:-1]
+        return value
+
+    left_words = {normalize(word) for word in WORD_RE.findall(left)}
+    right_words = {normalize(word) for word in WORD_RE.findall(right)}
     stop = {"the", "and", "with", "that", "this", "from", "are", "for", "our", "we"}
     return len((left_words - stop) & (right_words - stop))
+
+
+def _dedupe_items(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    seen: set[str] = set()
+    result: list[EvidenceItem] = []
+    for item in items:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        result.append(item)
+    return result
 
 
 def _extract_profile(ledger: EvidenceLedger, groups: dict[str, list[EvidenceItem]]) -> PaperProfile:
@@ -201,7 +218,7 @@ def _extract_profile(ledger: EvidenceLedger, groups: dict[str, list[EvidenceItem
         method_assumptions=_reported(method_assumptions, assumption_evidence),
         conclusions=_reported(conclusions, conclusion_items),
         conclusion_boundaries=_reported(boundaries, boundary_evidence),
-        parse_warnings=[str(warning) for warning in warnings],
+        parse_warnings=_reported([str(warning) for warning in warnings], []),
     )
 
 
@@ -254,7 +271,19 @@ def _extract_claim_graph(
                 if item.id not in existing.evidence_ids:
                     existing.evidence_ids.append(item.id)
                 continue
-            supporting = [support for support in support_items if _overlap(sentence, support.text) >= 2]
+            supporting = [
+                support
+                for support in support_items
+                if support.id != item.id and _overlap(sentence, support.text) >= 2
+            ]
+            conflicting_support = [
+                support
+                for support in supporting
+                if any(
+                    token in support.text.lower()
+                    for token in ("does not", "did not", "failed to", "decrease", "worse", "conflict")
+                )
+            ]
             result_support = [
                 support for support in supporting if "result" in _normalized_section(support.section)
             ]
@@ -266,7 +295,9 @@ def _extract_claim_graph(
                     for token in ("method", "experiment", "evaluation", "dataset")
                 )
             ]
-            if result_support and method_support:
+            if conflicting_support:
+                status = ClaimSupportStatus.CONFLICTING
+            elif result_support and method_support:
                 status = ClaimSupportStatus.SUPPORTED
             elif supporting:
                 status = ClaimSupportStatus.PARTIALLY_SUPPORTED
@@ -280,11 +311,14 @@ def _extract_claim_graph(
                 evidence_ids=[item.id],
                 support_evidence_ids=[support.id for support in supporting],
                 support_status=status,
-                conclusion_boundaries=[str(value) for value in profile.conclusion_boundaries.value or []],
-                benign_explanations=(
-                    ["The paper may intend a narrower scope than the sentence states."]
-                    if status is not ClaimSupportStatus.SUPPORTED
-                    else []
+                conclusion_boundaries=profile.conclusion_boundaries.model_copy(deep=True),
+                benign_explanations=_inferred(
+                    (
+                        ["The paper may intend a narrower scope than the sentence states."]
+                        if status is not ClaimSupportStatus.SUPPORTED
+                        else []
+                    ),
+                    [item],
                 ),
             )
             claims_by_id[claim_id] = claim
@@ -304,37 +338,185 @@ def _field_from_items(items: list[EvidenceItem]) -> GroundedField:
     return _reported([item.text for item in items], items)
 
 
+def _inferred_field(items: list[EvidenceItem]) -> GroundedField:
+    return _inferred([item.text for item in items], items)
+
+
+def _choose_experiment_items(
+    items: list[EvidenceItem],
+    keywords: tuple[str, ...],
+) -> list[EvidenceItem]:
+    return [
+        item
+        for item in items
+        if any(keyword in item.text.lower() for keyword in keywords)
+    ]
+
+
+def _associated_media(
+    media: list[EvidenceItem],
+    *,
+    section: str,
+    base_items: list[EvidenceItem],
+    single_experiment: bool,
+) -> list[EvidenceItem]:
+    associated: list[EvidenceItem] = []
+    for item in media:
+        media_section = _normalized_section(item.section)
+        if media_section == section:
+            associated.append(item)
+            continue
+        if any(token in media_section for token in ("experiment", "evaluation")):
+            continue
+        if single_experiment and "result" in media_section:
+            associated.append(item)
+            continue
+        if any(_overlap(item.text, evidence.text) >= 1 for evidence in base_items):
+            associated.append(item)
+    return associated
+
+
 def _extract_experiments(
     ledger: EvidenceLedger,
     groups: dict[str, list[EvidenceItem]],
 ) -> ExperimentInventory:
-    experiment_items = _matching_sections(groups, "experiment", "evaluation", "result")
-    if not experiment_items:
+    specific_groups = [
+        (
+            section,
+            [
+                item
+                for item in items
+                if item.type
+                not in {EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE, EvidenceType.TABLE_CELL}
+            ],
+        )
+        for section, items in groups.items()
+        if any(token in section for token in ("experiment", "evaluation"))
+        and any(
+            item.type
+            not in {EvidenceType.FIGURE_CAPTION, EvidenceType.TABLE, EvidenceType.TABLE_CELL}
+            for item in items
+        )
+    ]
+    result_items = _matching_sections(groups, "result")
+    data_items = [
+        item
+        for section, items in groups.items()
+        if section == "data" or "dataset" in section or "data " in section
+        for item in items
+    ]
+    if not specific_groups and result_items:
+        specific_groups = [("results", result_items)]
+        result_items = []
+    if not specific_groups:
         return ExperimentInventory(paper_id=ledger.paper_id)
-
-    def choose(*keywords: str) -> list[EvidenceItem]:
-        return [
-            item
-            for item in experiment_items
-            if any(keyword in item.text.lower() for keyword in keywords)
-        ]
 
     figures = [item for item in ledger.items if item.type is EvidenceType.FIGURE_CAPTION]
     tables = [item for item in ledger.items if item.type in {EvidenceType.TABLE, EvidenceType.TABLE_CELL}]
-    experiment = ExperimentRecord(
-        experiment_id="experiment-main",
-        datasets=_field_from_items(choose("dataset", "benchmark", "corpus")),
-        sample_sizes=_field_from_items(choose("n=", "sample", "papers", "participants")),
-        data_splits=_field_from_items(choose("split", "train", "validation", "test set")),
-        baselines=_field_from_items(choose("baseline", "compared with", "comparison")),
-        metrics=_field_from_items(choose("metric")),
-        random_seeds=_field_from_items(choose("seed", "random state")),
-        statistics=_field_from_items(choose("confidence", "p-value", "standard deviation", "std")),
-        ablations=_field_from_items(choose("ablation", "remove", "without")),
-        key_figures=_field_from_items(figures),
-        key_tables=_field_from_items(tables),
-    )
-    return ExperimentInventory(paper_id=ledger.paper_id, experiments=[experiment])
+    experiments: list[ExperimentRecord] = []
+    for section, base_items in sorted(specific_groups, key=lambda value: value[0]):
+        related_results = [
+            item
+            for item in result_items
+            if len(specific_groups) == 1
+            or any(_overlap(item.text, base.text) >= 1 for base in base_items)
+        ]
+        related_data = [
+            item
+            for item in data_items
+            if len(specific_groups) == 1
+            or any(_overlap(item.text, base.text) >= 1 for base in base_items)
+        ]
+        experiment_items = _dedupe_items([*base_items, *related_data, *related_results])
+        associated_figures = _associated_media(
+            figures,
+            section=section,
+            base_items=base_items,
+            single_experiment=len(specific_groups) == 1,
+        )
+        associated_tables = _associated_media(
+            tables,
+            section=section,
+            base_items=base_items,
+            single_experiment=len(specific_groups) == 1,
+        )
+        datasets = _choose_experiment_items(
+            experiment_items,
+            ("dataset", "benchmark", "corpus"),
+        )
+        metrics = _choose_experiment_items(experiment_items, ("metric",))
+        datasets_field = (
+            _field_from_items(datasets)
+            if datasets
+            else _inferred_field(
+                [
+                    item
+                    for item in [*associated_figures, *associated_tables]
+                    if any(token in item.text.lower() for token in ("dataset", "benchmark", " on "))
+                ]
+            )
+        )
+        metrics_field = (
+            _field_from_items(metrics)
+            if metrics
+            else _inferred_field(
+                [
+                    item
+                    for item in [*associated_figures, *associated_tables]
+                    if any(
+                        token in item.text.lower()
+                        for token in ("precision", "recall", "accuracy", "f1", "auc")
+                    )
+                ]
+            )
+        )
+        experiment = ExperimentRecord(
+            experiment_id=f"experiment-{hashlib.sha256(section.encode('utf-8')).hexdigest()[:10]}",
+            label=_inferred(section, base_items[:1]),
+            datasets=datasets_field,
+            sample_sizes=_field_from_items(
+                _choose_experiment_items(
+                    experiment_items,
+                    ("n=", "sample", "papers", "participants"),
+                )
+            ),
+            data_splits=_field_from_items(
+                _choose_experiment_items(
+                    experiment_items,
+                    ("split", "train", "validation", "test set"),
+                )
+            ),
+            baselines=_field_from_items(
+                _choose_experiment_items(
+                    experiment_items,
+                    ("baseline", "compared with", "comparison"),
+                )
+            ),
+            metrics=metrics_field,
+            random_seeds=_field_from_items(
+                _choose_experiment_items(experiment_items, ("seed", "random state"))
+            ),
+            statistics=_field_from_items(
+                _choose_experiment_items(
+                    experiment_items,
+                    ("confidence", "p-value", "standard deviation", "std"),
+                )
+            ),
+            ablations=_field_from_items(
+                _choose_experiment_items(
+                    experiment_items,
+                    ("ablation", "remove", "without"),
+                )
+            ),
+            key_figures=_field_from_items(associated_figures),
+            key_tables=_field_from_items(associated_tables),
+        )
+        populated = sum(
+            field.value not in (None, "", [], {}) for field in experiment.grounded_fields()
+        )
+        experiment.importance_score = min(1.0, round(0.45 + populated * 0.055, 3))
+        experiments.append(experiment)
+    return ExperimentInventory(paper_id=ledger.paper_id, experiments=experiments)
 
 
 def _build_review_plan(
@@ -360,6 +542,39 @@ def _build_review_plan(
         )
         for index, claim in enumerate(claim_graph.claims, start=1)
     ]
+    next_rank = len(route) + 1
+    for experiment in sorted(
+        inventory.experiments,
+        key=lambda item: (-item.importance_score, item.experiment_id),
+    ):
+        evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for field in experiment.grounded_fields()
+                for evidence_id in field.evidence_ids
+            )
+        )
+        route.append(
+            ReviewRouteItem(
+                rank=next_rank,
+                priority="core" if experiment.importance_score >= 0.7 else "supporting",
+                reason="Inspect experiment design and its support for the central claims.",
+                claim_ids=core_ids,
+                evidence_ids=evidence_ids,
+            )
+        )
+        next_rank += 1
+    parse_warnings = list(ledger.metadata.get("warnings") or [])
+    if parse_warnings:
+        route.append(
+            ReviewRouteItem(
+                rank=next_rank,
+                priority="core",
+                reason="Resolve parser uncertainty before relying on affected evidence.",
+                claim_ids=core_ids,
+                evidence_ids=[],
+            )
+        )
     all_evidence = list(
         dict.fromkeys(
             evidence_id
@@ -391,7 +606,8 @@ def _build_review_plan(
                     evidence_ids=list(
                         dict.fromkeys(
                             evidence_id
-                            for field in inventory.experiments[0].grounded_fields()
+                            for experiment in inventory.experiments
+                            for field in experiment.grounded_fields()
                             for evidence_id in field.evidence_ids
                         )
                     ),
@@ -400,19 +616,33 @@ def _build_review_plan(
                     agent_id="statistics",
                     focus="sample sizes, seeds, uncertainty, and statistical reporting",
                     claim_ids=core_ids,
-                    evidence_ids=[
-                        *inventory.experiments[0].sample_sizes.evidence_ids,
-                        *inventory.experiments[0].random_seeds.evidence_ids,
-                        *inventory.experiments[0].statistics.evidence_ids,
-                    ],
+                    evidence_ids=list(
+                        dict.fromkeys(
+                            evidence_id
+                            for experiment in inventory.experiments
+                            for field in (
+                                experiment.sample_sizes,
+                                experiment.random_seeds,
+                                experiment.statistics,
+                            )
+                            for evidence_id in field.evidence_ids
+                        )
+                    ),
                 ),
             ]
         )
+    collapsed_ids = [
+        item.id
+        for item in ledger.items
+        if str(item.metadata.get("importance") or "").lower() == "minor"
+        or any(token in _normalized_section(item.section) for token in ("writing", "style"))
+    ]
     return ReviewPlan(
         paper_id=ledger.paper_id,
         core_claim_ids=core_ids,
         reading_route=route,
         agent_assignments=assignments,
+        collapsed_evidence_ids=collapsed_ids,
     )
 
 

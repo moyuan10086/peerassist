@@ -112,7 +112,7 @@ def test_builds_grounded_profile_claims_experiments_and_review_plan(tmp_path: Pa
     assert artifacts.profile.method_outputs.evidence_ids == ["method"]
     assert artifacts.profile.method_assumptions.evidence_ids == ["method"]
     assert artifacts.profile.conclusion_boundaries.evidence_ids == ["conclusion"]
-    assert "table_structure_partial" in artifacts.profile.parse_warnings
+    assert "table_structure_partial" in artifacts.profile.parse_warnings.value
 
     claims = artifacts.claim_graph.claims
     assert claims
@@ -120,6 +120,15 @@ def test_builds_grounded_profile_claims_experiments_and_review_plan(tmp_path: Pa
     assert all(claim.claim_id.startswith("claim-") for claim in claims)
     assert all(claim.evidence_ids for claim in claims)
     assert any(edge.relation == "supported_by" for edge in artifacts.claim_graph.edges)
+    assert all(
+        edge.source_evidence_id
+        not in next(
+            claim.evidence_ids
+            for claim in claims
+            if claim.claim_id == edge.target_claim_id
+        )
+        for edge in artifacts.claim_graph.edges
+    )
     assert artifacts.review_plan.core_claim_ids[0] == claims[0].claim_id
     assert artifacts.review_plan.reading_route[0].priority == "core"
 
@@ -178,3 +187,97 @@ def test_claim_ids_and_core_ranking_are_stable(tmp_path: Path) -> None:
         claim.claim_id for claim in second.claim_graph.claims
     ]
     assert first.review_plan.core_claim_ids == second.review_plan.core_claim_ids
+
+
+def test_claim_support_detects_conflict_without_self_support(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-conflict",
+        source_sha256="c" * 64,
+        items=[
+            _item(
+                "claim",
+                "We show accuracy improves on Benchmark X.",
+                section="Abstract",
+            ),
+            _item(
+                "conflict",
+                "Accuracy does not improve on Benchmark X in the held-out results.",
+                section="Results",
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    claim = next(
+        candidate
+        for candidate in artifacts.claim_graph.claims
+        if "claim" in candidate.evidence_ids
+    )
+    assert claim.support_status.value == "conflicting"
+    assert claim.support_evidence_ids == ["conflict"]
+    assert claim.conclusion_boundaries.needs_human_review is True
+    assert artifacts.claim_graph.edges[0].source_evidence_id == "conflict"
+
+
+def test_multiple_experiments_inferred_provenance_and_minor_collapse(tmp_path: Path) -> None:
+    minor = EvidenceItem(
+        id="minor-writing",
+        type=EvidenceType.TEXT_SPAN,
+        page=3,
+        section="Writing Style",
+        locator="page 3",
+        text="A sentence could be shorter.",
+        metadata={"importance": "minor"},
+    )
+    ledger = EvidenceLedger(
+        paper_id="paper-multi",
+        source_sha256="d" * 64,
+        items=[
+            _item("claim", "We show the system improves accuracy.", section="Abstract"),
+            _item("data", "Dataset A contains n=100 samples.", section="Dataset A"),
+            _item(
+                "exp-a",
+                "Experiment A uses Dataset A and metric F1 with baseline Alpha.",
+                section="Experiment A",
+            ),
+            _item(
+                "exp-b",
+                "Experiment B compares the second configuration with baseline Beta.",
+                section="Experiment B",
+            ),
+            _item(
+                "fig-a",
+                "Figure A: F1 for Experiment A.",
+                section="Experiment A",
+                item_type=EvidenceType.FIGURE_CAPTION,
+            ),
+            _item(
+                "table-b",
+                "Table B: Accuracy on Benchmark-B for Experiment B.",
+                section="Experiment B",
+                item_type=EvidenceType.TABLE,
+            ),
+            minor,
+        ],
+        metadata={"warnings": ["page_2_bbox_uncertain"]},
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    assert len(artifacts.experiment_inventory.experiments) == 2
+    by_label = {
+        experiment.label.value: experiment
+        for experiment in artifacts.experiment_inventory.experiments
+    }
+    first = by_label["experiment a"]
+    second = by_label["experiment b"]
+    assert first.datasets.provenance is ProvenanceKind.REPORTED
+    assert first.key_figures.evidence_ids == ["fig-a"]
+    assert second.datasets.provenance is ProvenanceKind.INFERRED
+    assert second.metrics.provenance is ProvenanceKind.INFERRED
+    assert second.key_tables.evidence_ids == ["table-b"]
+    assert "fig-a" not in second.key_figures.evidence_ids
+    assert "minor-writing" in artifacts.review_plan.collapsed_evidence_ids
+    assert any("parser uncertainty" in item.reason for item in artifacts.review_plan.reading_route)
+    assert all("minor-writing" not in item.evidence_ids for item in artifacts.review_plan.reading_route)

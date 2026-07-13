@@ -104,7 +104,7 @@ class PaperProfile(BaseModel):
     method_assumptions: GroundedField = Field(default_factory=GroundedField)
     conclusions: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
     conclusion_boundaries: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
-    parse_warnings: list[str] = Field(default_factory=list)
+    parse_warnings: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
 
     def grounded_fields(self) -> list[GroundedField]:
         return [
@@ -120,6 +120,7 @@ class PaperProfile(BaseModel):
             self.method_assumptions,
             self.conclusions,
             self.conclusion_boundaries,
+            self.parse_warnings,
         ]
 
 
@@ -140,8 +141,8 @@ class ProfileClaim(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     support_evidence_ids: list[str] = Field(default_factory=list)
     support_status: ClaimSupportStatus = ClaimSupportStatus.INSUFFICIENT_EVIDENCE
-    conclusion_boundaries: list[str] = Field(default_factory=list)
-    benign_explanations: list[str] = Field(default_factory=list)
+    conclusion_boundaries: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
+    benign_explanations: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
 
 
 class ClaimSupportEdge(BaseModel):
@@ -166,6 +167,8 @@ class ExperimentRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     experiment_id: str
+    label: GroundedField = Field(default_factory=GroundedField)
+    importance_score: float = Field(default=0.5, ge=0, le=1)
     datasets: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
     sample_sizes: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
     data_splits: GroundedField = Field(default_factory=lambda: GroundedField(value=[]))
@@ -179,6 +182,7 @@ class ExperimentRecord(BaseModel):
 
     def grounded_fields(self) -> list[GroundedField]:
         return [
+            self.label,
             self.datasets,
             self.sample_sizes,
             self.data_splits,
@@ -230,6 +234,7 @@ class ReviewPlan(BaseModel):
     collapsed_minor_categories: list[str] = Field(
         default_factory=lambda: ["wording", "formatting", "minor_style"]
     )
+    collapsed_evidence_ids: list[str] = Field(default_factory=list)
 
 
 class PaperUnderstandingArtifacts(BaseModel):
