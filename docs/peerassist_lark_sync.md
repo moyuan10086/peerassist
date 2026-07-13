@@ -248,3 +248,11 @@ model keys, paper secrets, or reviewer-private material here.
 - Started the backend worker service on local port 8767 and proxied `/api/health`, `/api/reviews`, and `/api/jobs/*` through the existing public Chinese workspace on port 8766.
 - Public health endpoint verified: `http://101.47.158.17:8766/api/health`; the main workspace continues to return HTTP 200.
 - Appended Feishu section `七十、2026-07-14 Review Job HTTP 与 SSE 公网接口`; revision advanced from `102` to `103`. Append-only verification confirmed sections `六十九` and `七十` remain present.
+
+## 2026-07-14 - Persistent Review Job timeline UI
+
+- Added `GET /api/jobs` and a Chinese background-review task panel inside the modern agent window.
+- Task cards show durable status, current stage, revision, degradation/error state and a stable twelve-stage progress track, with model-consent, cancel, retry and final-report controls.
+- Registered arXiv `2607.08522v1` under its full SHA-256 and created a real public ReviewJob. It completed validate, parse, evidence, profile, plan, deterministic and citation stages and is durably parked at `agents / approval_required` without sending the manuscript to a model.
+- Browser screenshot verification confirmed the real task card, progress track and authorization controls render correctly in the public `/agent` workspace.
+- Appended Feishu section `七十一、2026-07-14 持久化审稿任务时间线 UI`; append-only verification must confirm sections `七十` and `七十一` remain present.
