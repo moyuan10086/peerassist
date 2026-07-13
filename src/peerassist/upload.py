@@ -151,20 +151,34 @@ class _PdfUploadSink:
             self.uploads_fd = _open_child_directory(papers_fd, ".uploads")
         finally:
             os.close(papers_fd)
+        self.uploads_closed = False
         self.temp_name = f"{uuid4().hex}.tmp"
         self.temp_path = repository.papers_dir / ".uploads" / self.temp_name
-        descriptor = os.open(
-            self.temp_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=self.uploads_fd,
-        )
-        self.stream = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                self.temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=self.uploads_fd,
+            )
+            self.stream = os.fdopen(descriptor, "wb")
+        except Exception:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            try:
+                os.unlink(self.temp_name, dir_fd=self.uploads_fd)
+            except FileNotFoundError:
+                pass
+            self._close_uploads_directory()
+            raise
         self.digest = hashlib.sha256()
         self.prefix = bytearray()
         self.size = 0
         self.closed = False
-        self.uploads_closed = False
 
     def write(self, chunk: bytes) -> None:
         if self.closed:
@@ -185,20 +199,32 @@ class _PdfUploadSink:
         self.size = next_size
 
     def abort(self) -> None:
-        if not self.closed:
-            self.stream.close()
-            self.closed = True
-        if not self.uploads_closed:
-            try:
-                os.unlink(self.temp_name, dir_fd=self.uploads_fd)
-            except FileNotFoundError:
-                pass
-            self._close_uploads_directory()
+        try:
+            if not self.closed:
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+                finally:
+                    self.closed = True
+        finally:
+            if not self.uploads_closed:
+                try:
+                    os.unlink(self.temp_name, dir_fd=self.uploads_fd)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    try:
+                        self._close_uploads_directory()
+                    except OSError:
+                        pass
 
     def _close_uploads_directory(self) -> None:
         if not self.uploads_closed:
-            os.close(self.uploads_fd)
-            self.uploads_closed = True
+            try:
+                os.close(self.uploads_fd)
+            finally:
+                self.uploads_closed = True
 
     def finish(self) -> PaperRecord:
         if self.size == 0:
@@ -223,7 +249,6 @@ class _PdfUploadSink:
                 papers_fd = os.open(self.repository.papers_dir, _directory_flags())
                 identity_fd = -1
                 source_fd = -1
-                source_created = False
                 try:
                     identity_fd = _open_child_directory(papers_fd, paper_id)
                     source_fd = _open_child_directory(identity_fd, "source")
@@ -247,7 +272,6 @@ class _PdfUploadSink:
                             follow_symlinks=False,
                         )
                         os.fsync(source_fd)
-                        source_created = True
                     else:
                         with os.fdopen(source_descriptor, "rb") as source_stream:
                             metadata = os.fstat(source_stream.fileno())
@@ -269,21 +293,9 @@ class _PdfUploadSink:
 
                     existing = _read_record_at(identity_fd)
                     if existing is not None:
-                        try:
-                            _validate_record_source(existing, record)
-                        except Exception:
-                            if source_created:
-                                os.unlink("source.pdf", dir_fd=source_fd)
-                                os.fsync(source_fd)
-                            raise
+                        _validate_record_source(existing, record)
                         return existing
-                    try:
-                        _write_record_at(identity_fd, record)
-                    except Exception:
-                        if source_created:
-                            os.unlink("source.pdf", dir_fd=source_fd)
-                            os.fsync(source_fd)
-                        raise
+                    _write_record_at(identity_fd, record)
                     return record
                 finally:
                     if source_fd >= 0:

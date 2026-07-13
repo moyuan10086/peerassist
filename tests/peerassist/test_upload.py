@@ -344,6 +344,54 @@ def test_interrupted_stream_cleans_temp_and_durable_state(tmp_path: Path) -> Non
     _assert_no_partial_upload(tmp_path)
 
 
+def test_uncertain_record_publication_never_removes_published_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PaperRepository(tmp_path)
+    original_write_record = upload._write_record_at
+
+    def publish_then_fail(identity_fd: int, record: PaperRecord) -> None:
+        original_write_record(identity_fd, record)
+        raise OSError("injected directory fsync failure")
+
+    monkeypatch.setattr(upload, "_write_record_at", publish_then_fail)
+    with pytest.raises(UploadInterruptedError, match="fsync failure"):
+        persist_pdf_upload(
+            [PDF],
+            filename="paper.pdf",
+            content_type="application/pdf",
+            repository=repository,
+        )
+
+    paper_id = hashlib.sha256(PDF).hexdigest()
+    source = tmp_path / "papers" / paper_id / "source" / "source.pdf"
+    record = tmp_path / "papers" / paper_id / "paper.json"
+    assert source.read_bytes() == PDF
+    assert PaperRecord.model_validate_json(record.read_text(encoding="utf-8")).paper_id == paper_id
+
+
+def test_fdopen_failure_cleans_transactional_temp_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PaperRepository(tmp_path)
+
+    def fail_fdopen(*args: object, **kwargs: object) -> None:
+        raise OSError("injected fdopen failure")
+
+    monkeypatch.setattr(upload.os, "fdopen", fail_fdopen)
+    with pytest.raises(OSError, match="fdopen failure"):
+        persist_pdf_upload(
+            [PDF],
+            filename="paper.pdf",
+            content_type="application/pdf",
+            repository=repository,
+        )
+
+    assert not list((tmp_path / "papers" / ".uploads").glob("*.tmp"))
+
+
 def test_upload_temporary_directory_symlink_is_rejected(tmp_path: Path) -> None:
     repository = PaperRepository(tmp_path)
     outside = tmp_path / "outside-uploads"
