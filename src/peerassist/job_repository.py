@@ -21,6 +21,7 @@ from schemas.peerassist_jobs import (
     ReviewJobEvent,
     ReviewJobState,
     ReviewStage,
+    StageCheckpoint,
     StageManifest,
 )
 
@@ -122,8 +123,10 @@ class ReviewJobRepository:
         self.data_dir = Path(data_dir or get_settings().data_dir).resolve()
         self.jobs_dir = self.data_dir / "jobs"
         self.locks_dir = self.jobs_dir / ".locks"
+        self.deleted_dir = self.jobs_dir / ".deleted"
         _ensure_repository_directory(self.jobs_dir)
         _ensure_repository_directory(self.locks_dir)
+        _ensure_repository_directory(self.deleted_dir)
 
     def _job_dir(self, job_id: UUID | str) -> Path:
         return self.jobs_dir / str(_job_id(job_id))
@@ -219,18 +222,97 @@ class ReviewJobRepository:
             transform=apply_changes,
         )
 
+    def delete(self, job_id: UUID | str, *, expected_revision: int) -> Path:
+        with exclusive_file_lock(self._lock_path(job_id)):
+            current = self._load_state(job_id)
+            if current.revision != expected_revision:
+                raise RepositoryConflictError(
+                    f"revision conflict: expected {expected_revision}, found {current.revision}"
+                )
+            _ensure_repository_directory(self.deleted_dir)
+            archived = self.deleted_dir / str(current.id)
+            if archived.is_symlink():
+                raise RepositoryCorruptionError("deleted review job path is a symlink")
+            if archived.exists():
+                raise RepositoryConflictError(f"deleted review job already exists: {current.id}")
+            os.rename(self._job_dir(current.id), archived)
+            self._fsync_directory(self.deleted_dir)
+            self._fsync_directory(self.jobs_dir)
+            return archived
+
     def _events_path(self, job_id: UUID | str) -> Path:
         return self._job_dir(job_id) / "events.jsonl"
 
+    @staticmethod
+    def _reject_symlink(path: Path, description: str) -> None:
+        if path.is_symlink():
+            raise RepositoryCorruptionError(f"{description} is a symlink")
+
     def _truncate_events(self, path: Path, size: int) -> None:
-        with path.open("r+b") as stream:
+        self._reject_symlink(path, "review job events file")
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            if path.is_symlink():
+                raise RepositoryCorruptionError("review job events file is a symlink") from exc
+            raise
+        with os.fdopen(descriptor, "r+b") as stream:
             stream.truncate(size)
             stream.flush()
             os.fsync(stream.fileno())
         self._fsync_directory(path.parent)
 
+    def _append_event_row(self, path: Path, event: ReviewJobEvent) -> None:
+        self._reject_symlink(path, "review job events file")
+        row = json.dumps(_json_payload(event), ensure_ascii=True, separators=(",", ":"))
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            if path.is_symlink():
+                raise RepositoryCorruptionError("review job events file is a symlink") from exc
+            raise
+        with os.fdopen(descriptor, "ab") as stream:
+            stream.write(row.encode("ascii") + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        self._fsync_directory(path.parent)
+
+    def _update_last_event_id(self, job_id: UUID | str, event_id: int) -> None:
+        state = self._load_state(job_id)
+        if state.last_event_id == event_id:
+            return
+        updated = state.model_copy(update={"last_event_id": event_id, "updated_at": _utcnow()})
+        write_json_atomic(self._state_path(job_id), _json_payload(updated))
+
+    def _recover_event_tail(
+        self,
+        job_id: UUID | str,
+        path: Path,
+        events: list[ReviewJobEvent],
+        *,
+        valid_size: int,
+        damaged_tail: bytes,
+    ) -> list[ReviewJobEvent]:
+        self._truncate_events(path, valid_size)
+        warning = ReviewJobEvent(
+            job_id=_job_id(job_id),
+            event_id=len(events) + 1,
+            event_type="event_tail_recovered",
+            message="Recovered a damaged events.jsonl tail.",
+            payload={
+                "recovered_bytes": len(damaged_tail),
+                "context": damaged_tail[:256].decode("utf-8", errors="replace"),
+            },
+        )
+        self._append_event_row(path, warning)
+        self._update_last_event_id(job_id, warning.event_id)
+        return [*events, warning]
+
     def _read_events_locked(self, job_id: UUID | str) -> list[ReviewJobEvent]:
         path = self._events_path(job_id)
+        self._reject_symlink(path, "review job events file")
         if not path.exists():
             return []
         content = path.read_bytes()
@@ -241,14 +323,24 @@ class ReviewJobRepository:
         for index, line in enumerate(lines):
             is_tail = index == len(lines) - 1
             if not line.endswith(b"\n"):
-                self._truncate_events(path, valid_size)
-                break
+                return self._recover_event_tail(
+                    job_id,
+                    path,
+                    events,
+                    valid_size=valid_size,
+                    damaged_tail=content[valid_size:],
+                )
             try:
                 event = ReviewJobEvent.model_validate_json(line[:-1])
             except Exception as exc:
                 if is_tail:
-                    self._truncate_events(path, valid_size)
-                    break
+                    return self._recover_event_tail(
+                        job_id,
+                        path,
+                        events,
+                        valid_size=valid_size,
+                        damaged_tail=content[valid_size:],
+                    )
                 raise RepositoryCorruptionError("invalid event before JSONL tail") from exc
             if event.job_id != _job_id(job_id) or event.event_id != expected_id:
                 raise RepositoryCorruptionError("event identity or sequence is invalid")
@@ -285,15 +377,9 @@ class ReviewJobRepository:
             )
             path = self._events_path(job_id)
             path.parent.mkdir(parents=True, exist_ok=True)
-            row = json.dumps(_json_payload(event), ensure_ascii=True, separators=(",", ":"))
-            with path.open("ab") as stream:
-                stream.write(row.encode("ascii") + b"\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            self._fsync_directory(path.parent)
+            self._append_event_row(path, event)
             if state.last_event_id != event.event_id:
-                updated = state.model_copy(update={"last_event_id": event.event_id, "updated_at": _utcnow()})
-                write_json_atomic(self._state_path(job_id), _json_payload(updated))
+                self._update_last_event_id(job_id, event.event_id)
             return event
 
     def replay_events(
@@ -326,6 +412,7 @@ class ReviewJobRepository:
         with exclusive_file_lock(self._lock_path(job_id)):
             state = self._load_state(job_id)
             path = self._claim_path(job_id)
+            self._reject_symlink(path, "worker claim")
             now = _utcnow()
             if path.is_file():
                 existing = WorkerClaim.model_validate(read_json(path))
@@ -345,6 +432,7 @@ class ReviewJobRepository:
         with exclusive_file_lock(self._lock_path(job_id)):
             self._load_state(job_id)
             path = self._claim_path(job_id)
+            self._reject_symlink(path, "worker claim")
             if not path.is_file():
                 return False
             existing = WorkerClaim.model_validate(read_json(path))
@@ -447,6 +535,30 @@ class ReviewJobRepository:
                 raise ManifestValidationError(f"artifact SHA mismatch: {name}")
         return output_dir
 
+    def _validate_stage_checkpoint(
+        self,
+        job_id: UUID | str,
+        manifest: StageManifest,
+    ) -> StageCheckpoint:
+        self._expected_output_dir(job_id, manifest)
+        root = self._job_dir(job_id)
+        relative = PurePosixPath(manifest.checkpoint_path)
+        path = root.joinpath(*relative.parts)
+        self._ensure_owned_path(root, path)
+        try:
+            checkpoint = StageCheckpoint.model_validate(read_json(path))
+        except (OSError, ValueError) as exc:
+            raise ManifestValidationError("checkpoint JSON is invalid") from exc
+        if not checkpoint.committed:
+            raise ManifestValidationError("checkpoint must be committed")
+        if checkpoint.stage != manifest.stage:
+            raise ManifestValidationError("checkpoint stage does not match manifest")
+        if checkpoint.attempt_id != manifest.attempt_id:
+            raise ManifestValidationError("checkpoint attempt does not match manifest")
+        if checkpoint.manifest != manifest:
+            raise ManifestValidationError("checkpoint manifest does not match submitted manifest")
+        return checkpoint
+
     def _write_immutable_manifest(self, path: Path, manifest: StageManifest) -> None:
         payload = json.dumps(
             _json_payload(manifest),
@@ -533,6 +645,7 @@ class ReviewJobRepository:
         validated = StageManifest.model_validate(manifest)
         with exclusive_file_lock(self._lock_path(job_id)):
             state = self._load_state(job_id)
+            self._validate_stage_checkpoint(job_id, validated)
             output_dir = self._validate_manifest_outputs(job_id, validated)
             root = self._job_dir(job_id)
             immutable = (

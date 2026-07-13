@@ -21,7 +21,9 @@ from peerassist.job_repository import (
     PaperRepository,
     RepositoryConflictError,
     RepositoryCorruptionError,
+    RepositoryNotFoundError,
     ReviewJobRepository,
+    WorkerClaim,
 )
 from schemas.peerassist_jobs import (
     ExternalServiceConsent,
@@ -492,6 +494,46 @@ def test_review_job_repository_rejects_symlinked_job_directory(tmp_path: Path) -
     assert not (outside / "job.json").exists()
 
 
+def test_review_job_repository_delete_archives_entire_job_directory(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    job_dir = tmp_path / "jobs" / str(job.id)
+    artifact = job_dir / "attempts" / "attempt-1" / "artifact.bin"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"audit-me")
+    repository.append_event(job.id, "created")
+
+    archived_dir = repository.delete(job.id, expected_revision=0)
+
+    assert archived_dir == tmp_path / "jobs" / ".deleted" / str(job.id)
+    assert not job_dir.exists()
+    assert job.id not in {state.id for state in repository.list()}
+    with pytest.raises(RepositoryNotFoundError):
+        repository.get(job.id)
+    assert (archived_dir / "job.json").is_file()
+    assert (archived_dir / "events.jsonl").is_file()
+    assert (archived_dir / "attempts" / "attempt-1" / "artifact.bin").read_bytes() == b"audit-me"
+
+
+def test_review_job_repository_stale_delete_conflicts_without_archiving(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    artifact = tmp_path / "jobs" / str(job.id) / "run" / "keep.txt"
+    artifact.write_text("keep", encoding="utf-8")
+    updated = repository.update(
+        job.id,
+        expected_revision=0,
+        status=ReviewJobStatus.PARSING,
+    )
+
+    with pytest.raises(RepositoryConflictError, match="revision"):
+        repository.delete(job.id, expected_revision=0)
+
+    assert repository.get(job.id) == updated
+    assert artifact.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "jobs" / ".deleted" / str(job.id)).exists()
+
+
 def test_stale_cas_across_processes_has_one_winner_without_mutation(tmp_path: Path) -> None:
     repository = ReviewJobRepository(tmp_path)
     job = repository.create(_job_contract())
@@ -551,16 +593,40 @@ def test_event_replay_after_last_event_id_and_damaged_tail_recovery(tmp_path: Pa
 
     events_path = tmp_path / "jobs" / str(job.id) / "events.jsonl"
     valid_size = events_path.stat().st_size
+    damaged_tail = b'{"event_id": 4, "event_type": "damaged"'
     with events_path.open("ab") as stream:
-        stream.write(b'{"event_id": 4, "event_type": "damaged"')
+        stream.write(damaged_tail)
         stream.flush()
         os.fsync(stream.fileno())
 
     recovered = repository.replay_events(job.id)
 
-    assert [event.event_id for event in recovered] == [1, 2, 3]
-    assert events_path.stat().st_size == valid_size
-    assert repository.append_event(job.id, "resumed").event_id == 4
+    assert [event.event_id for event in recovered] == [1, 2, 3, 4]
+    warning = recovered[-1]
+    assert warning.event_type == "event_tail_recovered"
+    assert warning.payload["recovered_bytes"] == len(damaged_tail)
+    assert "damaged" in warning.payload["context"]
+    assert events_path.read_bytes()[:valid_size].endswith(b"\n")
+    assert repository.get(job.id).last_event_id == 4
+    assert repository.append_event(job.id, "resumed").event_id == 5
+
+
+def test_events_jsonl_symlink_is_rejected_for_append_and_replay(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    outside = tmp_path / "outside-events.jsonl"
+    outside.write_bytes(b'{"damaged": true')
+    original = outside.read_bytes()
+    events_path = tmp_path / "jobs" / str(job.id) / "events.jsonl"
+    events_path.symlink_to(outside)
+
+    with pytest.raises(RepositoryCorruptionError, match="symlink"):
+        repository.append_event(job.id, "unsafe")
+    with pytest.raises(RepositoryCorruptionError, match="symlink"):
+        repository.replay_events(job.id)
+
+    assert events_path.is_symlink()
+    assert outside.read_bytes() == original
 
 
 def test_worker_claim_is_exclusive_across_processes_and_releasable(tmp_path: Path) -> None:
@@ -596,6 +662,32 @@ def test_worker_claim_is_exclusive_across_processes_and_releasable(tmp_path: Pat
         token=winner["token"],
     )
     assert repository.claim(job.id, owner="worker-3", lease_seconds=30) is not None
+
+
+def test_worker_claim_symlink_is_rejected_for_claim_and_release(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    now = datetime.now(UTC)
+    outside = tmp_path / "outside-worker-claim.json"
+    claim = WorkerClaim(
+        job_id=job.id,
+        owner="worker-1",
+        token="outside-token",
+        acquired_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    write_json_atomic(outside, claim.model_dump(mode="json"))
+    original = outside.read_bytes()
+    claim_path = tmp_path / "jobs" / str(job.id) / "worker_claim.json"
+    claim_path.symlink_to(outside)
+
+    with pytest.raises(RepositoryCorruptionError, match="symlink"):
+        repository.claim(job.id, owner="worker-2", lease_seconds=30)
+    with pytest.raises(RepositoryCorruptionError, match="symlink"):
+        repository.release_claim(job.id, owner=claim.owner, token=claim.token)
+
+    assert claim_path.is_symlink()
+    assert outside.read_bytes() == original
 
 
 def test_expired_worker_claim_can_be_reclaimed(tmp_path: Path) -> None:
@@ -683,12 +775,34 @@ def _write_stage_output(
     return output
 
 
+def _write_stage_checkpoint(
+    data_dir: Path,
+    job_id: object,
+    manifest: StageManifest,
+    **overrides: object,
+) -> Path:
+    values: dict[str, object] = {
+        "stage": manifest.stage,
+        "attempt_id": manifest.attempt_id,
+        "status": ReviewJobStatus.COMPLETED,
+        "committed": True,
+        "committed_at": manifest.committed_at,
+        "manifest": manifest,
+    }
+    values.update(overrides)
+    checkpoint = StageCheckpoint.model_validate(values)
+    path = data_dir / "jobs" / str(job_id) / manifest.checkpoint_path
+    write_json_atomic(path, checkpoint.model_dump(mode="json"))
+    return path
+
+
 def test_commit_stage_manifest_validates_then_materializes_read_only_view(tmp_path: Path) -> None:
     repository = ReviewJobRepository(tmp_path)
     job = repository.create(_job_contract())
     content = b'{"attempt": 1}\n'
     attempt_output = _write_stage_output(tmp_path, job.id, "attempt-1", content)
     manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    _write_stage_checkpoint(tmp_path, job.id, manifest)
 
     committed = repository.commit_stage_outputs(job.id, manifest)
 
@@ -718,6 +832,8 @@ def test_manifest_pointer_failure_preserves_previous_commit_and_attempts(
     second_output = _write_stage_output(tmp_path, job.id, "attempt-2", second_content)
     first_manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=first_content)
     second_manifest = _stage_manifest(job.id, attempt_id="attempt-2", content=second_content)
+    _write_stage_checkpoint(tmp_path, job.id, first_manifest)
+    _write_stage_checkpoint(tmp_path, job.id, second_manifest)
     repository.commit_stage_outputs(job.id, first_manifest)
 
     def fail_before_replace(*args: object, **kwargs: object) -> None:
@@ -744,6 +860,7 @@ def test_manifest_validation_rejects_hash_mismatch_and_symlink_escape(tmp_path: 
     content = b'{"attempt": 1}\n'
     output = _write_stage_output(tmp_path, job.id, "attempt-1", content)
     manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    _write_stage_checkpoint(tmp_path, job.id, manifest)
 
     output.write_bytes(b"tampered")
     with pytest.raises(ManifestValidationError, match=r"size|SHA"):
@@ -779,11 +896,123 @@ def test_manifest_validation_rejects_symlinked_attempt_output_directory(tmp_path
     output_dir.parent.mkdir(parents=True)
     output_dir.symlink_to(outside, target_is_directory=True)
     manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    _write_stage_checkpoint(tmp_path, job.id, manifest)
 
     with pytest.raises(ManifestValidationError, match=r"symlink|escape"):
         repository.commit_stage_outputs(job.id, manifest)
 
     assert repository.current_stage_manifest(job.id, ReviewStage.PARSE) is None
+
+
+def test_manifest_commit_requires_checkpoint_file(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+
+    with pytest.raises(ManifestValidationError, match="checkpoint"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+
+def test_manifest_commit_rejects_invalid_checkpoint_json(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    checkpoint = tmp_path / "jobs" / str(job.id) / manifest.checkpoint_path
+    checkpoint.write_text("{invalid", encoding="utf-8")
+
+    with pytest.raises(ManifestValidationError, match="checkpoint"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+
+def test_manifest_commit_rejects_uncommitted_checkpoint(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    _write_stage_checkpoint(tmp_path, job.id, manifest, committed=False)
+
+    with pytest.raises(ManifestValidationError, match="committed"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("stage", ReviewStage.EVIDENCE),
+        ("attempt_id", "attempt-2"),
+    ],
+)
+def test_manifest_commit_rejects_checkpoint_identity_mismatch(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    checkpoint = StageCheckpoint(
+        stage=manifest.stage,
+        attempt_id=manifest.attempt_id,
+        status=ReviewJobStatus.COMPLETED,
+        committed=True,
+        committed_at=manifest.committed_at,
+        manifest=manifest,
+    ).model_dump(mode="json")
+    checkpoint[field] = value.value if isinstance(value, ReviewStage) else value
+    checkpoint_path = tmp_path / "jobs" / str(job.id) / manifest.checkpoint_path
+    write_json_atomic(checkpoint_path, checkpoint)
+
+    with pytest.raises(ManifestValidationError, match="checkpoint"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+
+def test_manifest_commit_rejects_checkpoint_manifest_mismatch(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    different_manifest = manifest.model_copy(
+        update={"artifacts": {}, "artifact_sha256": {}, "artifact_sizes": {}}
+    )
+    _write_stage_checkpoint(
+        tmp_path,
+        job.id,
+        different_manifest,
+    )
+
+    with pytest.raises(ManifestValidationError, match="manifest"):
+        repository.commit_stage_outputs(job.id, manifest)
+
+
+def test_manifest_commit_rejects_symlinked_checkpoint(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    content = b'{"attempt": 1}\n'
+    _write_stage_output(tmp_path, job.id, "attempt-1", content)
+    manifest = _stage_manifest(job.id, attempt_id="attempt-1", content=content)
+    outside = tmp_path / "outside-checkpoint.json"
+    checkpoint = StageCheckpoint(
+        stage=manifest.stage,
+        attempt_id=manifest.attempt_id,
+        status=ReviewJobStatus.COMPLETED,
+        committed=True,
+        committed_at=manifest.committed_at,
+        manifest=manifest,
+    )
+    write_json_atomic(outside, checkpoint.model_dump(mode="json"))
+    checkpoint_path = tmp_path / "jobs" / str(job.id) / manifest.checkpoint_path
+    checkpoint_path.symlink_to(outside)
+
+    with pytest.raises(ManifestValidationError, match="symlink"):
+        repository.commit_stage_outputs(job.id, manifest)
 
 
 def test_current_manifest_reader_rejects_symlinked_pointer(tmp_path: Path) -> None:
