@@ -789,6 +789,18 @@ input:focus {
   font-size: 15px;
 }
 
+.artifact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.artifact-actions a {
+  flex: 1 1 140px;
+  text-decoration: none;
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;

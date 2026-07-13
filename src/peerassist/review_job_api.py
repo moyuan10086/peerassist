@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 from common.pipeline_context import peerassist_stage_dir, read_json_file
@@ -42,6 +44,16 @@ _CONSENT_RE = re.compile(
 _PAPER_SOURCE_RE = re.compile(r"^/api/papers/(?P<paper>[0-9a-f]{64})/source$")
 _JOB_WORKSPACE_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)/workspace$")
 _JOB_DECISION_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)/decisions$")
+_JOB_ARTIFACTS_RE = re.compile(r"^/api/jobs/(?P<job>[0-9a-f-]+)/artifacts$")
+_JOB_ARTIFACT_RE = re.compile(
+    r"^/api/jobs/(?P<job>[0-9a-f-]+)/artifacts/(?P<artifact>[a-z0-9_]+)$"
+)
+_REPORT_ARTIFACT_NAMES = {
+    "report_en_md",
+    "report_zh_md",
+    "report_en_json",
+    "report_zh_json",
+}
 
 
 class ReviewJobService:
@@ -181,7 +193,94 @@ class ReviewJobService:
         workspace["ready_for_confirmation"] = (
             state.status is ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION
         )
+        workspace["artifacts"] = self.artifact_index(state.id, state=state)
         return state, workspace
+
+    def artifact_index(
+        self, job_id: UUID | str, *, state: ReviewJobState | None = None
+    ) -> dict[str, Any]:
+        current = state or self.repository.get(job_id)
+        manifest_entry = self._report_manifest(current)
+        if manifest_entry is None:
+            return {"ready": False, "items": []}
+        _out_dir, manifest = manifest_entry
+        artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+        hashes = (
+            manifest.get("artifact_sha256")
+            if isinstance(manifest.get("artifact_sha256"), dict)
+            else {}
+        )
+        items: list[dict[str, Any]] = []
+        for name in sorted(_REPORT_ARTIFACT_NAMES):
+            relative_path = str(artifacts.get(name) or "")
+            if not relative_path:
+                continue
+            path = self._report_artifact_path(current, relative_path)
+            media_type = "text/markdown; charset=utf-8" if path.suffix == ".md" else "application/json; charset=utf-8"
+            items.append(
+                {
+                    "name": name,
+                    "filename": path.name,
+                    "media_type": media_type,
+                    "size_bytes": path.stat().st_size,
+                    "sha256": str(hashes.get(name) or ""),
+                    "download_url": f"/api/jobs/{current.id}/artifacts/{name}",
+                }
+            )
+        return {
+            "ready": len(items) == len(_REPORT_ARTIFACT_NAMES),
+            "report_version": str(manifest.get("report_version") or ""),
+            "confirmation_revision": int(manifest.get("confirmation_revision") or 0),
+            "items": items,
+        }
+
+    def artifact_file(self, job_id: UUID | str, name: str) -> tuple[Path, str]:
+        if name not in _REPORT_ARTIFACT_NAMES:
+            raise FileNotFoundError("unknown report artifact")
+        state = self.repository.get(job_id)
+        manifest_entry = self._report_manifest(state)
+        if manifest_entry is None:
+            raise FileNotFoundError("final report is not available")
+        _out_dir, manifest = manifest_entry
+        artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+        hashes = (
+            manifest.get("artifact_sha256")
+            if isinstance(manifest.get("artifact_sha256"), dict)
+            else {}
+        )
+        path = self._report_artifact_path(state, str(artifacts.get(name) or ""))
+        expected_hash = str(hashes.get(name) or "")
+        if expected_hash and hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError("report artifact hash mismatch")
+        media_type = "text/markdown; charset=utf-8" if path.suffix == ".md" else "application/json; charset=utf-8"
+        return path, media_type
+
+    def _report_manifest(self, state: ReviewJobState) -> tuple[Path, dict[str, Any]] | None:
+        out_dir = peerassist_stage_dir(self._run_dir(state))
+        pointer = read_json_file(out_dir / "current_final_report.json")
+        relative_manifest = str(pointer.get("manifest_path") or "")
+        if not relative_manifest:
+            return None
+        reports_root = (out_dir / "reports").resolve(strict=True)
+        manifest_path = (out_dir / relative_manifest).resolve(strict=True)
+        manifest_path.relative_to(reports_root)
+        if manifest_path.name != "manifest.json" or not manifest_path.is_file():
+            raise ValueError("invalid final report manifest")
+        manifest = read_json_file(manifest_path)
+        if str(manifest.get("paper_id") or "") != state.paper_id:
+            raise ValueError("final report paper mismatch")
+        return out_dir, manifest
+
+    def _report_artifact_path(self, state: ReviewJobState, relative_path: str) -> Path:
+        if not relative_path:
+            raise FileNotFoundError("report artifact is missing")
+        out_dir = peerassist_stage_dir(self._run_dir(state))
+        reports_root = (out_dir / "reports").resolve(strict=True)
+        path = (out_dir / relative_path).resolve(strict=True)
+        path.relative_to(reports_root)
+        if not path.is_file():
+            raise FileNotFoundError("report artifact is missing")
+        return path
 
     def apply_decision(
         self, job_id: UUID | str, payload: dict[str, Any]
@@ -263,7 +362,9 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         return self.server.review_service  # type: ignore[attr-defined,no-any-return]
 
     def do_GET(self) -> None:
-        path = self.path.split("?", 1)[0]
+        request_url = urlsplit(self.path)
+        path = request_url.path
+        query = parse_qs(request_url.query)
         if path == "/api/health":
             self._send_json({"status": "ok", "service": "peerassist-review-jobs"})
             return
@@ -290,6 +391,23 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"job": state.model_dump(mode="json"), "state": workspace})
             return
+        artifacts_match = _JOB_ARTIFACTS_RE.match(path)
+        if artifacts_match is not None:
+            try:
+                payload = self.service.artifact_index(artifacts_match.group("job"))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=404)
+                return
+            self._send_json({"artifacts": payload})
+            return
+        artifact_match = _JOB_ARTIFACT_RE.match(path)
+        if artifact_match is not None:
+            self._send_job_artifact(
+                artifact_match.group("job"),
+                artifact_match.group("artifact"),
+                inline=query.get("disposition") == ["inline"],
+            )
+            return
         match = _JOB_RE.match(path)
         if match is None:
             self._send_json({"error": "not_found"}, status=404)
@@ -301,7 +419,19 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         self._send_json({"job": self._job(job_id)})
 
     def do_HEAD(self) -> None:
-        match = _PAPER_SOURCE_RE.match(self.path.split("?", 1)[0])
+        request_url = urlsplit(self.path)
+        path = request_url.path
+        query = parse_qs(request_url.query)
+        artifact_match = _JOB_ARTIFACT_RE.match(path)
+        if artifact_match is not None:
+            self._send_job_artifact(
+                artifact_match.group("job"),
+                artifact_match.group("artifact"),
+                head_only=True,
+                inline=query.get("disposition") == ["inline"],
+            )
+            return
+        match = _PAPER_SOURCE_RE.match(path)
         if match is None:
             self._send_json({"error": "not_found"}, status=404, head_only=True)
             return
@@ -479,6 +609,37 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self.close_connection = True
+
+    def _send_job_artifact(
+        self,
+        job_id: str,
+        artifact_name: str,
+        *,
+        head_only: bool = False,
+        inline: bool = False,
+    ) -> None:
+        try:
+            path, media_type = self.service.artifact_file(job_id, artifact_name)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=404, head_only=head_only)
+            return
+        size = path.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", media_type)
+        disposition = "inline" if inline else "attachment"
+        self.send_header("Content-Disposition", f'{disposition}; filename="{path.name}"')
+        self.send_header("Cache-Control", "private, max-age=3600, immutable")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        if not head_only:
+            with path.open("rb") as source:
+                while True:
+                    chunk = source.read(256 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
         self.close_connection = True
 
     def _send_paper_source(self, paper_id: str, *, head_only: bool = False) -> None:

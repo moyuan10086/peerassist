@@ -260,6 +260,30 @@ def test_job_workspace_applies_confirmation_decisions(tmp_path: Path) -> None:
         assert decision["job"]["confirmation_revision"] == 1
         assert decision["state"]["pending_count"] == 0
         assert decision["state"]["queue"]["items"][0]["status"] == "confirmed"
+
+        status, finalized = _json(
+            f"{base}/api/jobs/{job_id}/finalize",
+            method="POST",
+            payload={"confirmation_revision": 1},
+        )
+        assert status == 200
+        assert finalized["job"]["status"] == "completed"
+
+        _, completed_workspace = _json(f"{base}/api/jobs/{job_id}/workspace")
+        artifacts = completed_workspace["state"]["artifacts"]
+        assert artifacts["ready"] is True
+        assert {item["name"] for item in artifacts["items"]} == {
+            "report_en_md",
+            "report_zh_md",
+            "report_en_json",
+            "report_zh_json",
+        }
+        zh_report = next(item for item in artifacts["items"] if item["name"] == "report_zh_md")
+        with urlopen(f"{base}{zh_report['download_url']}", timeout=5) as response:
+            assert response.headers["Content-Type"].startswith("text/markdown")
+            assert "PeerAssist" in response.read().decode("utf-8")
+        with urlopen(f"{base}{zh_report['download_url']}?disposition=inline", timeout=5) as response:
+            assert response.headers["Content-Disposition"].startswith("inline;")
     finally:
         server.shutdown()
         server.server_close()

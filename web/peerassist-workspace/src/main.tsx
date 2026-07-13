@@ -135,6 +135,22 @@ type ReviewJob = {
   updated_at?: string;
 };
 
+type ReportArtifact = {
+  name: string;
+  filename: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  download_url: string;
+};
+
+type ReportArtifacts = {
+  ready?: boolean;
+  report_version?: string;
+  confirmation_revision?: number;
+  items?: ReportArtifact[];
+};
+
 type ConfirmationState = {
   schema_version?: string;
   runtime?: {
@@ -157,6 +173,7 @@ type ConfirmationState = {
   };
   evidence_preview?: Evidence[];
   paths?: Record<string, string>;
+  artifacts?: ReportArtifacts;
 };
 
 type Bootstrap = {
@@ -445,6 +462,14 @@ function App() {
       if (!response.ok) throw new Error(result.error || "任务操作失败");
       showToast(jobActionLabel(action));
       await refreshJobs();
+      if (action === "finalize" && result.job?.status === "completed") {
+        window.localStorage.setItem("peerassist.activePaperId", job.paper_id);
+        window.localStorage.setItem("peerassist.activeJobId", job.id);
+        setActivePaperId(job.paper_id);
+        setActiveJobId(job.id);
+        await refreshJobWorkspace(job.id);
+        navigate("artifacts", "/artifacts");
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "任务操作失败");
     } finally {
@@ -563,7 +588,7 @@ function App() {
         )}
         {activeWindow === "trace" && <TraceWindow events={events} streamLines={streamLines} />}
         {activeWindow === "confirm" && <ConfirmWindow items={queueItems} busy={busy} onDecision={submitDecision} />}
-        {activeWindow === "artifacts" && <ArtifactsWindow paths={paths} />}
+        {activeWindow === "artifacts" && <ArtifactsWindow paths={paths} reports={state.artifacts} />}
         {toast && <div className="toast">{toast}</div>}
       </main>
     </div>
@@ -1291,17 +1316,33 @@ function ConfirmWindow({
   );
 }
 
-function ArtifactsWindow({ paths }: { paths: Record<string, string> }) {
+function ArtifactsWindow({ paths, reports }: { paths: Record<string, string>; reports?: ReportArtifacts }) {
+  const reportItems = reports?.items || [];
   const entries = Object.entries(paths);
+  const count = reportItems.length || entries.length;
   return (
     <section className="artifact-grid">
       <div className="panel">
         <div className="panel-head">
           <h2>产物导出</h2>
-          <span className="tag">{entries.length} 个产物</span>
+          <span className={`tag ${reports?.ready ? "good" : ""}`}>{count} 个产物</span>
         </div>
         <div className="panel-body artifact-list">
-          {entries.map(([key, value]) => (
+          {reportItems.map((item) => (
+            <div className="artifact-card" key={item.name}>
+              <div className="tag-row">
+                <span className="tag good">{artifactLabel(item.name)}</span>
+                <span className="tag">{formatBytes(item.size_bytes)}</span>
+              </div>
+              <h3>{item.filename}</h3>
+              <code>SHA-256 {item.sha256.slice(0, 20)}...</code>
+              <div className="artifact-actions">
+                <a className="ghost-button" href={`${item.download_url}?disposition=inline`} target="_blank" rel="noreferrer"><ExternalLink size={15} /> 在线查看</a>
+                <a className="primary-button" href={item.download_url} download><Download size={15} /> 下载</a>
+              </div>
+            </div>
+          ))}
+          {!reportItems.length && entries.map(([key, value]) => (
             <div className="artifact-card" key={key}>
               <div className="tag-row">
                 <span className="tag">{artifactLabel(key)}</span>
@@ -1310,6 +1351,7 @@ function ArtifactsWindow({ paths }: { paths: Record<string, string> }) {
               <code>{value}</code>
             </div>
           ))}
+          {!count && <div className="draft-empty">当前任务尚未导出最终报告。</div>}
         </div>
       </div>
       <aside className="panel">
@@ -1317,7 +1359,13 @@ function ArtifactsWindow({ paths }: { paths: Record<string, string> }) {
           <h2>导出说明</h2>
         </div>
         <div className="panel-body">
-          <p className="muted">报告、证据台账、确认队列、工具追踪和原始 PDF 均保留本地路径，便于复现实验与飞书同步。</p>
+          {reports?.ready ? (
+            <div className="timeline">
+              <div><strong>报告版本</strong><p className="muted">{reports.report_version || "--"}</p></div>
+              <div><strong>确认版本</strong><p className="muted">revision {reports.confirmation_revision || 0}</p></div>
+              <div><strong>完整性</strong><p className="muted">下载时按 manifest SHA-256 校验。</p></div>
+            </div>
+          ) : <p className="muted">完成逐条确认后，从后台任务卡导出最终报告。</p>}
         </div>
       </aside>
     </section>
@@ -1476,7 +1524,7 @@ function jobActionLabel(value: string) {
     cancel: "已请求取消任务",
     retry: "任务已重新排队",
     consent: "模型授权已记录",
-    finalize: "最终报告导出已启动",
+    finalize: "最终报告已导出",
   } as Record<string, string>)[value] || "任务状态已更新";
 }
 
@@ -1489,7 +1537,17 @@ function artifactLabel(value: string) {
     capability_invocations: "能力调用",
     tool_trace: "工具追踪",
     source_pdf: "原始 PDF",
+    report_en_md: "英文 Markdown",
+    report_zh_md: "中文 Markdown",
+    report_en_json: "英文结构化报告",
+    report_zh_json: "中文结构化报告",
   } as Record<string, string>)[value] || "产物";
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 createRoot(document.getElementById("root") as HTMLElement).render(
