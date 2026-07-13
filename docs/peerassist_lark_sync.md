@@ -239,4 +239,4 @@ model keys, paper secrets, or reviewer-private material here.
 - Connected real local adapters for validation, PyMuPDF parsing, EvidenceLedger construction, paper profile/claim graph/experiment inventory/review plan, deterministic checks, citation audit, local agents and candidate integration.
 - A generated selectable-text PDF now runs through all local stages, blocks at persisted model consent only after local artifacts are committed, resumes after grant, writes the human confirmation queue, and stops at `awaiting_human_confirmation` without creating a final report.
 - Focused recoverable-runner verification reached 11 passing tests with Ruff clean.
-- Appended Feishu section `六十九、2026-07-14 真实 PDF 本地候选审稿链路跑通`; append-only verification must confirm sections `六十八` and `六十九` remain present.
+- Appended Feishu section `六十九、2026-07-14 真实 PDF 本地候选审稿链路跑通`; revision advanced from `101` to `102`. Append-only verification confirmed sections `六十八` and `六十九` remain present.
