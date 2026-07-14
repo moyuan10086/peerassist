@@ -342,3 +342,23 @@ model keys, paper secrets, or reviewer-private material here.
 - Focused HTTP verification covered stage durations, payload omission, blocked cancellation, terminal cancellation and retry attempts. Browser verification covered the real task timeline, refresh recovery, and a temporary blocked job's cancel/retry lifecycle; the temporary job was archived.
 - The real arXiv ReviewJob is now at `awaiting_human_confirmation` with 20 durable events. Existing agent artifacts still show skeletal/local agent output and remain a P1 quality gap rather than proof of professional multi-agent review quality.
 - Appended Feishu section `七十九、2026-07-14 ReviewJob 持久时间线与取消重试闭环`; revision advanced from `111` to `112`. Append-only keyword verification confirmed sections `七十八` and `七十九` remain intact.
+
+## 2026-07-14 - Section-aware professional agents and token-bounded UI
+
+- Fixed the real local-PDF data boundary that left all 1,108 evidence rows without sections. The evidence builder now recovers title, abstract, numbered sections, limitations, references and appendices while preserving page, line and bbox locators.
+- Reconstructed same-block PDF line fragments and soft hyphenation into complete analysis units. The verified public arXiv paper now yields its complete title, 24 section labels, 8 candidate claims and 3 experiment groups instead of an empty paper profile.
+- Replaced the four-result local agent skeleton with seven professional roles (structure, methodology, experiment, statistics, citation, ethics and reproducibility) plus figure/table, defense and integration roles. Every result records responsibility, evidence count, draft count, review engine and model status.
+- Added one batched OpenAI-compatible enhancement boundary for fast mode. It selects at most 40 evidence blocks and 12,000 evidence-text characters, enforces a 24,000-character cap on the complete serialized context, defaults to 900 output tokens, rejects every concern whose evidence IDs are outside the selected context, and records usage and tool trace when configured.
+- Runtime credentials remain absent from the repository and this document. When no runtime key is configured, the ReviewJob proceeds through an explicit local fallback and the Chinese UI displays `gpt-5.4（未启用）`; no external model request is made.
+- Real ReviewJob `ddec0625-80b8-441b-8cac-7e7216741603` reached `awaiting_human_confirmation` with 20 durable events, 10 completed agent views, 2 evidence-grounded candidate concerns, zero model calls and zero model tokens.
+- The React agent window now uses Chinese names and responsibilities, evidence/finding/model metrics, localized warnings and responsive three/two/one-column layouts. Playwright verified 10 cards at desktop 1440x960 and mobile 390x844 with zero horizontal overflow and zero console errors.
+- Focused verification: 62 backend tests passed, scoped Ruff passed, the Vite production build passed, and both local and public health endpoints returned success.
+- Appended Feishu section `八十、2026-07-14 章节感知专业代理与 token 受控界面`; revision advanced from `112` to `113`. Append-only keyword and outline fetches confirmed both sections `七十九` and `八十` remain intact; no overwrite operation was used.
+
+## 2026-07-14 - Complete model-context budget enforcement
+
+- Release auditing found that limiting selected evidence text alone did not bound the complete serialized request because full profile, claim, experiment and review-plan structures were still included.
+- The fast-mode boundary now separately caps evidence text at 12,000 characters and the complete serialized context at 24,000 characters. Compact grounded summaries and priority-aware tail trimming preserve the most important claims, experiments, checks and traceable evidence first.
+- The real ReviewJob context measured 23,750 serialized characters and retained 6 core claims, 3 experiment groups, 4 deterministic checks and 52 traceable evidence IDs.
+- Focused release verification passed 597 PeerAssist tests, scoped Ruff, the Vite production build and the credential scan.
+- Appended Feishu section `八十一、2026-07-14 模型上下文总预算发布修订`; revision advanced from `113` to `114`. The write used append only and did not overwrite existing sections.

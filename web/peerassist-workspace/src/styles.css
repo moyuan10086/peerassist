@@ -1117,9 +1117,14 @@ input:focus {
 
 .concern-list,
 .event-list,
-.artifact-list,
+.artifact-list {
+  display: grid;
+  gap: 10px;
+}
+
 .agent-list {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1144,6 +1149,91 @@ input:focus {
 .artifact-card h3 {
   margin: 7px 0 6px;
   font-size: 15px;
+}
+
+.agent-card {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+  min-height: 190px;
+}
+
+.agent-card-head {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+}
+
+.agent-card-head h3 {
+  margin: 0 0 4px;
+  color: var(--ink);
+}
+
+.agent-card-head span:not(.agent-state-dot) {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-state-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #d19a2a;
+  box-shadow: 0 0 0 3px rgba(209, 154, 42, 0.13);
+}
+
+.agent-state-dot.good {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.13);
+}
+
+.agent-state-dot.danger {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(163, 58, 58, 0.12);
+}
+
+.agent-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.agent-metrics span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.agent-metrics span + span {
+  border-left: 1px solid var(--line);
+}
+
+.agent-metrics strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-note.warn {
+  color: #8a5a00;
 }
 
 .artifact-actions {
@@ -1591,6 +1681,10 @@ input:focus {
     grid-template-columns: 1fr;
   }
 
+  .agent-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .paper-grid {
     --inspector-width: 330px !important;
     grid-template-columns: minmax(430px, 1fr) var(--inspector-width);
@@ -1652,6 +1746,10 @@ input:focus {
   .workspace {
     min-height: 100vh;
     padding: 8px 8px 72px;
+  }
+
+  .agent-list {
+    grid-template-columns: 1fr;
   }
 
   .workspace-topbar {

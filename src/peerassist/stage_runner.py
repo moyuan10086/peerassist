@@ -188,12 +188,16 @@ def run_fast_integrator(
     ledger: EvidenceLedger,
     checks: list[DeterministicCheck],
     capability_names: list[str],
+    understanding: PaperUnderstandingArtifacts | None = None,
+    citation_audit: Any | None = None,
 ) -> list[AgentReviewResult]:
     return run_peerassist_agents(
         mode=mode,
         ledger=ledger,
         checks=checks,
         capability_names=capability_names,
+        understanding=understanding,
+        citation_audit=citation_audit,
     )
 
 
@@ -341,6 +345,8 @@ def run_peerassist_stage(
                 ledger=ledger,
                 checks=checks,
                 capability_names=capability_names,
+                understanding=profile_artifacts,
+                citation_audit=citation_result.audit,
             )
         ],
         "artifact_ids": ["agent_results"],

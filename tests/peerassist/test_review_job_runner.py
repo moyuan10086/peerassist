@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -103,6 +104,157 @@ def test_review_context_prioritizes_core_claim_evidence_beyond_first_80() -> Non
     assert context["claim_graph"]["claims"][0]["claim_id"] == "claim-core"
     assert "experiment_inventory" in context
     assert "review_plan" in context
+
+
+def test_review_context_merges_pdf_lines_into_bounded_traceable_blocks() -> None:
+    ledger = {
+        "items": [
+            {
+                "id": "P0001-B0001-L001",
+                "type": "text_span",
+                "locator": "page 1, block 1, line 1",
+                "section": "Abstract",
+                "text": "We propose an evidence-grounded frame-",
+                "metadata": {"block_id": "P0001-B0001", "line": 1},
+            },
+            {
+                "id": "P0001-B0001-L002",
+                "type": "text_span",
+                "locator": "page 1, block 1, line 2",
+                "section": "Abstract",
+                "text": "work for peer review.",
+                "metadata": {"block_id": "P0001-B0001", "line": 2},
+            },
+            {
+                "id": "P0001-B0002-L001",
+                "type": "text_span",
+                "locator": "page 1, block 2, line 1",
+                "section": "Results",
+                "text": "The workflow reduces review time by 42%.",
+                "metadata": {"block_id": "P0001-B0002", "line": 1},
+            },
+        ]
+    }
+    context = build_review_context(
+        ledger=ledger,
+        paper_profile={},
+        claim_graph={
+            "claims": [
+                {
+                    "claim_id": "claim-core",
+                    "centrality": 1.0,
+                    "evidence_ids": ["P0001-B0001-L001", "P0001-B0001-L002"],
+                    "support_evidence_ids": ["P0001-B0002-L001"],
+                }
+            ]
+        },
+        experiment_inventory={},
+        review_plan={"core_claim_ids": ["claim-core"], "reading_route": []},
+        deterministic_checks={},
+        max_evidence=2,
+        max_context_chars=500,
+    )
+
+    assert len(context["selected_evidence"]) == 2
+    first = context["selected_evidence"][0]
+    assert first["text"] == "We propose an evidence-grounded framework for peer review."
+    assert first["evidence_ids"] == ["P0001-B0001-L001", "P0001-B0001-L002"]
+    assert context["budget"]["selected_blocks"] == 2
+    assert context["budget"]["selected_chars"] <= 500
+
+
+def test_review_context_enforces_total_serialized_budget_for_large_artifacts() -> None:
+    evidence = [
+        {
+            "id": f"E{index:03d}",
+            "type": "text_span",
+            "locator": f"page {index + 1}",
+            "section": "Results",
+            "text": "A long evidence sentence " * 20,
+        }
+        for index in range(80)
+    ]
+    claims = [
+        {
+            "claim_id": f"claim-{index}",
+            "text": "A verbose central claim " * 20,
+            "claim_type": "empirical",
+            "centrality": 1.0 - index / 100,
+            "evidence_ids": [row["id"] for row in evidence],
+            "support_evidence_ids": [row["id"] for row in evidence],
+            "support_status": "partially_supported",
+        }
+        for index in range(40)
+    ]
+    experiment_fields = {
+        name: {
+            "value": ["A verbose experimental detail " * 20 for _ in range(5)],
+            "evidence_ids": [row["id"] for row in evidence],
+            "provenance": "paper_extraction",
+            "needs_human_review": True,
+        }
+        for name in (
+            "label",
+            "datasets",
+            "sample_sizes",
+            "data_splits",
+            "baselines",
+            "metrics",
+            "random_seeds",
+            "statistics",
+            "ablations",
+            "key_figures",
+            "key_tables",
+        )
+    }
+    context = build_review_context(
+        ledger={"items": evidence},
+        paper_profile={
+            "paper_id": "paper",
+            "title": {"value": "Title", "evidence_ids": ["E000"]},
+            "abstract": {"value": "Very long abstract " * 300, "evidence_ids": ["E000"]},
+        },
+        claim_graph={"claims": claims, "edges": []},
+        experiment_inventory={
+            "experiments": [
+                {
+                    "experiment_id": f"experiment-{index}",
+                    "importance_score": 1.0 - index / 10,
+                    **experiment_fields,
+                }
+                for index in range(8)
+            ]
+        },
+        review_plan={
+            "core_claim_ids": ["claim-0"],
+            "reading_route": [{"rank": 1, "evidence_ids": [row["id"] for row in evidence]}],
+        },
+        deterministic_checks={
+            "checks": [
+                {
+                    "id": f"check-{index}",
+                    "kind": "statistical_consistency",
+                    "status": "lead",
+                    "applicability": "applicable",
+                    "evidence_ids": [row["id"] for row in evidence],
+                    "message": "A verbose deterministic finding " * 30,
+                    "benign_explanations": ["A verbose explanation " * 20 for _ in range(5)],
+                }
+                for index in range(50)
+            ]
+        },
+        max_evidence=40,
+        max_context_chars=12_000,
+        max_serialized_chars=24_000,
+    )
+
+    actual_serialized_chars = len(
+        json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
+    assert actual_serialized_chars <= 24_000
+    assert context["budget"]["serialized_chars"] == actual_serialized_chars
+    assert len(context["claim_graph"]["claims"]) <= 8
+    assert len(context["claim_graph"]["claims"][0]["evidence_ids"]) <= 6
 
 
 def test_review_job_persists_service_denial_degradation_contract() -> None:

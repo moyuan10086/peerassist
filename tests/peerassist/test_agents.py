@@ -18,6 +18,7 @@ from schemas.peerassist import (
     EvidenceItem,
     EvidenceLedger,
     EvidenceType,
+    PaperUnderstandingArtifacts,
 )
 
 
@@ -108,6 +109,34 @@ def _significance_lead_check() -> DeterministicCheck:
     )
 
 
+def _understanding() -> PaperUnderstandingArtifacts:
+    return PaperUnderstandingArtifacts.model_validate(
+        {
+            "profile": {
+                "paper_id": "demo",
+                "title": {
+                    "value": "Evidence-Grounded Review",
+                    "evidence_ids": ["P01-L001"],
+                    "provenance": "reported",
+                },
+                "method_assumptions": {"value": None},
+            },
+            "claim_graph": {"paper_id": "demo", "claims": [], "edges": []},
+            "experiment_inventory": {"paper_id": "demo", "experiments": []},
+            "review_plan": {
+                "paper_id": "demo",
+                "agent_assignments": [
+                    {
+                        "agent_id": "method",
+                        "focus": "method assumptions",
+                        "evidence_ids": ["P01-L001"],
+                    }
+                ],
+            },
+        }
+    )
+
+
 def test_build_agent_input_packet_records_review_scope() -> None:
     packet = build_agent_input_packet(
         agent_id="statistics_agent",
@@ -153,6 +182,89 @@ def test_statistics_agent_reviews_significance_star_leads() -> None:
         "check_significance_star_consistency_001"
     ]
     assert by_agent["figure_table_agent"].drafts == []
+
+
+def test_fast_mode_runs_all_professional_specialists_with_scoped_metadata() -> None:
+    results = run_peerassist_agents(
+        mode="fast",
+        ledger=_ledger(),
+        checks=[],
+        understanding=_understanding(),
+    )
+
+    by_agent = {result.agent_id: result for result in results}
+    for agent_id in (
+        "structure_agent",
+        "methodology_agent",
+        "experiment_agent",
+        "statistics_agent",
+        "citation_agent",
+        "ethics_agent",
+        "reproducibility_agent",
+    ):
+        assert by_agent[agent_id].status is AgentRunStatus.COMPLETED
+        assert by_agent[agent_id].metadata["responsibility"]
+        assert by_agent[agent_id].metadata["evidence_count"] >= 0
+
+
+def test_methodology_gap_is_grounded_in_assigned_evidence() -> None:
+    results = run_peerassist_agents(
+        mode="fast",
+        ledger=_ledger(),
+        checks=[],
+        understanding=_understanding(),
+    )
+
+    methodology = next(result for result in results if result.agent_id == "methodology_agent")
+    assert methodology.drafts
+    assert methodology.drafts[0].category == "methodology"
+    assert methodology.drafts[0].evidence_ids == ["P01-L001"]
+
+
+def test_model_enhancement_rejects_concerns_with_unselected_evidence() -> None:
+    def enhance(_context: dict) -> dict:
+        return {
+            "concerns": [
+                {
+                    "agent_id": "structure_agent",
+                    "level": "major_concern",
+                    "category": "structure",
+                    "title": "Grounded finding",
+                    "evidence_ids": ["P01-L001"],
+                    "impact": "The central argument may be hard to evaluate.",
+                    "benign_explanation": "The framing may be distributed across sections.",
+                    "author_action": "State the central question explicitly.",
+                },
+                {
+                    "agent_id": "methodology_agent",
+                    "level": "major_concern",
+                    "category": "methodology",
+                    "title": "Ungrounded finding",
+                    "evidence_ids": ["NOT-IN-CONTEXT"],
+                    "impact": "Unsupported.",
+                    "benign_explanation": "None.",
+                    "author_action": "Do something.",
+                },
+            ],
+            "usage": {"input_tokens": 120, "output_tokens": 40, "total_tokens": 160},
+        }
+
+    results = run_peerassist_agents(
+        mode="fast",
+        ledger=_ledger(),
+        checks=[],
+        understanding=_understanding(),
+        model_enhancer=enhance,
+    )
+
+    by_agent = {result.agent_id: result for result in results}
+    assert any(draft.title == "Grounded finding" for draft in by_agent["structure_agent"].drafts)
+    assert not any(
+        draft.title == "Ungrounded finding"
+        for result in results
+        for draft in result.drafts
+    )
+    assert by_agent["structure_agent"].metadata["model_usage"]["total_tokens"] == 160
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])

@@ -120,8 +120,18 @@ type AgentRun = {
   agent_id?: string;
   status?: string;
   draft_count?: number;
+  warning_count?: number;
   warnings?: string[];
   drafts?: Concern[];
+  metadata?: {
+    responsibility?: string;
+    evidence_count?: number;
+    review_engine?: string;
+    model_status?: string;
+    model_configured?: boolean;
+    model_usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+    model_context_budget?: { selected_blocks?: number; selected_chars?: number; max_blocks?: number; max_chars?: number };
+  };
 };
 
 type ReviewJob = {
@@ -339,6 +349,10 @@ function App() {
   const events = state.tool_trace?.events || [];
   const agentRuns = state.agent_runs || [];
   const paths = state.paths || {};
+  const modelEnabled = bootstrap.model_config.api_key_configured === "true";
+  const modelDisplay = bootstrap.model_config.model
+    ? `${bootstrap.model_config.model}${modelEnabled ? "" : "（未启用）"}`
+    : "模型未配置";
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -615,7 +629,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span>{bootstrap.model_config.model || "模型未配置"}</span>
+          <span>{modelDisplay}</span>
           <span>证据约束 · 人工确认</span>
         </div>
       </aside>
@@ -636,7 +650,7 @@ function App() {
           </div>
         </header>
 
-        {activeWindow !== "paper" && <StatusStrip state={state} model={bootstrap.model_config.model || ""} />}
+        {activeWindow !== "paper" && <StatusStrip state={state} model={modelDisplay} />}
 
         {activeWindow === "paper" && (
           <PaperWindow
@@ -654,7 +668,8 @@ function App() {
         {activeWindow === "agent" && (
           <AgentWindow
             busy={busy}
-            model={bootstrap.model_config.model || ""}
+            model={modelDisplay}
+            modelEnabled={modelEnabled}
             baseUrl={bootstrap.model_config.base_url || ""}
             agentRuns={agentRuns}
             streamLines={streamLines}
@@ -1328,6 +1343,7 @@ function PdfPageView({
 function AgentWindow({
   busy,
   model,
+  modelEnabled,
   baseUrl,
   agentRuns,
   streamLines,
@@ -1340,6 +1356,7 @@ function AgentWindow({
 }: {
   busy: boolean;
   model: string;
+  modelEnabled: boolean;
   baseUrl: string;
   agentRuns: AgentRun[];
   streamLines: string[];
@@ -1416,8 +1433,8 @@ function AgentWindow({
               </button>
             ))}
           </div>
-          <button className="primary-button wide" type="button" disabled={busy} onClick={() => onRunReview("", mode)}>
-            {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} 开始全篇智能审稿
+          <button className="primary-button wide" type="button" disabled={busy || !modelEnabled} onClick={() => onRunReview("", mode)}>
+            {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} {modelEnabled ? "开始全篇智能审稿" : "模型未启用"}
           </button>
           <div className="model-box">
             <code>{baseUrl || "未配置 Base URL"}</code>
@@ -1453,14 +1470,29 @@ function AgentWindow({
         <div className="panel-body agent-list">
           {agentRuns.map((run) => (
             <div className="agent-card" key={run.agent_id}>
-              <div className="tag-row">
-                <span className="tag">{run.status || "unknown"}</span>
-                <span className="tag">{run.draft_count || 0} 条草稿</span>
+              <div className="agent-card-head">
+                <span className={`agent-state-dot ${run.status === "completed" ? "good" : run.status === "failed" ? "danger" : "warn"}`} />
+                <div>
+                  <h3>{labelAgent(run.agent_id || "")}</h3>
+                  <span>{run.metadata?.responsibility || agentResponsibility(run.agent_id || "")}</span>
+                </div>
               </div>
-              <h3>{run.agent_id || "未命名代理"}</h3>
-              <p className="muted">{(run.warnings || []).join("；") || "暂无警告。"}</p>
+              <div className="agent-metrics">
+                <span><strong>{run.metadata?.evidence_count || 0}</strong> 条证据</span>
+                <span><strong>{run.draft_count || 0}</strong> 个发现</span>
+                <span><strong>{labelModelStatus(run.metadata?.model_status || "not_requested")}</strong> 推理</span>
+              </div>
+              <div className="tag-row">
+                <span className={`tag ${run.status === "completed" ? "good" : "warn"}`}>{labelAgentStatus(run.status || "")}</span>
+                <span className="tag">{labelReviewEngine(run.metadata?.review_engine || "local_evidence_rules")}</span>
+                {Boolean(run.metadata?.model_usage?.total_tokens) && <span className="tag">{run.metadata?.model_usage?.total_tokens} tokens</span>}
+              </div>
+              <p className={`agent-note ${(run.warnings || []).length ? "warn" : ""}`}>
+                {(run.warnings || []).map(labelAgentWarning).join("；") || (run.draft_count ? "候选问题已进入人工确认队列。" : "本轮证据范围内未生成候选问题。")}
+              </p>
             </div>
           ))}
+          {!agentRuns.length && <div className="draft-empty">代理将在论文画像、确定性核查和引用核查完成后运行。</div>}
         </div>
       </div>
     </section>
@@ -1985,6 +2017,65 @@ function labelCategory(value: string) {
     reproducibility: "复现",
     manual_annotation: "人工批注",
   } as Record<string, string>)[value] || value || "其他";
+}
+
+function labelAgent(value: string) {
+  return ({
+    structure_agent: "结构与论证代理",
+    methodology_agent: "方法学代理",
+    experiment_agent: "实验设计代理",
+    statistics_agent: "统计核查代理",
+    citation_agent: "引用核查代理",
+    ethics_agent: "伦理与风险代理",
+    reproducibility_agent: "可复现性代理",
+    figure_table_agent: "图表核查代理",
+    defense_agent: "反方解释代理",
+    integrator_agent: "意见整合代理",
+    novelty_agent: "创新性代理",
+  } as Record<string, string>)[value] || value || "未命名代理";
+}
+
+function agentResponsibility(value: string) {
+  return ({
+    structure_agent: "研究问题、贡献、论证结构与结论边界",
+    methodology_agent: "方法假设、适用条件与核心主张支撑",
+    experiment_agent: "数据、基线、指标、消融与实验覆盖",
+    statistics_agent: "样本量、不确定性、显著性与效应报告",
+    citation_agent: "引用链接、文献字段与正文主张支持关系",
+    ethics_agent: "数据来源、隐私、安全、偏差与伦理披露",
+    reproducibility_agent: "代码、配置、随机性、依赖与复现实验条件",
+    figure_table_agent: "图表标签、正文引用与数值一致性",
+    defense_agent: "为候选问题寻找合理的善意解释",
+    integrator_agent: "合并重复发现并保留代理来源",
+  } as Record<string, string>)[value] || "等待专业审稿范围信息";
+}
+
+function labelAgentStatus(value: string) {
+  return ({ completed: "已完成", incomplete: "需人工补充", failed: "运行失败" } as Record<string, string>)[value] || value || "等待运行";
+}
+
+function labelAgentWarning(value: string) {
+  return ({
+    "No figure/table deterministic leads found.": "未发现需要升级的图表确定性线索。",
+    "No deterministic leads to pressure-test.": "没有需要反方压力测试的确定性线索。",
+  } as Record<string, string>)[value] || value;
+}
+
+function labelModelStatus(value: string) {
+  return ({
+    completed: "模型增强",
+    unavailable: "本地",
+    failed: "降级",
+    not_requested: "本地",
+  } as Record<string, string>)[value] || "本地";
+}
+
+function labelReviewEngine(value: string) {
+  return ({
+    local_evidence_rules: "证据规则",
+    local_rules_plus_batched_model: "规则 + 模型批审",
+    batched_model_review: "模型批审",
+  } as Record<string, string>)[value] || value;
 }
 
 function labelStatus(value: string) {

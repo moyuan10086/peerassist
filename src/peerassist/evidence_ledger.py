@@ -21,6 +21,16 @@ TABLE_CAPTION_RE = re.compile(
 )
 REFERENCE_SECTION_RE = re.compile(r"^(?:references|bibliography|参考文献)$", re.I)
 NUMBERED_REFERENCE_RE = re.compile(r"^\[\s*(?P<num>\d+)\s*\]\s+")
+NUMBERED_SECTION_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*|[A-Z])\s*\n\s*(?P<title>[^\n]+(?:\n[^\n]+){0,2})\s*$"
+)
+KNOWN_SECTION_RE = re.compile(
+    r"^(?:abstract|introduction|background|related work|methods?|methodology|approach|"
+    r"experimental setup|experiments?(?: and results)?|evaluation|results?|discussion|"
+    r"conclusions?|limitations?|future work|references|bibliography|appendix|"
+    r"acknowledg(?:e)?ments?|ethics statement|reproducibility statement|data availability)$",
+    re.I,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -116,6 +126,22 @@ def _iter_content_records(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _inferred_section_heading(record: dict[str, Any]) -> str | None:
+    text = str(record.get("text") or "").strip()
+    if not text or len(text) > 140:
+        return None
+    compact = " ".join(text.split())
+    if KNOWN_SECTION_RE.fullmatch(compact):
+        return compact
+    numbered = NUMBERED_SECTION_RE.fullmatch(text)
+    if numbered is None:
+        return None
+    title = " ".join(numbered.group("title").split())
+    if not title or len(title) > 100 or not re.search(r"[A-Za-z\u4e00-\u9fff]", title):
+        return None
+    return title
+
+
 def _items_from_content_list(content_list_path: Path | None, *, warnings: list[str]) -> list[EvidenceItem]:
     payload = _read_json(content_list_path)
     if payload is None:
@@ -125,11 +151,18 @@ def _items_from_content_list(content_list_path: Path | None, *, warnings: list[s
 
     items: list[EvidenceItem] = []
     table_counter = 0
+    current_section = "Title"
     for record in _iter_content_records(payload):
         record_type = str(record.get("type") or record.get("category") or "").lower()
         if record_type == "text" and isinstance(record.get("lines"), list):
             page = int(record.get("page") or 0) or None
             block_id = str(record.get("block_id") or f"P{page or 0:04d}-B0000")
+            explicit_section = str(record.get("section") or "").strip()
+            inferred_heading = None if explicit_section else _inferred_section_heading(record)
+            if explicit_section:
+                current_section = explicit_section
+            elif inferred_heading:
+                current_section = inferred_heading
             for line_index, line in enumerate(record["lines"], start=1):
                 if not isinstance(line, dict):
                     continue
@@ -145,21 +178,33 @@ def _items_from_content_list(content_list_path: Path | None, *, warnings: list[s
                 locator = str(line.get("locator") or "").strip() or (
                     f"page {page or 0}, block {block_id}, line {line_index}"
                 )
+                item_type = (
+                    EvidenceType.SECTION
+                    if inferred_heading
+                    else _line_item_type(text, current_section=current_section)
+                )
+                metadata: dict[str, Any] = {
+                    "block_id": block_id,
+                    "line": line_index,
+                    "structured_locator": True,
+                }
+                if inferred_heading:
+                    metadata["inferred_section_heading"] = True
+                if item_type is EvidenceType.REFERENCE:
+                    reference_match = NUMBERED_REFERENCE_RE.search(text)
+                    if reference_match:
+                        metadata["reference_number"] = reference_match.group("num")
                 items.append(
                     EvidenceItem(
                         id=f"{block_id}-L{line_index:03d}",
-                        type=EvidenceType.TEXT_SPAN,
+                        type=item_type,
                         page=page,
-                        section=str(record.get("section") or ""),
+                        section=current_section,
                         locator=locator,
                         text=text,
                         bbox=bbox,
                         source_path=str(content_list_path),
-                        metadata={
-                            "block_id": block_id,
-                            "line": line_index,
-                            "structured_locator": True,
-                        },
+                        metadata=metadata,
                     )
                 )
             continue

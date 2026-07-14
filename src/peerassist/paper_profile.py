@@ -59,12 +59,100 @@ def _sentences(text: str) -> list[str]:
     return [sentence.strip() for sentence in SENTENCE_RE.split(text) if sentence.strip()]
 
 
+def _source_evidence_ids(item: EvidenceItem) -> list[str]:
+    values = item.metadata.get("source_evidence_ids")
+    if isinstance(values, list):
+        identifiers = [str(value) for value in values if str(value).strip()]
+        if identifiers:
+            return identifiers
+    return [item.id]
+
+
+def _evidence_ids(items: list[EvidenceItem]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            evidence_id
+            for item in items
+            for evidence_id in _source_evidence_ids(item)
+        )
+    )
+
+
+def _join_pdf_lines(items: list[EvidenceItem]) -> str:
+    text = ""
+    for item in items:
+        part = item.text.strip()
+        if not part:
+            continue
+        if text.endswith("-") and part[:1].islower():
+            text = text[:-1] + part
+        else:
+            text = f"{text} {part}".strip()
+    return text
+
+
+def _analysis_items(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    grouped: dict[tuple[str, str], list[EvidenceItem]] = {}
+    order: list[tuple[str, str]] = []
+    ungrouped_counter = 0
+    for item in items:
+        block_id = str(item.metadata.get("block_id") or "").strip()
+        if block_id:
+            key = (block_id, item.section)
+        else:
+            ungrouped_counter += 1
+            key = (f"__item_{ungrouped_counter}", item.section)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(item)
+
+    result: list[EvidenceItem] = []
+    for key in order:
+        block_items = grouped[key]
+        if len(block_items) == 1 or not str(block_items[0].metadata.get("block_id") or ""):
+            result.extend(block_items)
+            continue
+        first = block_items[0]
+        item_type = next(
+            (item.type for item in block_items if item.type is not EvidenceType.TEXT_SPAN),
+            EvidenceType.TEXT_SPAN,
+        )
+        bbox_values = [item.bbox for item in block_items if item.bbox and len(item.bbox) == 4]
+        bbox = None
+        if bbox_values:
+            bbox = [
+                min(value[0] for value in bbox_values),
+                min(value[1] for value in bbox_values),
+                max(value[2] for value in bbox_values),
+                max(value[3] for value in bbox_values),
+            ]
+        result.append(
+            EvidenceItem(
+                id=first.id,
+                type=item_type,
+                page=first.page,
+                section=first.section,
+                locator=first.locator,
+                text=_join_pdf_lines(block_items),
+                bbox=bbox,
+                source_path=first.source_path,
+                metadata={
+                    **first.metadata,
+                    "source_evidence_ids": [item.id for item in block_items],
+                    "analysis_unit": "pdf_block",
+                },
+            )
+        )
+    return result
+
+
 def _reported(value: object, evidence: list[EvidenceItem]) -> GroundedField:
     if value in (None, "", [], {}):
         return GroundedField(value=value)
     return GroundedField(
         value=value,
-        evidence_ids=[item.id for item in evidence],
+        evidence_ids=_evidence_ids(evidence),
         provenance=ProvenanceKind.REPORTED,
     )
 
@@ -74,14 +162,14 @@ def _inferred(value: object, evidence: list[EvidenceItem]) -> GroundedField:
         return GroundedField(value=value)
     return GroundedField(
         value=value,
-        evidence_ids=[item.id for item in evidence],
+        evidence_ids=_evidence_ids(evidence),
         provenance=ProvenanceKind.INFERRED,
     )
 
 
 def _section_groups(ledger: EvidenceLedger) -> dict[str, list[EvidenceItem]]:
     groups: dict[str, list[EvidenceItem]] = defaultdict(list)
-    for item in ledger.items:
+    for item in _analysis_items(ledger.items):
         groups[_normalized_section(item.section)].append(item)
     return dict(groups)
 
@@ -422,8 +510,8 @@ def _extract_claim_graph(
                 text=sentence,
                 claim_type=_claim_type(sentence),
                 centrality=_claim_centrality(item, sentence),
-                evidence_ids=[item.id],
-                support_evidence_ids=[support.id for support in supporting],
+                evidence_ids=_source_evidence_ids(item),
+                support_evidence_ids=_evidence_ids(supporting),
                 support_status=status,
                 conclusion_boundaries=profile.conclusion_boundaries.model_copy(deep=True),
                 benign_explanations=_inferred(
@@ -443,7 +531,7 @@ def _extract_claim_graph(
                     relation=(
                         "conflicts_with" if support.id in conflicting_ids else "supported_by"
                     ),
-                    evidence_ids=[support.id, item.id],
+                    evidence_ids=_evidence_ids([support, item]),
                 )
                 for support in supporting
             )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from common.pipeline_context import peerassist_stage_dir, write_json_file
@@ -14,10 +15,18 @@ from peerassist.deterministic_checks import run_deterministic_checks
 from peerassist.evidence_ledger import build_evidence_ledger
 from peerassist.job_repository import PaperRepository, ReviewJobRepository
 from peerassist.local_pdf_parser import LocalParseStatus, parse_pdf_locally
+from peerassist.model_review import resolve_model_review_config, run_batched_model_review
 from peerassist.paper_profile import build_paper_understanding
 from peerassist.tool_trace import ToolTraceRecorder
 from schemas.citation import CitationAudit
-from schemas.peerassist import AgentReviewResult, Concern, DeterministicCheck, EvidenceLedger
+from schemas.peerassist import (
+    AgentReviewResult,
+    Concern,
+    DeterministicCheck,
+    EvidenceLedger,
+    PaperUnderstandingArtifacts,
+    ToolTraceStatus,
+)
 from schemas.peerassist_jobs import ReviewJobState, ReviewStage
 
 
@@ -94,14 +103,105 @@ def build_local_stage_adapters(repository: ReviewJobRepository) -> dict[ReviewSt
 
     def agents(state: ReviewJobState) -> dict[str, Any]:
         ledger = EvidenceLedger.model_validate(_result(repository, state, ReviewStage.EVIDENCE))
+        understanding = PaperUnderstandingArtifacts.model_validate(
+            _result(repository, state, ReviewStage.PROFILE)
+        )
         checks = [
             DeterministicCheck.model_validate(row)
             for row in _result(repository, state, ReviewStage.DETERMINISTIC).get("checks", [])
         ]
-        results = run_peerassist_agents(mode=state.mode, ledger=ledger, checks=checks)
+        citation_audit = CitationAudit.model_validate(
+            _result(repository, state, ReviewStage.CITATION)["audit"]
+        )
+        config = resolve_model_review_config()
+        trace = ToolTraceRecorder(
+            peerassist_stage_dir(repository.data_dir / state.run_dir) / "tool_trace.jsonl"
+        )
+        model_metadata: dict[str, Any] = {
+            "configured": config is not None,
+            "status": "unavailable" if config is None else "pending",
+            "prompt_version": "peerassist.professional_agents.v1",
+            "max_output_tokens": config.max_tokens if config else 0,
+        }
+
+        def enhance(context: dict[str, Any]) -> dict[str, Any]:
+            if config is None:
+                return {"concerns": [], "usage": {}}
+            call_id = f"professional_agent_model_{state.attempt_id}"
+            evidence_ids = [str(value) for value in context.get("selected_evidence_ids", [])]
+            started = monotonic()
+            trace.record(
+                task_id=str(state.id),
+                call_id=call_id,
+                agent_id="professional_agent_batch",
+                source="openai_compatible",
+                tool="chat_completions",
+                status=ToolTraceStatus.STARTED,
+                input_summary=(
+                    f"model={config.model}; blocks={context.get('budget', {}).get('selected_blocks', 0)}; "
+                    f"max_output_tokens={config.max_tokens}"
+                ),
+                evidence_ids=evidence_ids,
+            )
+            try:
+                payload = run_batched_model_review(context, config)
+            except Exception as exc:
+                trace.record(
+                    task_id=str(state.id),
+                    call_id=call_id,
+                    agent_id="professional_agent_batch",
+                    source="openai_compatible",
+                    tool="chat_completions",
+                    status=ToolTraceStatus.FAILED,
+                    output_summary=type(exc).__name__,
+                    duration_ms=max(0, int((monotonic() - started) * 1000)),
+                    error_code="model_review_failed",
+                    evidence_ids=evidence_ids,
+                )
+                model_metadata["status"] = "failed"
+                model_metadata["error_code"] = "model_review_failed"
+                raise
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            trace.record(
+                task_id=str(state.id),
+                call_id=call_id,
+                agent_id="professional_agent_batch",
+                source="openai_compatible",
+                tool="chat_completions",
+                status=ToolTraceStatus.COMPLETED,
+                output_summary=(
+                    f"concerns={len(payload.get('concerns') or [])}; "
+                    f"tokens={int(usage.get('total_tokens') or 0)}"
+                ),
+                duration_ms=max(0, int((monotonic() - started) * 1000)),
+                evidence_ids=evidence_ids,
+            )
+            model_metadata.update(
+                {
+                    "status": "completed",
+                    "model": config.model,
+                    "usage": usage,
+                }
+            )
+            return payload
+
+        results = run_peerassist_agents(
+            mode=state.mode,
+            ledger=ledger,
+            checks=checks,
+            understanding=understanding,
+            model_enhancer=enhance if config is not None else None,
+            citation_audit=citation_audit,
+        )
+        if config is None:
+            for result in results:
+                if result.agent_id.endswith("_agent") and "responsibility" in result.metadata:
+                    result.metadata["model_status"] = "unavailable"
+                    result.metadata["model_configured"] = False
         return {
             "schema_version": "peerassist.agent_results.v1",
             "results": [result.model_dump(mode="json") for result in results],
+            "model_enhancement": model_metadata,
         }
 
     def integrate(state: ReviewJobState) -> dict[str, Any]:

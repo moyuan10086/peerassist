@@ -164,6 +164,60 @@ def test_profile_fields_are_evidence_bound_or_marked_for_human_review(tmp_path: 
             assert field.evidence_ids or field.needs_human_review
 
 
+def test_profile_reconstructs_local_pdf_blocks_without_losing_line_evidence(tmp_path: Path) -> None:
+    ledger = EvidenceLedger(
+        paper_id="paper-local-lines",
+        source_sha256="1" * 64,
+        items=[
+            EvidenceItem(
+                id="P0001-B0001-L001",
+                type=EvidenceType.TEXT_SPAN,
+                page=1,
+                section="Title",
+                locator="page 1, block 1, line 1",
+                text="Stop Guessing When to Stop Testing:",
+                metadata={"block_id": "P0001-B0001", "line": 1},
+            ),
+            EvidenceItem(
+                id="P0001-B0001-L002",
+                type=EvidenceType.TEXT_SPAN,
+                page=1,
+                section="Title",
+                locator="page 1, block 1, line 2",
+                text="Efficient Model Evaluation with Just Enough Data",
+                metadata={"block_id": "P0001-B0001", "line": 2},
+            ),
+            EvidenceItem(
+                id="P0001-B0002-L001",
+                type=EvidenceType.TEXT_SPAN,
+                page=1,
+                section="Abstract",
+                locator="page 1, block 2, line 1",
+                text="We propose an adaptive evaluation frame-",
+                metadata={"block_id": "P0001-B0002", "line": 1},
+            ),
+            EvidenceItem(
+                id="P0001-B0002-L002",
+                type=EvidenceType.TEXT_SPAN,
+                page=1,
+                section="Abstract",
+                locator="page 1, block 2, line 2",
+                text="work that reduces evaluation cost by 80%.",
+                metadata={"block_id": "P0001-B0002", "line": 2},
+            ),
+        ],
+    )
+
+    artifacts = build_paper_understanding(ledger, tmp_path)
+
+    assert artifacts.profile.title.value == (
+        "Stop Guessing When to Stop Testing: Efficient Model Evaluation with Just Enough Data"
+    )
+    claim = artifacts.claim_graph.claims[0]
+    assert claim.text == "We propose an adaptive evaluation framework that reduces evaluation cost by 80%."
+    assert claim.evidence_ids == ["P0001-B0002-L001", "P0001-B0002-L002"]
+
+
 def test_missing_sections_do_not_invent_profile_or_experiment_content(tmp_path: Path) -> None:
     ledger = EvidenceLedger(
         paper_id="paper-empty",
