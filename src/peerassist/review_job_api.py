@@ -34,6 +34,7 @@ from peerassist.upload import (
     UploadValidationError,
     persist_multipart_upload,
 )
+from schemas.citation import CitationAudit
 from schemas.peerassist import Concern, HumanConfirmationAction
 from schemas.peerassist_jobs import ReviewJobState, ReviewJobStatus, ReviewStage
 
@@ -193,8 +194,168 @@ class ReviewJobService:
         workspace["ready_for_confirmation"] = (
             state.status is ReviewJobStatus.AWAITING_HUMAN_CONFIRMATION
         )
+        workspace["citation_audit"] = self._citation_summary(
+            state,
+            out_dir=out_dir,
+            evidence_by_id=evidence_by_id,
+            queue_items=queue.get("items", []),
+        )
         workspace["artifacts"] = self.artifact_index(state.id, state=state)
         return state, workspace
+
+    def _citation_summary(
+        self,
+        state: ReviewJobState,
+        *,
+        out_dir: Path,
+        evidence_by_id: dict[str, dict[str, Any]],
+        queue_items: list[Any],
+    ) -> dict[str, Any]:
+        payload = read_json_file(out_dir / "citation_audit.json")
+        if not payload:
+            stage_payload = self._stage_result(state, ReviewStage.CITATION)
+            payload = stage_payload.get("audit") if isinstance(stage_payload.get("audit"), dict) else {}
+        if not payload:
+            return {"available": False, "records": [], "links": [], "warnings": []}
+        audit = CitationAudit.model_validate(payload)
+        records_by_id = {record.id: record for record in audit.records}
+        verifications_by_record: dict[str, list[Any]] = {}
+        for verification in audit.verifications:
+            verifications_by_record.setdefault(verification.reference_record_id, []).append(
+                verification
+            )
+        findings_by_link: dict[str, list[Any]] = {}
+        for finding in audit.findings:
+            for link_id in finding.citation_link_ids:
+                findings_by_link.setdefault(link_id, []).append(finding)
+        concerns_by_finding: dict[str, dict[str, Any]] = {}
+        for item in queue_items:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            finding_ids = (
+                metadata.get("citation_finding_ids")
+                if isinstance(metadata.get("citation_finding_ids"), list)
+                else []
+            )
+            for finding_id in finding_ids:
+                concerns_by_finding[str(finding_id)] = item
+
+        def evidence_view(evidence_id: str) -> dict[str, Any]:
+            row = evidence_by_id.get(evidence_id, {})
+            return {
+                "id": evidence_id,
+                "page": row.get("page"),
+                "locator": str(row.get("locator") or evidence_id),
+                "text": str(row.get("text") or ""),
+                "bbox": row.get("bbox"),
+            }
+
+        def verification_view(reference_id: str) -> dict[str, Any] | None:
+            rows = sorted(
+                verifications_by_record.get(reference_id, []),
+                key=lambda item: (item.attempt_number, item.checked_at),
+            )
+            if not rows:
+                return None
+            verification = rows[-1]
+            return {
+                "id": verification.id,
+                "source": verification.source,
+                "status": verification.status.value,
+                "adapter": {
+                    "name": verification.adapter.name,
+                    "version": verification.adapter.version,
+                },
+                "checked_at": verification.checked_at,
+                "attempt_number": verification.attempt_number,
+                "source_url": verification.source_record.url if verification.source_record else "",
+                "observed_metadata": dict(verification.observed_metadata),
+                "field_differences": [
+                    difference.model_dump(mode="json")
+                    for difference in verification.field_differences
+                ],
+                "error_code": verification.error_code,
+            }
+
+        records = [
+            {
+                "id": record.id,
+                "reference_number": record.reference_number,
+                "raw_text": record.raw_text,
+                "title": record.title,
+                "doi": record.doi,
+                "year": record.year,
+                "parse_confidence": record.parse_confidence,
+                "evidence": [evidence_view(item) for item in record.source_evidence_ids],
+                "verification": verification_view(record.id),
+            }
+            for record in audit.records
+        ]
+        links: list[dict[str, Any]] = []
+        for link in audit.links:
+            findings = findings_by_link.get(link.id, [])
+            linked_concern = next(
+                (
+                    concerns_by_finding.get(finding.id)
+                    for finding in findings
+                    if concerns_by_finding.get(finding.id) is not None
+                ),
+                None,
+            )
+            references = [
+                records_by_id[record_id]
+                for record_id in link.reference_record_ids
+                if record_id in records_by_id
+            ]
+            links.append(
+                {
+                    "id": link.id,
+                    "reference_number": link.reference_number,
+                    "status": link.status.value,
+                    "mention": evidence_view(link.mention_evidence_id),
+                    "references": [
+                        {
+                            "id": record.id,
+                            "raw_text": record.raw_text,
+                            "title": record.title,
+                            "doi": record.doi,
+                            "year": record.year,
+                            "evidence": [
+                                evidence_view(item) for item in record.source_evidence_ids
+                            ],
+                        }
+                        for record in references
+                    ],
+                    "verification": (
+                        verification_view(references[0].id) if references else None
+                    ),
+                    "findings": [
+                        {
+                            "id": finding.id,
+                            "status": finding.status.value,
+                            "severity": finding.severity.value,
+                            "message": finding.message,
+                            "requires_human_review": finding.requires_human_review,
+                        }
+                        for finding in findings
+                    ],
+                    "concern_id": str(linked_concern.get("id") or "")
+                    if linked_concern
+                    else "",
+                    "concern_status": str(linked_concern.get("status") or "")
+                    if linked_concern
+                    else "",
+                }
+            )
+        return {
+            "available": True,
+            "parse_version": audit.parse_version,
+            "coverage": dict(audit.coverage),
+            "records": records,
+            "links": links,
+            "warnings": list(audit.warnings),
+        }
 
     def artifact_index(
         self, job_id: UUID | str, *, state: ReviewJobState | None = None

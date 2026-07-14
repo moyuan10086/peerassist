@@ -196,6 +196,7 @@ def test_job_workspace_applies_confirmation_decisions(tmp_path: Path) -> None:
         evidence_ids=["P01-L001"],
         impact="The reported result may be underpowered.",
         author_action="Please report the sample-size rationale.",
+        metadata={"citation_finding_ids": ["CF-1"]},
     )
     out_dir = peerassist_stage_dir(tmp_path / state.run_dir)
     bundle = build_confirmation_bundle(
@@ -224,8 +225,108 @@ def test_job_workspace_applies_confirmation_decisions(tmp_path: Path) -> None:
                     "text": "We evaluate ten samples.",
                     "section": "Experiments",
                     "bbox": [72, 72, 240, 90],
-                }
+                },
+                {
+                    "id": "M-1",
+                    "type": "citation",
+                    "page": 1,
+                    "locator": "page 1, citation [1]",
+                    "text": "[1]",
+                    "section": "Introduction",
+                    "bbox": [250, 72, 270, 90],
+                },
+                {
+                    "id": "R-E-1",
+                    "type": "reference",
+                    "page": 2,
+                    "locator": "page 2, reference 1",
+                    "text": "[1] Alpha Study. 2024.",
+                    "section": "References",
+                    "bbox": [72, 120, 360, 140],
+                },
             ]
+        },
+    )
+    write_json_file(
+        out_dir / "citation_audit.json",
+        {
+            "schema_version": "peerassist.citation_audit.v1",
+            "paper_id": paper_id,
+            "parse_version": "test-v1",
+            "records": [
+                {
+                    "id": "R-1",
+                    "reference_number": 1,
+                    "source_evidence_ids": ["R-E-1"],
+                    "raw_text": "[1] Alpha Study. 2024.",
+                    "title": "Alpha Study",
+                    "doi": "10.1000/alpha",
+                    "year": 2024,
+                    "parse_confidence": 0.98,
+                }
+            ],
+            "links": [
+                {
+                    "id": "L-1",
+                    "mention_evidence_id": "M-1",
+                    "reference_number": 1,
+                    "status": "linked",
+                    "reference_record_ids": ["R-1"],
+                    "reference_evidence_ids": ["R-E-1"],
+                }
+            ],
+            "verifications": [
+                {
+                    "id": "V-1",
+                    "reference_record_id": "R-1",
+                    "source": "crossref",
+                    "status": "completed",
+                    "adapter": {"name": "crossref", "version": "1"},
+                    "query": {"doi": "10.1000/alpha"},
+                    "attempt_id": "attempt-citation-test",
+                    "attempt_number": 1,
+                    "checked_at": "2026-07-14T01:30:00Z",
+                    "tool_call_id": "call-citation-test",
+                    "match": {
+                        "method": "doi_exact",
+                        "candidate_count": 1,
+                        "selected_candidate_id": "external-1",
+                        "selection_reason": "exact DOI",
+                        "candidate_ids": ["external-1"],
+                    },
+                    "source_record": {"id": "external-1", "url": "https://example.invalid/alpha"},
+                    "raw_response_artifact": {"path": "private/raw.json", "sha256": "0" * 64},
+                    "observed_metadata": {"title": "Alpha Study Revised", "year": 2024},
+                    "field_differences": [
+                        {
+                            "field": "title",
+                            "manuscript_value": "Alpha Study",
+                            "external_value": "Alpha Study Revised",
+                            "normalized_manuscript_value": "alpha study",
+                            "normalized_external_value": "alpha study revised",
+                            "comparison": "mismatch",
+                            "rule": "normalized_exact",
+                        }
+                    ],
+                }
+            ],
+            "findings": [
+                {
+                    "id": "CF-1",
+                    "status": "metadata_mismatch",
+                    "severity": "clarification_needed",
+                    "citation_link_ids": ["L-1"],
+                    "reference_record_ids": ["R-1"],
+                    "mention_evidence_ids": ["M-1"],
+                    "reference_evidence_ids": ["R-E-1"],
+                    "verification_ids": ["V-1"],
+                    "message": "Reference title differs from the external source.",
+                    "requires_human_review": True,
+                    "metadata": {},
+                }
+            ],
+            "coverage": {"records": 1, "links": 1, "verifications": 1, "findings": 1},
+            "warnings": [],
         },
     )
     write_json_file(out_dir / "agent_results.json", {"results": []})
@@ -241,6 +342,11 @@ def test_job_workspace_applies_confirmation_decisions(tmp_path: Path) -> None:
         item = workspace["state"]["queue"]["items"][0]
         assert item["evidence"][0]["page"] == 1
         assert workspace["state"]["pending_count"] == 1
+        citation = workspace["state"]["citation_audit"]
+        assert citation["available"] is True
+        assert citation["links"][0]["mention"]["page"] == 1
+        assert citation["links"][0]["verification"]["field_differences"][0]["field"] == "title"
+        assert citation["links"][0]["concern_id"] == concern.id
 
         status, decision = _json(
             f"{base}/api/jobs/{job_id}/decisions",

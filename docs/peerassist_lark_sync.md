@@ -305,3 +305,13 @@ model keys, paper secrets, or reviewer-private material here.
 - Public HEAD verification returned `Content-Disposition: inline; filename="report.zh.md"` for the preview URL. The temporary task was archived and removed from the public list.
 - Local commit: `06e96e0 feat: expose immutable final report artifacts`.
 - Appended Feishu section `七十五、2026-07-14 不可变最终报告在线查看与下载`; revision advanced from `107` to `108`. Append-only keyword verification confirmed sections `七十四` and `七十五` remain intact.
+
+## 2026-07-14 - Citation audit workspace and public firewall recovery
+
+- Added the job-scoped citation audit view to the PDF inspector: coverage metrics, manuscript mention, reference metadata, external verification source, field differences, findings and linked human decision status.
+- Citation mention and reference evidence now navigate to their PDF pages and render bbox/text highlights. Linked citation concerns expose task-scoped confirm/rewrite/downgrade/delete actions under the existing confirmation-revision contract.
+- The server response is sanitized and excludes verification queries, raw response paths and internal cache paths. Unsupported citation markers render an explicit Chinese degradation warning instead of appearing as a successful zero-result audit.
+- Focused verification passed 4 Review Job API tests, Ruff and the production frontend build. Browser E2E verified citation/reference page jumps, highlights, source and mismatch display, human confirmation and a nonblank PDF canvas with no console errors. The temporary task was archived afterward; the real task remains blocked at model consent.
+- Diagnosed the public outage as a firewalld public-zone omission. Port `8766/tcp` is now allowed in runtime and permanent rules; external probes returned HTTP 200. Port `8767` remains behind the public workspace proxy.
+- Replaced the transient units with enabled persistent systemd services under `/etc/systemd/system`, with repository templates under `deploy/systemd/`. External probes from Poland, Portugal and Turkey returned HTTP 200 after the persistent-service restart.
+- Appended Feishu section `七十六、2026-07-14 引用核查前端闭环与公网防火墙修复`; revision advanced from `108` to `109`. Append-only keyword verification confirmed sections `七十五` and `七十六` remain intact.

@@ -151,6 +151,55 @@ type ReportArtifacts = {
   items?: ReportArtifact[];
 };
 
+type CitationDifference = {
+  field: string;
+  manuscript_value: string;
+  external_value: string;
+  comparison: string;
+  rule: string;
+};
+
+type CitationVerificationSummary = {
+  source: string;
+  status: string;
+  checked_at: string;
+  source_url: string;
+  field_differences: CitationDifference[];
+  error_code?: string;
+};
+
+type CitationReferenceSummary = {
+  id: string;
+  reference_number?: number;
+  raw_text: string;
+  title: string;
+  doi: string;
+  year?: number | null;
+  evidence?: Evidence[];
+  verification?: CitationVerificationSummary | null;
+};
+
+type CitationLinkSummary = {
+  id: string;
+  reference_number: number;
+  status: string;
+  mention: Evidence;
+  references: CitationReferenceSummary[];
+  verification?: CitationVerificationSummary | null;
+  findings: { id: string; status: string; severity: string; message: string; requires_human_review: boolean }[];
+  concern_id?: string;
+  concern_status?: string;
+};
+
+type CitationAuditSummary = {
+  available?: boolean;
+  parse_version?: string;
+  coverage?: Record<string, number>;
+  records?: CitationReferenceSummary[];
+  links?: CitationLinkSummary[];
+  warnings?: string[];
+};
+
 type ConfirmationState = {
   schema_version?: string;
   runtime?: {
@@ -174,6 +223,7 @@ type ConfirmationState = {
   evidence_preview?: Evidence[];
   paths?: Record<string, string>;
   artifacts?: ReportArtifacts;
+  citation_audit?: CitationAuditSummary;
 };
 
 type Bootstrap = {
@@ -563,6 +613,7 @@ function App() {
             busy={busy}
             linkedReviewJob={Boolean(activePaperId)}
             readyForConfirmation={Boolean(state.ready_for_confirmation)}
+            citationAudit={state.citation_audit}
             onRunReview={runAgentReview}
             onSubmitManual={submitManualConcern}
             onDecision={submitDecision}
@@ -620,6 +671,7 @@ function PaperWindow({
   busy,
   linkedReviewJob,
   readyForConfirmation,
+  citationAudit,
   onRunReview,
   onSubmitManual,
   onDecision,
@@ -629,6 +681,7 @@ function PaperWindow({
   busy: boolean;
   linkedReviewJob: boolean;
   readyForConfirmation: boolean;
+  citationAudit?: CitationAuditSummary;
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onSubmitManual: (selectedText: string, note: string, page: string) => void;
   onDecision: (concern: Concern, action: string) => void;
@@ -638,8 +691,9 @@ function PaperWindow({
   const [page, setPage] = useState("1");
   const [currentPage, setCurrentPage] = useState(1);
   const [targetPage, setTargetPage] = useState(1);
+  const [citationHighlight, setCitationHighlight] = useState<Evidence | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [inspectorTab, setInspectorTab] = useState<"review" | "concerns">("review");
+  const [inspectorTab, setInspectorTab] = useState<"review" | "concerns" | "citations">("review");
   const [inspectorWidth, setInspectorWidth] = useState(372);
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null);
 
@@ -671,6 +725,15 @@ function PaperWindow({
   const pageConcerns = queueItems.filter((item) =>
     (item.evidence || []).some((evidence) => Number(evidence.page || 0) === currentPage),
   );
+  const citationLinks = citationAudit?.links || [];
+  const pageCitations = citationLinks.filter((item) => Number(item.mention?.page || 0) === currentPage);
+
+  const locateEvidence = (evidence?: Evidence) => {
+    if (!evidence) return;
+    const evidencePage = Number(evidence.page || 0);
+    if (evidencePage > 0) setTargetPage(evidencePage);
+    setCitationHighlight(evidence);
+  };
 
   return (
     <section
@@ -687,6 +750,7 @@ function PaperWindow({
               setPage(String(nextPage));
             }}
             targetPage={targetPage}
+            citationHighlight={citationHighlight}
           />
         ) : (
           <div className="empty-pdf">当前运行目录没有发现原始 PDF。</div>
@@ -720,6 +784,9 @@ function PaperWindow({
             </button>
             <button type="button" role="tab" aria-selected={inspectorTab === "concerns"} onClick={() => setInspectorTab("concerns")}>
               本页关注 {pageConcerns.length}
+            </button>
+            <button type="button" role="tab" aria-selected={inspectorTab === "citations"} onClick={() => setInspectorTab("citations")}>
+              引用核查 {citationLinks.length}
             </button>
           </div>
           {inspectorTab === "review" ? (
@@ -758,7 +825,7 @@ function PaperWindow({
                 </button>
               </div>
             </div>
-          ) : (
+          ) : inspectorTab === "concerns" ? (
             <div className="inspector-body concern-list">
               {(pageConcerns.length ? pageConcerns : queueItems.slice(0, 5)).map((item) => (
                 <ConcernCard
@@ -767,14 +834,23 @@ function PaperWindow({
                   disabled={busy}
                   onDecision={readyForConfirmation && item.status === "pending_human_confirmation" ? onDecision : undefined}
                   onLocate={(evidence) => {
-                    const evidencePage = Number(evidence.page || 0);
-                    if (evidencePage > 0) setTargetPage(evidencePage);
+                    locateEvidence(evidence);
                   }}
                   key={item.id}
                 />
               ))}
               {!queueItems.length && <p className="muted">当前还没有审稿关注点。</p>}
             </div>
+          ) : (
+            <CitationAuditPanel
+              audit={citationAudit}
+              links={pageCitations.length ? pageCitations : citationLinks}
+              concerns={queueItems}
+              readyForConfirmation={readyForConfirmation}
+              busy={busy}
+              onLocate={locateEvidence}
+              onDecision={onDecision}
+            />
           )}
         </aside>
       ) : (
@@ -791,11 +867,13 @@ function PdfReviewReader({
   onSelection,
   onPageChange,
   targetPage,
+  citationHighlight,
 }: {
   pdfUrl: string;
   onSelection: (payload: { text: string; page: number }) => void;
   onPageChange: (page: number) => void;
   targetPage?: number;
+  citationHighlight?: Evidence | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
@@ -887,6 +965,12 @@ function PdfReviewReader({
         textLayer.replaceChildren();
         textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
         await textLayerTask.render();
+        const highlightText = citationHighlight?.page === pageNumber ? citationHighlight.text?.trim() || "" : "";
+        if (highlightText) {
+          for (const node of textLayer.querySelectorAll("span")) {
+            if ((node.textContent || "").includes(highlightText)) node.classList.add("citation-highlight-text");
+          }
+        }
         setStatus(`第 ${pageNumber} / ${pdfDoc.numPages} 页 · ${Math.round(targetScale * 100)}%`);
         onPageChange(pageNumber);
         const adjacentPages = [pageNumber - 1, pageNumber + 1].filter((value) => value >= 1 && value <= pdfDoc.numPages);
@@ -904,7 +988,7 @@ function PdfReviewReader({
       renderTask?.cancel();
       textLayerTask?.cancel();
     };
-  }, [fitWidth, onPageChange, pageNumber, pdfDoc, scale, viewportWidth]);
+  }, [citationHighlight, fitWidth, onPageChange, pageNumber, pdfDoc, scale, viewportWidth]);
 
   const captureSelection = () => {
     const selection = window.getSelection();
@@ -970,6 +1054,18 @@ function PdfReviewReader({
       <div className="pdf-scroll" ref={scrollRef}>
         <div className="pdf-page-shell" onMouseUp={captureSelection}>
           <canvas ref={canvasRef} className="pdf-canvas" />
+          {citationHighlight?.page === pageNumber && citationHighlight.bbox?.length === 4 && (
+            <div
+              className="citation-highlight-box"
+              aria-label="当前引用定位"
+              style={{
+                left: `${citationHighlight.bbox[0] * renderScale}px`,
+                top: `${citationHighlight.bbox[1] * renderScale}px`,
+                width: `${(citationHighlight.bbox[2] - citationHighlight.bbox[0]) * renderScale}px`,
+                height: `${(citationHighlight.bbox[3] - citationHighlight.bbox[1]) * renderScale}px`,
+              }}
+            />
+          )}
           <div ref={textLayerRef} className="pdf-text-layer" />
         </div>
         {(!pdfDoc || error) && (
@@ -1372,6 +1468,170 @@ function ArtifactsWindow({ paths, reports }: { paths: Record<string, string>; re
   );
 }
 
+function CitationAuditPanel({
+  audit,
+  links,
+  concerns,
+  readyForConfirmation,
+  busy,
+  onLocate,
+  onDecision,
+}: {
+  audit?: CitationAuditSummary;
+  links: CitationLinkSummary[];
+  concerns: Concern[];
+  readyForConfirmation: boolean;
+  busy: boolean;
+  onLocate: (evidence?: Evidence) => void;
+  onDecision: (concern: Concern, action: string) => void;
+}) {
+  const coverage = audit?.coverage || {};
+  const metrics = [
+    ["参考文献", coverage.records ?? audit?.records?.length ?? 0],
+    ["正文引用", coverage.links ?? audit?.links?.length ?? 0],
+    ["外部核验", coverage.verifications ?? 0],
+    ["待核问题", coverage.findings ?? 0],
+  ] as const;
+
+  if (!audit?.available) {
+    return (
+      <div className="inspector-body citation-audit-panel">
+        <div className="citation-empty">
+          <Search size={22} />
+          <strong>引用核查结果尚未生成</strong>
+          <span>后台任务运行到“引用核查”阶段后，这里会显示正文引用与参考文献的对应关系。</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="inspector-body citation-audit-panel">
+      <div className="citation-metrics" aria-label="引用核查覆盖统计">
+        {metrics.map(([label, value]) => (
+          <div key={label}>
+            <strong>{value}</strong>
+            <span>{label}</span>
+          </div>
+        ))}
+      </div>
+
+      {(audit.warnings || []).map((warning) => (
+        <div className="citation-warning" key={warning}>
+          <strong>解析提示</strong>
+          <span>{citationWarningLabel(warning)}</span>
+        </div>
+      ))}
+
+      {links.map((link) => {
+        const concern = concerns.find((item) => item.id === link.concern_id);
+        const verification = link.verification;
+        return (
+          <article className="citation-card" key={link.id}>
+            <div className="citation-card-head">
+              <div>
+                <span className="citation-number">[{link.reference_number}]</span>
+                <strong>{link.mention.text || `正文引用 ${link.reference_number}`}</strong>
+              </div>
+              <span className={`tag ${citationStatusTone(link.status)}`}>{citationStatusLabel(link.status)}</span>
+            </div>
+
+            <button className="citation-mention" type="button" disabled={!link.mention.page} onClick={() => onLocate(link.mention)}>
+              <span>定位正文</span>
+              <strong>{link.mention.locator || `第 ${link.mention.page || "?"} 页`}</strong>
+            </button>
+
+            {link.references.map((reference) => (
+              <div className="citation-reference" key={reference.id}>
+                <div className="citation-section-label">参考文献</div>
+                <strong>{reference.title || reference.raw_text || "题名未解析"}</strong>
+                {reference.title && reference.raw_text && <p>{reference.raw_text}</p>}
+                <div className="citation-metadata">
+                  {reference.year && <span>{reference.year}</span>}
+                  {reference.doi && <code>DOI {reference.doi}</code>}
+                </div>
+                {(reference.evidence || []).map((evidence) => (
+                  <button className="evidence-link" type="button" disabled={!evidence.page} onClick={() => onLocate(evidence)} key={evidence.id || evidence.locator}>
+                    查看参考文献原文 · {evidence.locator || `第 ${evidence.page} 页`}
+                  </button>
+                ))}
+              </div>
+            ))}
+
+            {verification ? (
+              <div className="citation-verification">
+                <div className="citation-verification-head">
+                  <div>
+                    <span className="citation-section-label">外部核验</span>
+                    <strong>{citationVerificationLabel(verification.source)}</strong>
+                  </div>
+                  <span className={`tag ${citationStatusTone(verification.status)}`}>{citationStatusLabel(verification.status)}</span>
+                </div>
+                {verification.source_url && (
+                  <a href={verification.source_url} target="_blank" rel="noreferrer">
+                    打开核验来源 <ExternalLink size={13} />
+                  </a>
+                )}
+                {verification.field_differences.length > 0 && (
+                  <div className="citation-differences">
+                    {verification.field_differences.map((difference, index) => (
+                      <div key={`${difference.field}-${index}`}>
+                        <strong>{citationFieldLabel(difference.field)}不一致</strong>
+                        <dl>
+                          <dt>论文</dt><dd>{difference.manuscript_value || "空"}</dd>
+                          <dt>来源</dt><dd>{difference.external_value || "空"}</dd>
+                        </dl>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="citation-verification is-empty">尚无外部核验记录</div>
+            )}
+
+            {link.findings.map((finding) => (
+              <div className="citation-finding" key={finding.id}>
+                <div className="tag-row">
+                  <span className={`tag ${citationStatusTone(finding.status)}`}>{citationStatusLabel(finding.status)}</span>
+                  <span className="tag">{labelLevel(finding.severity)}</span>
+                </div>
+                <p>{finding.message}</p>
+              </div>
+            ))}
+
+            {concern && (
+              <div className="citation-human-action">
+                <div>
+                  <span className="citation-section-label">人工结论</span>
+                  <strong>{labelStatus(concern.status || link.concern_status || "")}</strong>
+                </div>
+                {readyForConfirmation && concern.status === "pending_human_confirmation" && (
+                  <div className="button-row">
+                    {["confirm", "rewrite", "downgrade", "delete"].map((action) => (
+                      <button className={action === "delete" ? "danger-button" : "ghost-button"} disabled={busy} key={action} type="button" onClick={() => onDecision(concern, action)}>
+                        {labelAction(action)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </article>
+        );
+      })}
+
+      {!links.length && (
+        <div className="citation-empty">
+          <Search size={22} />
+          <strong>没有可展示的引用链接</strong>
+          <span>{audit.records?.length ? "已解析参考文献，但没有建立正文引用链接。" : "当前解析器未识别出可核验的数字编号引用。"}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConcernCard({
   concern,
   compact,
@@ -1473,6 +1733,61 @@ function labelAction(value: string) {
     delete: "删除",
     mark_pending: "保留待定",
   } as Record<string, string>)[value] || value;
+}
+
+function citationStatusLabel(value: string) {
+  return ({
+    linked: "已关联",
+    missing_reference: "缺少参考文献",
+    ambiguous: "匹配不唯一",
+    completed: "核验完成",
+    not_found: "外部未检索到",
+    unavailable: "核验源不可用",
+    failed: "核验失败",
+    verified: "核验通过",
+    metadata_mismatch: "字段不一致",
+    insufficient_evidence: "证据不足",
+    verification_failed: "核验失败",
+    uncited_reference: "正文未引用",
+    malformed_reference: "格式异常",
+    duplicate_reference_metadata: "疑似重复",
+  } as Record<string, string>)[value] || value || "未知状态";
+}
+
+function citationStatusTone(value: string) {
+  if (["linked", "completed", "verified"].includes(value)) return "good";
+  if (["missing_reference", "not_found", "failed", "verification_failed"].includes(value)) return "danger";
+  return "warn";
+}
+
+function citationVerificationLabel(value: string) {
+  return ({
+    crossref: "Crossref 元数据",
+    openalex: "OpenAlex 文献记录",
+    pubmed: "PubMed 文献记录",
+    semantic_scholar: "Semantic Scholar",
+  } as Record<string, string>)[value] || value || "外部文献源";
+}
+
+function citationFieldLabel(value: string) {
+  return ({
+    title: "题名",
+    author: "作者",
+    authors: "作者",
+    year: "年份",
+    doi: "DOI",
+    venue: "期刊或会议",
+    volume: "卷号",
+    issue: "期号",
+    pages: "页码",
+  } as Record<string, string>)[value] || value;
+}
+
+function citationWarningLabel(value: string) {
+  if (value.startsWith("unsupported_author_year_citation_marker")) return "检测到作者-年份制引用，当前版本暂未建立自动链接，请人工检查正文与参考文献。";
+  if (value.startsWith("unsupported_citation_marker")) return "检测到当前解析器暂不支持的引用格式，请人工检查。";
+  if (value.startsWith("duplicate_doi:")) return `检测到重复 DOI：${value.slice("duplicate_doi:".length)}`;
+  return value.replace(/_/g, " ");
 }
 
 function labelMode(value: string) {

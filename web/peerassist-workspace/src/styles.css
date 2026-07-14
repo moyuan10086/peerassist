@@ -627,7 +627,7 @@ h1 {
 
 .inspector-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   border-bottom: 1px solid var(--line);
   padding: 7px 10px;
@@ -652,6 +652,302 @@ h1 {
   min-height: 0;
   overflow: auto;
   padding: 12px;
+}
+
+.citation-audit-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.citation-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.citation-metrics > div {
+  min-width: 0;
+  padding: 8px 4px;
+  text-align: center;
+}
+
+.citation-metrics > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.citation-metrics strong,
+.citation-metrics span {
+  display: block;
+}
+
+.citation-metrics strong {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.citation-metrics span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.citation-warning {
+  border-left: 3px solid #b7791f;
+  background: #fff8e7;
+  padding: 9px 10px;
+}
+
+.citation-warning strong,
+.citation-warning span {
+  display: block;
+}
+
+.citation-warning strong {
+  color: #7a4c0b;
+  font-size: 11px;
+}
+
+.citation-warning span {
+  margin-top: 3px;
+  color: #6f5529;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.citation-card {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #fff;
+  overflow: hidden;
+}
+
+.citation-card-head,
+.citation-verification-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.citation-card-head {
+  padding: 11px;
+}
+
+.citation-card-head > div {
+  min-width: 0;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+
+.citation-card-head strong {
+  min-width: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.citation-number {
+  color: var(--accent);
+  font: 800 12px/1.3 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.citation-mention {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #edf7f4;
+  color: var(--accent);
+  padding: 8px 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.citation-mention span {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.citation-mention strong {
+  min-width: 0;
+  color: #315f58;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.citation-mention:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.citation-reference,
+.citation-verification,
+.citation-finding,
+.citation-human-action {
+  padding: 10px 11px;
+}
+
+.citation-reference + .citation-reference,
+.citation-verification,
+.citation-finding,
+.citation-human-action {
+  border-top: 1px solid var(--line);
+}
+
+.citation-section-label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.citation-reference > strong,
+.citation-verification-head strong,
+.citation-human-action strong {
+  display: block;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.citation-reference p,
+.citation-finding p {
+  margin: 5px 0 0;
+  color: #455550;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.citation-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 9px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.citation-metadata code {
+  overflow-wrap: anywhere;
+}
+
+.citation-verification {
+  background: #fbfcfc;
+}
+
+.citation-verification.is-empty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.citation-verification a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 7px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.citation-differences {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.citation-differences > div {
+  border-left: 2px solid var(--danger);
+  background: #fff7f7;
+  padding: 7px 8px;
+}
+
+.citation-differences > div > strong {
+  color: var(--danger);
+  font-size: 10px;
+}
+
+.citation-differences dl {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 3px 6px;
+  margin: 5px 0 0;
+  font-size: 10px;
+}
+
+.citation-differences dt {
+  color: var(--muted);
+}
+
+.citation-differences dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.citation-human-action {
+  display: grid;
+  gap: 8px;
+  background: #f7faf9;
+}
+
+.citation-human-action .button-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.citation-human-action .button-row button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 3px;
+  font-size: 10px;
+}
+
+.citation-empty {
+  min-height: 150px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 6px;
+  color: var(--muted);
+  padding: 18px;
+  text-align: center;
+}
+
+.citation-empty strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.citation-empty span {
+  max-width: 300px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.citation-highlight-box {
+  position: absolute;
+  z-index: 1;
+  border: 2px solid #c77b16;
+  background: rgba(245, 185, 66, 0.28);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.72);
+  pointer-events: none;
+}
+
+.pdf-text-layer span.citation-highlight-text {
+  border-radius: 2px;
+  background: rgba(245, 185, 66, 0.36);
+  box-shadow: 0 0 0 2px rgba(245, 185, 66, 0.2);
 }
 
 .inspector-reopen {

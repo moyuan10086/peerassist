@@ -24,6 +24,8 @@ EvidenceLedger
 - `src/peerassist/citation_artifacts.py`：路径受限、不可覆盖的响应快照。
 - `src/peerassist/citation_audit.py`：finding 决策、语义完整性和原子索引发布。
 - `src/peerassist/citation_pipeline.py`：PeerAssist 阶段协调器。
+- `src/peerassist/review_job_api.py`：按 ReviewJob 生成脱敏引用审计视图，绑定当前 concern 与人工状态。
+- `web/peerassist-workspace/src/main.tsx`：中文引用核查侧栏、PDF 双向跳转、bbox/文字高亮和人工操作。
 
 ## 2. 稳定标识
 
@@ -52,7 +54,13 @@ DOI 去除标准 URL/`doi:` 前缀并转小写后精确比较。题名做 Unicod
 
 默认最多三次尝试，只重试 timeout、rate limit 和暂时性 5xx。`not_found`、schema 错误和适配器不可用不重试。失败不会阻断 PDF 阅读和其他审稿流程：系统生成中性待确认 concern，并在 `tool_trace.jsonl` 中保留错误码。
 
-## 6. 当前边界
+## 6. 前端审稿视图
+
+`GET /api/jobs/<job-id>/workspace` 的 `state.citation_audit` 只返回审稿所需字段：覆盖统计、参考文献记录、正文 mention 证据、页码/bbox、最新外部核验来源、字段差异、finding 和已绑定 concern 状态。服务端不返回核验 query、原始响应快照路径或内部缓存路径。
+
+论文阅读窗口的“引用核查”标签按正文链接展示卡片。正文 mention 和参考文献证据都可以驱动 PDF 跳页与高亮；需要人工复核的 finding 复用任务级 concern 决策接口，因此确认版本、finding lineage 和刷新恢复行为与主人工确认队列一致。没有链接但存在解析 warning 时，前端显示中文降级提示，禁止把零结果解释为核验通过。
+
+## 7. 当前边界
 
 第一版只覆盖数字型正文引用和编号参考文献。尚未实现：
 

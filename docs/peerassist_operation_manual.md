@@ -72,24 +72,25 @@ PEERASSIST_OPENAI_TIMEOUT_SECONDS="240" \
   --port 8766
 ```
 
-后台运行示例：
+生产环境使用仓库中的 systemd 单元：
 
 ```bash
-setsid env \
-  PYTHONPATH=/root/peerassist-review-system-20260710/peerassist/src \
-  PEERASSIST_OPENAI_API_KEY="<your-runtime-key>" \
-  PEERASSIST_OPENAI_BASE_URL=https://deepkey.top/v1 \
-  PEERASSIST_OPENAI_MODEL=gpt-5.4 \
-  PEERASSIST_OPENAI_TIMEOUT_SECONDS=240 \
-  /root/peerassist-review-system-20260710/peerassist/.venv/bin/python \
-  -m peerassist.confirmation_server \
-  --run-dir /root/peerassist-review-system-20260710/peerassist/runs/arxiv_real_data/runs/arxiv_2607_08522_v1 \
-  --paper-id arxiv_2607_08522_v1 \
-  --host 0.0.0.0 \
-  --port 8766 \
-  >/tmp/peerassist-confirm-server-8766.log 2>&1 &
-echo $! >/tmp/peerassist-confirm-server-8766.pid
+sudo cp deploy/systemd/peerassist-review-api.service /etc/systemd/system/
+sudo cp deploy/systemd/peerassist-ui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now peerassist-review-api.service peerassist-ui.service
+systemctl status peerassist-review-api.service peerassist-ui.service
 ```
+
+公网工作区只需要放行 `8766/tcp`。`8767` 是后端 Review Job API，由 `8766` 网关代理，不建议额外暴露。使用 firewalld 的服务器执行：
+
+```bash
+sudo firewall-cmd --zone=public --add-port=8766/tcp
+sudo firewall-cmd --zone=public --add-port=8766/tcp --permanent
+sudo firewall-cmd --zone=public --list-all
+```
+
+不要只检查 `ufw`；本机实际生效的可能是 firewalld/nftables。`firewall-cmd --state` 为 `running` 时，以 firewalld zone 规则为准。
 
 健康检查：
 
@@ -98,6 +99,7 @@ curl -I http://127.0.0.1:8766/
 curl -I http://127.0.0.1:8766/paper.pdf
 curl -I -H 'Range: bytes=0-1023' http://127.0.0.1:8766/paper.pdf
 curl http://127.0.0.1:8766/api/state
+curl http://127.0.0.1:8766/api/health
 ```
 
 ## 4. 前端开发与构建
@@ -137,12 +139,12 @@ npm run build
 2. 在大尺寸 PDF 阅读区浏览原文。阅读器支持适应宽度、放大缩小、页码输入、翻页、下载和在新窗口打开原始 PDF。
 3. 拖选 PDF 文字后，原文和页码会自动进入右侧“审稿助手”；可直接发起选区智能审稿，或补充人工批注后加入证据队列。
 4. 右侧审稿栏可拖动左侧边缘调整宽度，也可通过右上角图标收起；收起后 PDF 自动扩展到可用宽度。
-5. 点击“快速审阅全文”或进入“智能审稿”窗口后，系统读取证据台账、确定性核查和多代理结果，调用配置的大模型生成审稿草稿。
-6. 在“审稿草稿预览”查看完整模型输出。实时数据流只显示阶段状态，不承载完整报告。
-7. 在“证据队列”逐条查看系统提出的 concern、证据来源、严重度和建议处理方式。
-8. 在“人工确认”中对每条 concern 执行确认、改写、降级、删除或标记待定。
-9. 在“工具追踪”查看每次 MCP/Skills/确定性检查/代理调用的状态、时间和产物 ID。
-10. 在“产物导出”复制关键产物路径，用于写正式审稿意见或复盘。
+5. 右侧“引用核查”标签显示当前任务的正文引用、参考文献、外部核验来源和字段差异。点击定位按钮可在 PDF 与引用卡片之间跳转。
+6. 点击“快速审阅全文”或进入“智能审稿”窗口后，系统读取证据台账、确定性核查和多代理结果，调用配置的大模型生成审稿草稿。
+7. 在“审稿草稿预览”查看完整模型输出。实时数据流只显示阶段状态，不承载完整报告。
+8. 在“证据队列”逐条查看系统提出的 concern、证据来源、严重度和建议处理方式。
+9. 在“人工确认”中对每条 concern 执行确认、改写、降级、删除或标记待定；引用 concern 也可以直接在引用卡片中处理。
+10. 在“工具追踪”查看每次 MCP/Skills/确定性检查/代理调用的状态、时间和产物 ID，在“产物导出”在线查看或下载最终报告。
 
 ### 5.1 PDF 加载与缓存
 
@@ -155,6 +157,14 @@ npm run build
 ### 5.2 引用核查
 
 PeerAssist 会从论文正文中提取 `[1]`、`[1, 3-5]` 等数字引用，并与参考文献编号建立确定性关联。引用 concern 至少回指正文引用位置；元数据差异还会同时回指参考文献条目和核验记录。
+
+网页操作：
+
+1. 在“论文阅读”窗口右侧选择“引用核查”。顶部四项统计分别表示参考文献、正文引用、外部核验和待核问题数量。
+2. 点击“定位正文”，PDF 跳到引用页并以黄色 bbox/文字层高亮正文引用；点击“查看参考文献原文”，跳到参考文献页并高亮对应条目。
+3. “外部核验”区域展示来源名称、可打开的来源 URL 和逐字段差异。界面不会暴露原始查询、私有响应快照路径或内部缓存路径。
+4. 引用 finding 已绑定人工 concern 时，可在卡片底部确认、改写、降级或删除。操作成功后状态与待确认计数会按任务确认版本刷新。
+5. 作者年份制或其他未支持标记会显示“解析提示”。没有建立链接不等于引用有效或无问题，审稿人仍需人工检查。
 
 常见状态：
 
