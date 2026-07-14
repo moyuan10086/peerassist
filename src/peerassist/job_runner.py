@@ -79,12 +79,14 @@ class RecoverableReviewJobRunner:
             while True:
                 state = self.repository.get(job_id)
                 if state.cancel_requested:
-                    return self._update(
+                    cancelled = self._update(
                         state,
                         status=ReviewJobStatus.CANCELLED,
                         error_code=None,
                         error=None,
                     )
+                    self._event(cancelled, "job_cancelled")
+                    return cancelled
                 if state.stage in {
                     ReviewStage.AWAIT_CONFIRMATION,
                     ReviewStage.COMPLETE,
@@ -109,6 +111,7 @@ class RecoverableReviewJobRunner:
                         continue
                 state = self._update(state, status=_STATUS[state.stage])
                 self._event(state, "stage_started")
+                completed_stage = state.stage
                 adapter = self.adapters.get(state.stage)
                 if adapter is None:
                     raise RuntimeError(f"missing stage adapter: {state.stage.value}")
@@ -128,7 +131,7 @@ class RecoverableReviewJobRunner:
                     required_consents=[],
                     resume_stage=None,
                 )
-                self._event(state, "stage_completed")
+                self._event(state, "stage_completed", stage=completed_stage)
                 if next_stage is ReviewStage.AWAIT_CONFIRMATION:
                     return state
         except Exception as exc:
@@ -331,13 +334,14 @@ class RecoverableReviewJobRunner:
         state: ReviewJobState,
         event_type: str,
         *,
+        stage: ReviewStage | None = None,
         message: str = "",
         payload: dict[str, Any] | None = None,
     ) -> None:
         self.repository.append_event(
             state.id,
             event_type,
-            stage=state.stage,
+            stage=stage or state.stage,
             status=state.status,
             attempt_id=state.attempt_id,
             message=message,

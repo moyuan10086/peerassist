@@ -695,6 +695,8 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "pdf-annotation-pin" in source
     assert "打开关注：" in source
     assert "selected={item.id === activeConcernId}" in source
+    assert "job-timeline" in source
+    assert "运行时间线" in source
 
 
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:

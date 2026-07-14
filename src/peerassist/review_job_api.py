@@ -55,6 +55,12 @@ _REPORT_ARTIFACT_NAMES = {
     "report_en_json",
     "report_zh_json",
 }
+_REVIEW_STAGE_SEQUENCE = list(ReviewStage)
+_REVIEW_STAGE_PREDECESSOR = {
+    stage: _REVIEW_STAGE_SEQUENCE[index - 1]
+    for index, stage in enumerate(_REVIEW_STAGE_SEQUENCE)
+    if index > 0
+}
 
 
 class ReviewJobService:
@@ -101,6 +107,57 @@ class ReviewJobService:
 
     def close(self) -> None:
         self.scheduler.shutdown(wait=True)
+
+    def job_view(self, state: ReviewJobState) -> dict[str, Any]:
+        events = self.repository.replay_events(state.id)
+        attempts: dict[str, int] = {}
+        stage_starts: dict[tuple[str, ReviewStage], Any] = {}
+        items: list[dict[str, Any]] = []
+        terminal_stage_events = {"stage_completed", "stage_failed"}
+        for event in events:
+            attempt_key = event.attempt_id or "unknown"
+            if attempt_key not in attempts:
+                attempts[attempt_key] = len(attempts) + 1
+            event_stage = event.stage
+            if event.event_type == "stage_completed" and event_stage is not None:
+                current_key = (attempt_key, event_stage)
+                if current_key not in stage_starts:
+                    predecessor = _REVIEW_STAGE_PREDECESSOR.get(event_stage)
+                    if predecessor is not None and (attempt_key, predecessor) in stage_starts:
+                        event_stage = predecessor
+            duration_ms: int | None = None
+            if event.event_type == "stage_started" and event_stage is not None:
+                stage_starts[(attempt_key, event_stage)] = event.timestamp
+            elif event.event_type in terminal_stage_events and event_stage is not None:
+                started_at = stage_starts.get((attempt_key, event_stage))
+                if started_at is not None:
+                    duration_ms = max(
+                        0,
+                        round((event.timestamp - started_at).total_seconds() * 1000),
+                    )
+            details: dict[str, Any] = {}
+            service = event.payload.get("service")
+            if isinstance(service, str) and service in {"parse", "search", "model"}:
+                details["service"] = service
+            items.append(
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "timestamp": event.timestamp.isoformat(),
+                    "stage": event_stage.value if event_stage is not None else None,
+                    "status": event.status.value if event.status is not None else None,
+                    "attempt": attempts[attempt_key],
+                    "duration_ms": duration_ms,
+                    "details": details,
+                }
+            )
+        payload = state.model_dump(mode="json")
+        payload["timeline"] = {
+            "event_count": len(events),
+            "last_event_id": events[-1].event_id if events else 0,
+            "items": items[-24:],
+        }
+        return payload
 
     def paper_source(self, paper_id: str) -> tuple[Path, str]:
         record = self.paper_repository.get(paper_id)
@@ -533,7 +590,7 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "jobs": [
-                        state.model_dump(mode="json")
+                        self.service.job_view(state)
                         for state in self.service.repository.list()
                     ]
                 }
@@ -660,6 +717,7 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         action = match.group("action")
         if action == "/cancel":
             state = self.service.runner.request_cancel(job_id)
+            self.service.scheduler.submit(state.id)
         elif action == "/retry":
             state = self.service.runner.retry(job_id)
             self.service.scheduler.submit(state.id)
@@ -748,7 +806,7 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
         return payload
 
     def _job(self, job_id: UUID) -> dict[str, Any]:
-        return self.service.repository.get(job_id).model_dump(mode="json")
+        return self.service.job_view(self.service.repository.get(job_id))
 
     def _send_events(self, job_id: UUID) -> None:
         try:

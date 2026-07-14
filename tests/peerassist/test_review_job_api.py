@@ -88,6 +88,16 @@ def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path) -> None:
             sleep(0.02)
         assert snapshot["job"]["resume_stage"] == "agents"
 
+        _, listed = _json(f"{base}/api/jobs")
+        listed_job = next(job for job in listed["jobs"] if job["id"] == job_id)
+        timeline = listed_job["timeline"]
+        assert timeline["event_count"] >= 10
+        assert timeline["last_event_id"] == timeline["items"][-1]["event_id"]
+        completed = [item for item in timeline["items"] if item["event_type"] == "stage_completed"]
+        assert completed[0]["stage"] == "validate"
+        assert completed[0]["duration_ms"] >= 0
+        assert all("payload" not in item for item in timeline["items"])
+
         request = Request(
             f"{base}/api/jobs/{job_id}/events",
             headers={"Last-Event-ID": "0", "Connection": "close"},
@@ -109,6 +119,37 @@ def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path) -> None:
                 break
             sleep(0.02)
         assert snapshot["job"]["status"] == "awaiting_human_confirmation"
+
+        _, cancellable = _json(
+            f"{base}/api/reviews",
+            method="POST",
+            payload={"paper_id": paper_id, "mode": "fast", "idempotency_key": "api-cancel"},
+        )
+        cancellable_id = cancellable["job"]["id"]
+        for _ in range(100):
+            _, cancellable_snapshot = _json(f"{base}/api/jobs/{cancellable_id}")
+            if cancellable_snapshot["job"]["status"] == "blocked":
+                break
+            sleep(0.02)
+        _, requested = _json(f"{base}/api/jobs/{cancellable_id}/cancel", method="POST", payload={})
+        assert requested["job"]["status"] == "cancel_requested"
+        for _ in range(100):
+            _, cancelled = _json(f"{base}/api/jobs/{cancellable_id}")
+            if cancelled["job"]["status"] == "cancelled":
+                break
+            sleep(0.02)
+        assert cancelled["job"]["status"] == "cancelled"
+        assert cancelled["job"]["timeline"]["items"][-1]["event_type"] == "job_cancelled"
+
+        _, retried = _json(f"{base}/api/jobs/{cancellable_id}/retry", method="POST", payload={})
+        assert retried["job"]["status"] == "queued"
+        for _ in range(100):
+            _, retry_snapshot = _json(f"{base}/api/jobs/{cancellable_id}")
+            if retry_snapshot["job"]["status"] == "blocked":
+                break
+            sleep(0.02)
+        retry_items = retry_snapshot["job"]["timeline"]["items"]
+        assert any(item["event_type"] == "job_retried" and item["attempt"] == 2 for item in retry_items)
     finally:
         server.shutdown()
         server.server_close()

@@ -332,3 +332,13 @@ model keys, paper secrets, or reviewer-private material here.
 - Existing concern evidence links continue to navigate from the card back to the PDF, completing a bidirectional path over the same concern ID, evidence ID, page and bbox.
 - Desktop browser verification confirmed a page-3 marker on the right page of a `2–3` spread, no marker on page 2, exact concern focus and bbox highlight. Mobile verification confirmed the marker remains reachable without horizontal overflow.
 - Appended Feishu section `七十八、2026-07-14 PDF 原文与 concern 双向定位`; revision advanced from `110` to `111`. Append-only keyword verification confirmed sections `七十七` and `七十八` remain intact.
+
+## 2026-07-14 - Durable ReviewJob timeline and cancel/retry closure
+
+- Added a sanitized timeline to ReviewJob list and detail responses: event type, normalized stage, status, timestamp, attempt ordinal, duration and allowlisted service name. Raw payloads, actors and internal paths are excluded.
+- Corrected future `stage_completed` events to record the stage that actually finished. The API also reconstructs legacy completion stages by matching the corresponding stage-start event in the same attempt.
+- The Chinese task card shows the latest durable event and an expandable eight-row timeline while retaining 24 recent events in the API view. Refreshing the page reconstructs the same timeline from JSONL.
+- Fixed cancellation for blocked jobs: after persisting `cancel_requested`, the API now schedules a worker to commit `job_cancelled`. Retrying a cancelled job creates attempt 2 and retains attempt 1 events.
+- Focused HTTP verification covered stage durations, payload omission, blocked cancellation, terminal cancellation and retry attempts. Browser verification covered the real task timeline, refresh recovery, and a temporary blocked job's cancel/retry lifecycle; the temporary job was archived.
+- The real arXiv ReviewJob is now at `awaiting_human_confirmation` with 20 durable events. Existing agent artifacts still show skeletal/local agent output and remain a P1 quality gap rather than proof of professional multi-agent review quality.
+- Appended Feishu section `七十九、2026-07-14 ReviewJob 持久时间线与取消重试闭环`; revision advanced from `111` to `112`. Append-only keyword verification confirmed sections `七十八` and `七十九` remain intact.

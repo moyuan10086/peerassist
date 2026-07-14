@@ -185,6 +185,21 @@ PeerAssist 会从论文正文中提取 `[1]`、`[1, 3-5]` 等数字引用，并�
 
 引用核查历史与人工动作通过 finding ID 和 audit/parse 版本关联。论文重新解析后，如果原 finding 消失或证据版本变化，系统会标记 `needs_reconciliation`，不会静默沿用旧确认。
 
+### 5.3 后台任务时间线
+
+“智能审稿”窗口的每个 ReviewJob 卡片显示当前阶段、状态版本和最新事件。展开“运行时间线”可查看最近 8 条事件；服务端保存最近 24 条前端视图，并保留完整 JSONL 事件日志。
+
+时间线包含阶段开始/完成、阶段耗时、模型授权、取消请求、取消完成、重试 attempt 和报告导出事件。旧版本 `stage_completed` 曾记录下一阶段，API 会结合相同 attempt 的 `stage_started` 归一化为实际完成阶段；新事件直接写入正确阶段。
+
+公网时间线是脱敏视图，不返回原始 event payload、授权 actor、内部路径或私有产物内容。失败详情继续使用任务级受控错误字段和工具追踪查看。
+
+操作规则：
+
+1. 运行中或等待授权的任务可点击“取消”。取消请求先持久化为 `cancel_requested`，随后 worker 写入 `job_cancelled` 终态。
+2. 已失败、已取消或中断任务可点击“重试”。系统生成新 attempt ID，但保留旧 attempt 的事件和产物用于追踪。
+3. 页面每 3 秒刷新任务状态；浏览器刷新或服务重启后从仓储重新读取时间线，不依赖前端内存。
+4. “实时数据流”用于当前页面的短状态提示；ReviewJob 时间线才是任务恢复和审计的持久依据。
+
 ## 6. 人工确认动作
 
 网页会调用 `/api/decision` 写入人工动作；也可以使用命令行：
@@ -224,6 +239,10 @@ PYTHONPATH=src .venv/bin/python -m peerassist.confirmation_cli \
 | `GET` | `/api/bootstrap` | 前端启动所需的完整 bootstrap，包括 state、路径、模型配置状态 |
 | `GET` | `/api/state` | 当前确认队列、追踪事件、产物路径和统计指标 |
 | `GET` | `/api/events` | SSE 事件流，包含 state、heartbeat、done |
+| `GET` | `/api/jobs` | 后台任务列表与脱敏持久时间线 |
+| `GET` | `/api/jobs/<job-id>` | 单任务状态、attempt、阶段耗时与最近事件 |
+| `POST` | `/api/jobs/<job-id>/cancel` | 请求取消并推进到取消终态 |
+| `POST` | `/api/jobs/<job-id>/retry` | 新 attempt 重试可恢复任务 |
 | `POST` | `/api/agent-review` | 触发智能审稿，输入选中文本和模式，输出审稿草稿与新增 concern |
 | `POST` | `/api/manual-concern` | 将 PDF 选中文本保存为人工 concern |
 | `POST` | `/api/decision` | 写入人工确认动作 |

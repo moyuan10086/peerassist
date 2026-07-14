@@ -14,6 +14,7 @@ import {
   FileUp,
   FolderDown,
   GitBranch,
+  History,
   Loader2,
   Maximize2,
   MessageSquareText,
@@ -136,6 +137,24 @@ type ReviewJob = {
   degraded_services?: string[];
   error?: string | null;
   updated_at?: string;
+  timeline?: ReviewJobTimeline;
+};
+
+type ReviewJobTimelineEvent = {
+  event_id: number;
+  event_type: string;
+  timestamp: string;
+  stage?: string | null;
+  status?: string | null;
+  attempt: number;
+  duration_ms?: number | null;
+  details?: { service?: string };
+};
+
+type ReviewJobTimeline = {
+  event_count: number;
+  last_event_id: number;
+  items: ReviewJobTimelineEvent[];
 };
 
 type ReportArtifact = {
@@ -1452,7 +1471,9 @@ const reviewStages = ["validate", "parse", "evidence", "profile", "plan", "deter
 
 function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void; onOpenPaper: (job: ReviewJob) => void }) {
   const current = Math.max(0, reviewStages.indexOf(job.stage));
-  const canCancel = !["completed", "cancelled", "failed", "awaiting_human_confirmation"].includes(job.status);
+  const canCancel = !["completed", "cancelled", "cancel_requested", "failed", "awaiting_human_confirmation"].includes(job.status);
+  const timelineItems = job.timeline?.items || [];
+  const latestEvent = timelineItems[timelineItems.length - 1];
   return (
     <article className="job-card">
       <div className="job-card-head">
@@ -1475,9 +1496,34 @@ function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; b
       <div className="job-meta">
         <span>当前阶段：{labelJobStage(job.stage)}</span>
         <span>状态版本：{job.revision}</span>
+        {latestEvent && <span>最新：{timelineEventLabel(latestEvent)}</span>}
         {job.degradation_code && <span>本地降级：{(job.degraded_services || []).join("、")}</span>}
         {job.error && <span className="job-error">{job.error}</span>}
       </div>
+      {timelineItems.length > 0 && (
+        <details className="job-timeline">
+          <summary>
+            <History size={15} />
+            <span>运行时间线</span>
+            <small>{job.timeline?.event_count || timelineItems.length} 条持久事件</small>
+          </summary>
+          <div className="job-timeline-list">
+            {timelineItems.slice(-8).map((event) => (
+              <div className="job-timeline-item" data-tone={timelineEventTone(event)} key={event.event_id}>
+                <span className="job-timeline-dot" />
+                <div>
+                  <strong>{timelineEventLabel(event)}</strong>
+                  <small>
+                    {formatTimelineTime(event.timestamp)}
+                    {event.attempt > 1 ? ` · 第 ${event.attempt} 次尝试` : ""}
+                    {event.duration_ms !== null && event.duration_ms !== undefined ? ` · ${formatDuration(event.duration_ms)}` : ""}
+                  </small>
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </article>
   );
 }
@@ -2058,6 +2104,46 @@ function labelJobStage(value: string) {
     finalize: "报告导出",
     complete: "完成",
   } as Record<string, string>)[value] || value;
+}
+
+function timelineEventLabel(event: ReviewJobTimelineEvent) {
+  const stage = event.stage ? labelJobStage(event.stage) : "任务";
+  return ({
+    stage_started: `开始${stage}`,
+    stage_completed: `完成${stage}`,
+    stage_failed: `${stage}失败`,
+    consent_required: "等待模型授权",
+    consent_granted: "模型授权已记录",
+    consent_denied_degraded: "模型已拒绝，切换本地降级",
+    job_retried: "任务已重新排队",
+    cancel_requested: "已请求取消任务",
+    job_cancelled: "任务已取消",
+    report_export_started: "开始导出最终报告",
+    report_export_completed: "最终报告导出完成",
+    report_export_blocked: "最终报告导出受阻",
+    report_export_failed: "最终报告导出失败",
+    event_tail_recovered: "事件日志尾部已恢复",
+  } as Record<string, string>)[event.event_type] || event.event_type;
+}
+
+function timelineEventTone(event: ReviewJobTimelineEvent) {
+  if (["stage_failed", "report_export_failed"].includes(event.event_type)) return "danger";
+  if (["consent_required", "cancel_requested", "report_export_blocked"].includes(event.event_type)) return "warn";
+  if (event.event_type === "job_cancelled") return "danger";
+  if (["stage_completed", "consent_granted", "report_export_completed"].includes(event.event_type)) return "good";
+  return "active";
+}
+
+function formatTimelineTime(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatDuration(value: number) {
+  if (value < 1000) return `${value} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} 秒`;
+  return `${Math.floor(value / 60_000)} 分 ${Math.round((value % 60_000) / 1000)} 秒`;
 }
 
 function jobActionLabel(value: string) {
