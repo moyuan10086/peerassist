@@ -52,6 +52,7 @@ demos/**/execution/
 
 # Codex CLI scratch placeholder
 .codex
+.superpowers/
 
 # Local uv state (prefer committing uv.lock instead)
 .uv/
