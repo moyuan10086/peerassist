@@ -315,3 +315,12 @@ model keys, paper secrets, or reviewer-private material here.
 - Diagnosed the public outage as a firewalld public-zone omission. Port `8766/tcp` is now allowed in runtime and permanent rules; external probes returned HTTP 200. Port `8767` remains behind the public workspace proxy.
 - Replaced the transient units with enabled persistent systemd services under `/etc/systemd/system`, with repository templates under `deploy/systemd/`. External probes from Poland, Portugal and Turkey returned HTTP 200 after the persistent-service restart.
 - Appended Feishu section `七十六、2026-07-14 引用核查前端闭环与公网防火墙修复`; revision advanced from `108` to `109`. Append-only keyword verification confirmed sections `七十五` and `七十六` remain intact.
+
+## 2026-07-14 - Selectable single-page and spread PDF review
+
+- Refactored the React PDF reader into one document/navigation controller plus independent `PdfPageView` renderers, so each visible page owns its canvas, selectable text layer and evidence overlay.
+- Added icon controls for single-page and spread reading. Spread mode follows a cover-first layout and then renders `2–3`, `4–5`, and later pairs; page input and evidence links still focus the exact target page.
+- Page selection is now derived from the actual text layer that received the mouse gesture. Selecting text on the right page of a spread writes that page number into the review inspector.
+- Concern and citation evidence can target either visible page. Only the matching page renders the bbox/text highlight, while the inspector updates to the exact evidence page.
+- Viewports narrower than 860 px automatically use one page while retaining the desktop preference. Browser verification at 1600x1000 rendered two nonblank selectable pages, selected text from page 3, and highlighted a page-3 concern; 390x844 rendered one page with no horizontal overflow or console errors.
+- Appended Feishu section `七十七、2026-07-14 PDF 单页与双页审稿模式`; revision advanced from `109` to `110`. Append-only keyword verification confirmed sections `七十六` and `七十七` remain intact.

@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardCheck,
+  Columns2,
   Download,
   ExternalLink,
   FileText,
@@ -23,6 +24,7 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Square,
   TerminalSquare,
 } from "lucide-react";
 import "./styles.css";
@@ -722,6 +724,11 @@ function PaperWindow({
     setInspectorTab("review");
   }, []);
 
+  const handlePdfPageChange = useCallback((nextPage: number) => {
+    setCurrentPage(nextPage);
+    setPage(String(nextPage));
+  }, []);
+
   const pageConcerns = queueItems.filter((item) =>
     (item.evidence || []).some((evidence) => Number(evidence.page || 0) === currentPage),
   );
@@ -745,10 +752,7 @@ function PaperWindow({
           <PdfReviewReader
             pdfUrl={pdfUrl}
             onSelection={handlePdfSelection}
-            onPageChange={(nextPage) => {
-              setCurrentPage(nextPage);
-              setPage(String(nextPage));
-            }}
+            onPageChange={handlePdfPageChange}
             targetPage={targetPage}
             citationHighlight={citationHighlight}
           />
@@ -862,6 +866,8 @@ function PaperWindow({
   );
 }
 
+type PdfViewMode = "single" | "spread";
+
 function PdfReviewReader({
   pdfUrl,
   onSelection,
@@ -875,8 +881,6 @@ function PdfReviewReader({
   targetPage?: number;
   citationHighlight?: Evidence | null;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const textLayerRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
@@ -890,6 +894,23 @@ function PdfReviewReader({
   const [error, setError] = useState("");
   const [retryToken, setRetryToken] = useState(0);
   const [pageInput, setPageInput] = useState("1");
+  const [viewMode, setViewMode] = useState<PdfViewMode>(() =>
+    window.localStorage.getItem("peerassist.pdfViewMode") === "spread" ? "spread" : "single",
+  );
+
+  const effectiveViewMode: PdfViewMode = viewMode === "spread" && viewportWidth >= 860 ? "spread" : "single";
+  const spreadStart = pageNumber <= 1 ? 1 : pageNumber % 2 === 0 ? pageNumber : pageNumber - 1;
+  const visiblePages = useMemo(() => {
+    if (!pageCount) return [];
+    if (effectiveViewMode === "single" || spreadStart === 1) return [effectiveViewMode === "single" ? pageNumber : 1];
+    return [spreadStart, spreadStart + 1].filter((value) => value <= pageCount);
+  }, [effectiveViewMode, pageCount, pageNumber, spreadStart]);
+  const pageAvailableWidth = Math.max(
+    260,
+    effectiveViewMode === "spread"
+      ? ((viewportWidth || 1100) - 66) / 2
+      : (viewportWidth || 900) - 48,
+  );
 
   useEffect(() => {
     if (!scrollRef.current || !window.ResizeObserver) return;
@@ -930,74 +951,14 @@ function PdfReviewReader({
   }, [pdfUrl, retryToken]);
 
   useEffect(() => {
-    if (!pdfDoc || !canvasRef.current || !textLayerRef.current) return;
-    let cancelled = false;
-    let renderTask: ReturnType<Awaited<ReturnType<typeof pdfDoc.getPage>>["render"]> | null = null;
-    let textLayerTask: { cancel: () => void; render: () => Promise<void> } | null = null;
-    const canvas = canvasRef.current;
-    const textLayer = textLayerRef.current;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    textLayer.replaceChildren();
-    setStatus(`正在渲染第 ${pageNumber} 页`);
-    setError("");
-    pdfDoc
-      .getPage(pageNumber)
-      .then(async (page) => {
-        if (cancelled) return;
-        const naturalViewport = page.getViewport({ scale: 1 });
-        const availableWidth = Math.max(320, (scrollRef.current?.clientWidth || viewportWidth || 900) - 48);
-        const targetScale = fitWidth ? Math.min(2.2, Math.max(0.62, availableWidth / naturalViewport.width)) : scale;
-        const viewport = page.getViewport({ scale: targetScale });
-        const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
-        setRenderScale(targetScale);
-        canvas.width = Math.floor(viewport.width * pixelRatio);
-        canvas.height = Math.floor(viewport.height * pixelRatio);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        textLayer.style.width = `${viewport.width}px`;
-        textLayer.style.height = `${viewport.height}px`;
-        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-        renderTask = page.render({ canvas, canvasContext: context, viewport });
-        await renderTask.promise;
-        const textContent = await page.getTextContent();
-        if (cancelled) return;
-        textLayer.replaceChildren();
-        textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
-        await textLayerTask.render();
-        const highlightText = citationHighlight?.page === pageNumber ? citationHighlight.text?.trim() || "" : "";
-        if (highlightText) {
-          for (const node of textLayer.querySelectorAll("span")) {
-            if ((node.textContent || "").includes(highlightText)) node.classList.add("citation-highlight-text");
-          }
-        }
-        setStatus(`第 ${pageNumber} / ${pdfDoc.numPages} 页 · ${Math.round(targetScale * 100)}%`);
-        onPageChange(pageNumber);
-        const adjacentPages = [pageNumber - 1, pageNumber + 1].filter((value) => value >= 1 && value <= pdfDoc.numPages);
-        void Promise.allSettled(adjacentPages.map((value) => pdfDoc.getPage(value).then((nextPage) => nextPage.getOperatorList())));
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        if (error instanceof Error && error.name === "RenderingCancelledException") return;
-        const message = error instanceof Error ? error.message : "未知错误";
-        setError(message);
-        setStatus("PDF 渲染失败");
-      });
-    return () => {
-      cancelled = true;
-      renderTask?.cancel();
-      textLayerTask?.cancel();
-    };
-  }, [citationHighlight, fitWidth, onPageChange, pageNumber, pdfDoc, scale, viewportWidth]);
-
-  const captureSelection = () => {
-    const selection = window.getSelection();
-    const text = selection?.toString().replace(/\s+/g, " ").trim() || "";
-    if (!text || !textLayerRef.current || !selection?.rangeCount) return;
-    const range = selection.getRangeAt(0);
-    if (!textLayerRef.current.contains(range.commonAncestorContainer)) return;
-    onSelection({ text, page: pageNumber });
-  };
+    if (!pdfDoc || !visiblePages.length) return;
+    const before = Math.min(...visiblePages) - 1;
+    const after = Math.max(...visiblePages) + 1;
+    const adjacentPages = [before, after].filter((value) => value >= 1 && value <= pdfDoc.numPages);
+    void Promise.allSettled(
+      adjacentPages.map((value) => pdfDoc.getPage(value).then((nextPage) => nextPage.getOperatorList())),
+    );
+  }, [pdfDoc, visiblePages]);
 
   const goToPage = (nextPage: number) => {
     const boundedPage = Math.max(1, Math.min(pageCount || 1, nextPage));
@@ -1007,6 +968,30 @@ function PdfReviewReader({
 
   const commitPageInput = () => goToPage(Number(pageInput) || pageNumber);
 
+  const navigatePages = (direction: -1 | 1) => {
+    if (effectiveViewMode === "single") {
+      goToPage(pageNumber + direction);
+      return;
+    }
+    if (direction < 0) {
+      goToPage(spreadStart <= 2 ? 1 : spreadStart - 2);
+      return;
+    }
+    goToPage(spreadStart === 1 ? 2 : spreadStart + 2);
+  };
+
+  const canGoPrevious = effectiveViewMode === "single" ? pageNumber > 1 : spreadStart > 1;
+  const canGoNext = effectiveViewMode === "single"
+    ? pageNumber < pageCount
+    : spreadStart === 1
+      ? pageCount > 1
+      : spreadStart + 1 < pageCount;
+
+  const selectViewMode = (nextMode: PdfViewMode) => {
+    setViewMode(nextMode);
+    window.localStorage.setItem("peerassist.pdfViewMode", nextMode);
+  };
+
   useEffect(() => {
     if (!targetPage || !pageCount) return;
     const boundedPage = Math.max(1, Math.min(pageCount, targetPage));
@@ -1014,11 +999,25 @@ function PdfReviewReader({
     setPageInput(String(boundedPage));
   }, [pageCount, targetPage]);
 
+  const handlePageRendered = useCallback((renderedPage: number, pageScale: number) => {
+    if (renderedPage === pageNumber || visiblePages.length === 1) setRenderScale(pageScale);
+    const pageLabel = visiblePages.length > 1
+      ? `${visiblePages[0]}–${visiblePages[visiblePages.length - 1]}`
+      : String(visiblePages[0] || pageNumber);
+    setStatus(`第 ${pageLabel} / ${pdfDoc?.numPages || pageCount} 页 · ${Math.round(pageScale * 100)}%`);
+    if (renderedPage === pageNumber || visiblePages.length === 1) onPageChange(pageNumber);
+  }, [onPageChange, pageCount, pageNumber, pdfDoc, visiblePages]);
+
+  const handlePageError = useCallback((message: string) => {
+    setError(message);
+    setStatus("PDF 渲染失败");
+  }, []);
+
   return (
     <div className="pdf-reader">
       <div className="pdf-toolbar">
         <div className="pdf-toolbar-group">
-          <button className="icon-button" title="上一页" type="button" disabled={pageNumber <= 1} onClick={() => goToPage(pageNumber - 1)}>
+          <button className="icon-button" title="上一页" type="button" disabled={!canGoPrevious} onClick={() => navigatePages(-1)}>
             <ChevronLeft size={18} />
           </button>
           <label className="page-jump">
@@ -1032,12 +1031,19 @@ function PdfReviewReader({
             />
             <span>/ {pageCount || "--"}</span>
           </label>
-          <button className="icon-button" title="下一页" type="button" disabled={pageNumber >= pageCount} onClick={() => goToPage(pageNumber + 1)}>
+          <button className="icon-button" title="下一页" type="button" disabled={!canGoNext} onClick={() => navigatePages(1)}>
             <ChevronRight size={18} />
           </button>
         </div>
         <span className="pdf-status" aria-live="polite">{status}</span>
         <div className="pdf-toolbar-group">
+          <button className={`icon-button view-mode-control ${effectiveViewMode === "single" ? "active" : ""}`} title="单页阅读" type="button" aria-pressed={effectiveViewMode === "single"} onClick={() => selectViewMode("single")}>
+            <Square size={15} />
+          </button>
+          <button className={`icon-button view-mode-control ${effectiveViewMode === "spread" ? "active" : ""}`} title="双页阅读" type="button" aria-pressed={effectiveViewMode === "spread"} disabled={viewportWidth > 0 && viewportWidth < 860} onClick={() => selectViewMode("spread")}>
+            <Columns2 size={17} />
+          </button>
+          <span className="toolbar-divider" aria-hidden="true" />
           <button className="icon-button" title="缩小" type="button" onClick={() => { setFitWidth(false); setScale(Math.max(0.62, renderScale - 0.12)); }}>
             <Minus size={17} />
           </button>
@@ -1052,21 +1058,21 @@ function PdfReviewReader({
         </div>
       </div>
       <div className="pdf-scroll" ref={scrollRef}>
-        <div className="pdf-page-shell" onMouseUp={captureSelection}>
-          <canvas ref={canvasRef} className="pdf-canvas" />
-          {citationHighlight?.page === pageNumber && citationHighlight.bbox?.length === 4 && (
-            <div
-              className="citation-highlight-box"
-              aria-label="当前引用定位"
-              style={{
-                left: `${citationHighlight.bbox[0] * renderScale}px`,
-                top: `${citationHighlight.bbox[1] * renderScale}px`,
-                width: `${(citationHighlight.bbox[2] - citationHighlight.bbox[0]) * renderScale}px`,
-                height: `${(citationHighlight.bbox[3] - citationHighlight.bbox[1]) * renderScale}px`,
-              }}
+        <div className="pdf-page-grid" data-view-mode={effectiveViewMode} data-page-count={visiblePages.length}>
+          {pdfDoc && visiblePages.map((visiblePage) => (
+            <PdfPageView
+              key={visiblePage}
+              pdfDoc={pdfDoc}
+              pageNumber={visiblePage}
+              availableWidth={pageAvailableWidth}
+              fitWidth={fitWidth}
+              scale={scale}
+              highlight={citationHighlight?.page === visiblePage ? citationHighlight : null}
+              onSelection={onSelection}
+              onRendered={handlePageRendered}
+              onError={handlePageError}
             />
-          )}
-          <div ref={textLayerRef} className="pdf-text-layer" />
+          ))}
         </div>
         {(!pdfDoc || error) && (
           <div className={`pdf-loading-state ${error ? "error" : ""}`}>
@@ -1078,6 +1084,115 @@ function PdfReviewReader({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function PdfPageView({
+  pdfDoc,
+  pageNumber,
+  availableWidth,
+  fitWidth,
+  scale,
+  highlight,
+  onSelection,
+  onRendered,
+  onError,
+}: {
+  pdfDoc: PdfDocumentProxy;
+  pageNumber: number;
+  availableWidth: number;
+  fitWidth: boolean;
+  scale: number;
+  highlight?: Evidence | null;
+  onSelection: (payload: { text: string; page: number }) => void;
+  onRendered: (page: number, scale: number) => void;
+  onError: (message: string) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const textLayerRef = useRef<HTMLDivElement | null>(null);
+  const [pageScale, setPageScale] = useState(1);
+
+  useEffect(() => {
+    if (!canvasRef.current || !textLayerRef.current) return;
+    let cancelled = false;
+    let renderTask: ReturnType<Awaited<ReturnType<typeof pdfDoc.getPage>>["render"]> | null = null;
+    let textLayerTask: { cancel: () => void; render: () => Promise<void> } | null = null;
+    const canvas = canvasRef.current;
+    const textLayer = textLayerRef.current;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    textLayer.replaceChildren();
+
+    pdfDoc
+      .getPage(pageNumber)
+      .then(async (page) => {
+        if (cancelled) return;
+        const naturalViewport = page.getViewport({ scale: 1 });
+        const targetScale = fitWidth
+          ? Math.min(2.2, Math.max(0.5, availableWidth / naturalViewport.width))
+          : scale;
+        const viewport = page.getViewport({ scale: targetScale });
+        const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+        setPageScale(targetScale);
+        canvas.width = Math.floor(viewport.width * pixelRatio);
+        canvas.height = Math.floor(viewport.height * pixelRatio);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        textLayer.style.width = `${viewport.width}px`;
+        textLayer.style.height = `${viewport.height}px`;
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        renderTask = page.render({ canvas, canvasContext: context, viewport });
+        await renderTask.promise;
+        const textContent = await page.getTextContent();
+        if (cancelled) return;
+        textLayer.replaceChildren();
+        textLayerTask = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport });
+        await textLayerTask.render();
+        const highlightText = highlight?.text?.trim() || "";
+        if (highlightText) {
+          for (const node of textLayer.querySelectorAll("span")) {
+            if ((node.textContent || "").includes(highlightText)) node.classList.add("citation-highlight-text");
+          }
+        }
+        onRendered(pageNumber, targetScale);
+      })
+      .catch((error: unknown) => {
+        if (cancelled || (error instanceof Error && error.name === "RenderingCancelledException")) return;
+        onError(error instanceof Error ? error.message : "未知错误");
+      });
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+      textLayerTask?.cancel();
+    };
+  }, [availableWidth, fitWidth, highlight, onError, onRendered, pageNumber, pdfDoc, scale]);
+
+  const captureSelection = () => {
+    const selection = window.getSelection();
+    const text = selection?.toString().replace(/\s+/g, " ").trim() || "";
+    if (!text || !textLayerRef.current || !selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    if (!textLayerRef.current.contains(range.commonAncestorContainer)) return;
+    onSelection({ text, page: pageNumber });
+  };
+
+  return (
+    <div className="pdf-page-shell" aria-label={`PDF 第 ${pageNumber} 页`} onMouseUp={captureSelection}>
+      <canvas ref={canvasRef} className="pdf-canvas" />
+      {highlight?.bbox?.length === 4 && (
+        <div
+          className="citation-highlight-box"
+          aria-label="当前证据定位"
+          style={{
+            left: `${highlight.bbox[0] * pageScale}px`,
+            top: `${highlight.bbox[1] * pageScale}px`,
+            width: `${(highlight.bbox[2] - highlight.bbox[0]) * pageScale}px`,
+            height: `${(highlight.bbox[3] - highlight.bbox[1]) * pageScale}px`,
+          }}
+        />
+      )}
+      <div ref={textLayerRef} className="pdf-text-layer" />
     </div>
   );
 }

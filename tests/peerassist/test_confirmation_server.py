@@ -687,6 +687,11 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "请在论文中拖选文字" in source
     assert "rangeChunkSize: 64 * 1024" in source
     assert "pdf.worker.min.mjs" in source
+    assert "function PdfPageView" in source
+    assert 'title="单页阅读"' in source
+    assert 'title="双页阅读"' in source
+    assert 'data-view-mode={effectiveViewMode}' in source
+    assert "onSelection({ text, page: pageNumber })" in source
 
 
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:
