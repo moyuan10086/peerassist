@@ -970,6 +970,36 @@ h1 {
   pointer-events: none;
 }
 
+.pdf-annotation-pin {
+  position: absolute;
+  right: -13px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #8a6320;
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(25, 31, 29, 0.28);
+  cursor: pointer;
+}
+
+.pdf-annotation-pin.danger {
+  background: var(--danger);
+}
+
+.pdf-annotation-pin.good {
+  background: var(--good);
+}
+
+.pdf-annotation-pin:hover,
+.pdf-annotation-pin.active {
+  outline: 3px solid rgba(15, 118, 110, 0.28);
+  transform: scale(1.08);
+}
+
 .pdf-text-layer span.citation-highlight-text {
   border-radius: 2px;
   background: rgba(245, 185, 66, 0.36);
@@ -1101,6 +1131,11 @@ input:focus {
   border-radius: var(--radius);
   background: #fff;
   padding: 12px;
+}
+
+.concern-card.selected {
+  border-color: #6da99f;
+  box-shadow: inset 3px 0 0 var(--accent), 0 0 0 2px rgba(15, 118, 110, 0.08);
 }
 
 .concern-card h3,

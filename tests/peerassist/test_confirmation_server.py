@@ -692,6 +692,9 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert 'title="双页阅读"' in source
     assert 'data-view-mode={effectiveViewMode}' in source
     assert "onSelection({ text, page: pageNumber })" in source
+    assert "pdf-annotation-pin" in source
+    assert "打开关注：" in source
+    assert "selected={item.id === activeConcernId}" in source
 
 
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:

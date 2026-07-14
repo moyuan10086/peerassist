@@ -16,6 +16,7 @@ import {
   GitBranch,
   Loader2,
   Maximize2,
+  MessageSquareText,
   Minus,
   PanelRightClose,
   PanelRightOpen,
@@ -200,6 +201,16 @@ type CitationAuditSummary = {
   records?: CitationReferenceSummary[];
   links?: CitationLinkSummary[];
   warnings?: string[];
+};
+
+type PdfConcernAnnotation = {
+  id: string;
+  concernId: string;
+  page: number;
+  title: string;
+  level: string;
+  status: string;
+  evidence: Evidence;
 };
 
 type ConfirmationState = {
@@ -694,6 +705,7 @@ function PaperWindow({
   const [currentPage, setCurrentPage] = useState(1);
   const [targetPage, setTargetPage] = useState(1);
   const [citationHighlight, setCitationHighlight] = useState<Evidence | null>(null);
+  const [activeConcernId, setActiveConcernId] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [inspectorTab, setInspectorTab] = useState<"review" | "concerns" | "citations">("review");
   const [inspectorWidth, setInspectorWidth] = useState(372);
@@ -727,20 +739,65 @@ function PaperWindow({
   const handlePdfPageChange = useCallback((nextPage: number) => {
     setCurrentPage(nextPage);
     setPage(String(nextPage));
-  }, []);
+    setActiveConcernId((currentId) => {
+      if (!currentId) return "";
+      const currentConcern = queueItems.find((item) => item.id === currentId);
+      const remainsOnPage = (currentConcern?.evidence || []).some(
+        (evidence) => Number(evidence.page || 0) === nextPage,
+      );
+      return remainsOnPage ? currentId : "";
+    });
+  }, [queueItems]);
 
   const pageConcerns = queueItems.filter((item) =>
     (item.evidence || []).some((evidence) => Number(evidence.page || 0) === currentPage),
   );
   const citationLinks = citationAudit?.links || [];
   const pageCitations = citationLinks.filter((item) => Number(item.mention?.page || 0) === currentPage);
+  const concernAnnotations = useMemo(() => {
+    const result: PdfConcernAnnotation[] = [];
+    for (const concern of queueItems) {
+      const evidenceByPage = new Map<number, Evidence>();
+      for (const evidence of concern.evidence || []) {
+        const evidencePage = Number(evidence.page || 0);
+        if (evidencePage <= 0) continue;
+        const current = evidenceByPage.get(evidencePage);
+        if (!current || (!current.bbox?.length && evidence.bbox?.length)) evidenceByPage.set(evidencePage, evidence);
+      }
+      for (const [evidencePage, evidence] of evidenceByPage) {
+        result.push({
+          id: `${concern.id}:${evidencePage}`,
+          concernId: concern.id,
+          page: evidencePage,
+          title: concern.title || concern.id,
+          level: concern.level || "",
+          status: concern.status || "",
+          evidence,
+        });
+      }
+    }
+    return result;
+  }, [queueItems]);
 
-  const locateEvidence = (evidence?: Evidence) => {
+  const locateEvidence = useCallback((evidence?: Evidence) => {
     if (!evidence) return;
     const evidencePage = Number(evidence.page || 0);
     if (evidencePage > 0) setTargetPage(evidencePage);
     setCitationHighlight(evidence);
-  };
+  }, []);
+
+  const openConcernAnnotation = useCallback((annotation: PdfConcernAnnotation) => {
+    setActiveConcernId(annotation.concernId);
+    setInspectorOpen(true);
+    setInspectorTab("concerns");
+    locateEvidence(annotation.evidence);
+  }, [locateEvidence]);
+
+  const baseConcerns = pageConcerns.length ? pageConcerns : queueItems.slice(0, 5);
+  const activeConcern = queueItems.find((item) => item.id === activeConcernId);
+  const displayedConcerns = activeConcern
+    ? [activeConcern, ...baseConcerns.filter((item) => item.id !== activeConcern.id)]
+    : baseConcerns;
 
   return (
     <section
@@ -755,6 +812,9 @@ function PaperWindow({
             onPageChange={handlePdfPageChange}
             targetPage={targetPage}
             citationHighlight={citationHighlight}
+            annotations={concernAnnotations}
+            activeConcernId={activeConcernId}
+            onAnnotationOpen={openConcernAnnotation}
           />
         ) : (
           <div className="empty-pdf">当前运行目录没有发现原始 PDF。</div>
@@ -831,13 +891,15 @@ function PaperWindow({
             </div>
           ) : inspectorTab === "concerns" ? (
             <div className="inspector-body concern-list">
-              {(pageConcerns.length ? pageConcerns : queueItems.slice(0, 5)).map((item) => (
+              {displayedConcerns.map((item) => (
                 <ConcernCard
                   concern={item}
                   compact
+                  selected={item.id === activeConcernId}
                   disabled={busy}
                   onDecision={readyForConfirmation && item.status === "pending_human_confirmation" ? onDecision : undefined}
                   onLocate={(evidence) => {
+                    setActiveConcernId(item.id);
                     locateEvidence(evidence);
                   }}
                   key={item.id}
@@ -874,12 +936,18 @@ function PdfReviewReader({
   onPageChange,
   targetPage,
   citationHighlight,
+  annotations,
+  activeConcernId,
+  onAnnotationOpen,
 }: {
   pdfUrl: string;
   onSelection: (payload: { text: string; page: number }) => void;
   onPageChange: (page: number) => void;
   targetPage?: number;
   citationHighlight?: Evidence | null;
+  annotations: PdfConcernAnnotation[];
+  activeConcernId: string;
+  onAnnotationOpen: (annotation: PdfConcernAnnotation) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
@@ -1068,7 +1136,10 @@ function PdfReviewReader({
               fitWidth={fitWidth}
               scale={scale}
               highlight={citationHighlight?.page === visiblePage ? citationHighlight : null}
+              annotations={annotations.filter((annotation) => annotation.page === visiblePage)}
+              activeConcernId={activeConcernId}
               onSelection={onSelection}
+              onAnnotationOpen={onAnnotationOpen}
               onRendered={handlePageRendered}
               onError={handlePageError}
             />
@@ -1095,7 +1166,10 @@ function PdfPageView({
   fitWidth,
   scale,
   highlight,
+  annotations,
+  activeConcernId,
   onSelection,
+  onAnnotationOpen,
   onRendered,
   onError,
 }: {
@@ -1105,13 +1179,31 @@ function PdfPageView({
   fitWidth: boolean;
   scale: number;
   highlight?: Evidence | null;
+  annotations: PdfConcernAnnotation[];
+  activeConcernId: string;
   onSelection: (payload: { text: string; page: number }) => void;
+  onAnnotationOpen: (annotation: PdfConcernAnnotation) => void;
   onRendered: (page: number, scale: number) => void;
   onError: (message: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
   const [pageScale, setPageScale] = useState(1);
+  const [pageHeight, setPageHeight] = useState(0);
+  const annotationPlacements = useMemo(() => {
+    let nextTop = 12;
+    const maxTop = Math.max(12, pageHeight - 30);
+    return [...annotations]
+      .sort((left, right) => Number(left.evidence.bbox?.[1] || 0) - Number(right.evidence.bbox?.[1] || 0))
+      .map((annotation, index) => {
+        const rawTop = annotation.evidence.bbox?.length === 4
+          ? Number(annotation.evidence.bbox[1]) * pageScale
+          : 18 + index * 30;
+        const top = Math.min(maxTop, Math.max(nextTop, rawTop));
+        nextTop = top + 28;
+        return { annotation, top };
+      });
+  }, [annotations, pageHeight, pageScale]);
 
   useEffect(() => {
     if (!canvasRef.current || !textLayerRef.current) return;
@@ -1135,6 +1227,7 @@ function PdfPageView({
         const viewport = page.getViewport({ scale: targetScale });
         const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
         setPageScale(targetScale);
+        setPageHeight(viewport.height);
         canvas.width = Math.floor(viewport.width * pixelRatio);
         canvas.height = Math.floor(viewport.height * pixelRatio);
         canvas.style.width = `${viewport.width}px`;
@@ -1192,6 +1285,22 @@ function PdfPageView({
           }}
         />
       )}
+      {annotationPlacements.map(({ annotation, top }) => (
+        <button
+          className={`pdf-annotation-pin ${annotation.level === "major_concern" ? "danger" : annotation.status === "confirmed" ? "good" : "warn"} ${annotation.concernId === activeConcernId ? "active" : ""}`}
+          key={annotation.id}
+          type="button"
+          title={`打开关注：${annotation.title}`}
+          aria-label={`打开关注：${annotation.title}`}
+          style={{ top: `${top}px` }}
+          onClick={(event) => {
+            event.stopPropagation();
+            onAnnotationOpen(annotation);
+          }}
+        >
+          <MessageSquareText size={13} />
+        </button>
+      ))}
       <div ref={textLayerRef} className="pdf-text-layer" />
     </div>
   );
@@ -1750,19 +1859,21 @@ function CitationAuditPanel({
 function ConcernCard({
   concern,
   compact,
+  selected,
   disabled,
   onDecision,
   onLocate,
 }: {
   concern: Concern;
   compact?: boolean;
+  selected?: boolean;
   disabled?: boolean;
   onDecision?: (concern: Concern, action: string) => void;
   onLocate?: (evidence: Evidence) => void;
 }) {
   const evidence = concern.evidence || [];
   return (
-    <article className="concern-card">
+    <article className={`concern-card ${selected ? "selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <div className="tag-row">
         <span className={`tag ${concern.level === "major_concern" ? "danger" : "warn"}`}>{labelLevel(concern.level || "")}</span>
         <span className="tag">{labelCategory(concern.category || "")}</span>

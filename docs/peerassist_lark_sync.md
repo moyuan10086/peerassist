@@ -324,3 +324,11 @@ model keys, paper secrets, or reviewer-private material here.
 - Concern and citation evidence can target either visible page. Only the matching page renders the bbox/text highlight, while the inspector updates to the exact evidence page.
 - Viewports narrower than 860 px automatically use one page while retaining the desktop preference. Browser verification at 1600x1000 rendered two nonblank selectable pages, selected text from page 3, and highlighted a page-3 concern; 390x844 rendered one page with no horizontal overflow or console errors.
 - Appended Feishu section `七十七、2026-07-14 PDF 单页与双页审稿模式`; revision advanced from `109` to `110`. Append-only keyword verification confirmed sections `七十六` and `七十七` remain intact.
+
+## 2026-07-14 - PDF-to-concern reverse navigation
+
+- Added one page-edge annotation marker per concern and PDF page, preferring evidence with bbox coordinates and applying vertical collision spacing for nearby findings.
+- Clicking a marker opens the inspector, selects `本页关注`, moves the linked concern to the first position, applies a selected-card state and highlights the source evidence.
+- Existing concern evidence links continue to navigate from the card back to the PDF, completing a bidirectional path over the same concern ID, evidence ID, page and bbox.
+- Desktop browser verification confirmed a page-3 marker on the right page of a `2–3` spread, no marker on page 2, exact concern focus and bbox highlight. Mobile verification confirmed the marker remains reachable without horizontal overflow.
+- Appended Feishu section `七十八、2026-07-14 PDF 原文与 concern 双向定位`; revision advanced from `110` to `111`. Append-only keyword verification confirmed sections `七十七` and `七十八` remain intact.
