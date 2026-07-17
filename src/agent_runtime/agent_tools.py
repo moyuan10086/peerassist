@@ -9,8 +9,8 @@ from uuid import uuid4
 
 from agents import RunContextWrapper, function_tool
 
-from common.config import Settings
 from common import run_stats
+from common.config import Settings
 from common.state import mutate_job_state
 from common.storage import annotations_path, append_event, write_json_atomic, write_text_atomic
 from common.types import AnnotationItem, PaperSearchUsage

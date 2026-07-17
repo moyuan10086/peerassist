@@ -7,8 +7,9 @@ import math
 import os
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 try:
     import fcntl
@@ -278,7 +279,7 @@ def estimate_tokens(text: str) -> int:
         return 0
     # Rough cross-provider approximation for auditability when a backend does
     # not return usage. The warning path always marks these totals as estimated.
-    return max(1, int(math.ceil(len(clean) / 4)))
+    return max(1, math.ceil(len(clean) / 4))
 
 
 def record_llm_call(
@@ -434,7 +435,7 @@ def format_summary_table(payload: dict[str, Any]) -> list[str]:
             notes.append("external/no own LLM")
         line = (
             f"  {module:<18}  "
-            f"{str(row.get('status') or 'pending'):<12}  "
+            f"{row.get('status') or 'pending'!r:<12}  "
             f"{format_seconds(row.get('duration_sec')):<9}  "
             f"{_fmt_int(usage.get('requests')):>8}  "
             f"{_fmt_int(usage.get('input_tokens')):>10}  "

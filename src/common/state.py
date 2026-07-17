@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from .run_stats import log_status
 from .storage import append_event, job_dir, read_json, state_path, write_json_atomic
 from .types import JobState, JobStatus
-from .run_stats import log_status
 
 _STATE_LOCK = threading.RLock()
 

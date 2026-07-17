@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -108,7 +108,7 @@ class _StubParseProvider:
     kind: ParseProviderKind
     external_upload_required: bool
     request_mode = "adapter_stub"
-    expected_artifacts: list[str] = []
+    expected_artifacts: ClassVar[list[str]] = []
 
     def __init__(
         self,
@@ -174,7 +174,7 @@ class PaddleOCRStructureProvider(_StubParseProvider):
     kind = ParseProviderKind.PADDLEOCR_STRUCTURE_V3
     external_upload_required = False
     request_mode = "local_paddleocr_structure_v3"
-    expected_artifacts = ["markdown", "structured_layout_json"]
+    expected_artifacts: ClassVar[list[str]] = ["markdown", "structured_layout_json"]
 
 
 class BaiduDocumentParseProvider(_StubParseProvider):
@@ -182,7 +182,7 @@ class BaiduDocumentParseProvider(_StubParseProvider):
     kind = ParseProviderKind.BAIDU_DOC_PARSER
     external_upload_required = True
     request_mode = "baidu_document_parse"
-    expected_artifacts = ["markdown", "structured_layout_json"]
+    expected_artifacts: ClassVar[list[str]] = ["markdown", "structured_layout_json"]
 
 
 class BaiduPaddleOCRVLProvider(_StubParseProvider):
@@ -190,7 +190,7 @@ class BaiduPaddleOCRVLProvider(_StubParseProvider):
     kind = ParseProviderKind.BAIDU_PADDLEOCR_VL
     external_upload_required = True
     request_mode = "baidu_paddleocr_vl"
-    expected_artifacts = ["multimodal_layout_json", "markdown"]
+    expected_artifacts: ClassVar[list[str]] = ["multimodal_layout_json", "markdown"]
 
 
 class BaiduUnlimitedOCRProvider(_StubParseProvider):
@@ -198,4 +198,4 @@ class BaiduUnlimitedOCRProvider(_StubParseProvider):
     kind = ParseProviderKind.BAIDU_UNLIMITED_OCR
     external_upload_required = True
     request_mode = "baidu_unlimited_ocr"
-    expected_artifacts = ["ocr_text", "structured_layout_json"]
+    expected_artifacts: ClassVar[list[str]] = ["ocr_text", "structured_layout_json"]

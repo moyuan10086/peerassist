@@ -1275,9 +1275,7 @@ def _call_looks_import_unsafe(name: str) -> bool:
         return True
     if leaf.startswith(("load_", "read_", "run_", "train_", "eval_", "download_")):
         return True
-    if value.endswith((".read_csv", ".read_excel", ".read_table", ".load", ".save", ".dump", ".dumps")):
-        return True
-    return False
+    return value.endswith((".read_csv", ".read_excel", ".read_table", ".load", ".save", ".dump", ".dumps"))
 
 
 def _top_level_side_effect_calls(path: Path) -> list[str]:

@@ -6,7 +6,6 @@ import json
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -60,7 +59,7 @@ class MCPServerSpec(BaseModel):
     tools: list[MCPToolSpec] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_transport_shape(self) -> "MCPServerSpec":
+    def validate_transport_shape(self) -> MCPServerSpec:
         transport = self.transport.strip().lower()
         healthy = self.health.model_copy(deep=True)
         if transport == "stdio":

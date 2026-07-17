@@ -16,8 +16,8 @@ import numpy as np
 import requests
 from PIL import Image
 
-from common.env import load_env_file
 from common import run_stats
+from common.env import load_env_file
 
 _SECTION_RE = re.compile(
     r"(?ims)^##\s+(?P<title>(?:\*\*)?\d+\.\s+.+?(?:\*\*)?)\s*$\n(?P<body>.*?)(?=^##\s+|\Z)"
@@ -314,7 +314,7 @@ def _template_region_constraints() -> str:
     template image are sufficient to guide layout.
     """
     lines = ["Lock these structural regions to the template's geometry:"]
-    for name in _TEMPLATE_REGION_BBOXES.keys():
+    for name in _TEMPLATE_REGION_BBOXES:
         hint = _TEMPLATE_REGION_PROMPT_HINTS.get(name, "")
         label = _TEMPLATE_REGION_DISPLAY_LABELS.get(name, name)
         if hint:
@@ -666,7 +666,7 @@ def _experiment_table_to_markdown(table: TableBlock | None, *, is_ablation: bool
                 metric_text = row[metric_idx] if 0 <= metric_idx < len(row) else ""
                 colored[diff_idx] = _colorize_main_diff(colored[diff_idx], metric_text)
         rows_md.append("| " + " | ".join(colored) + " |")
-    return "\n".join([head, sep] + rows_md).strip()
+    return "\n".join([head, sep, *rows_md]).strip()
 
 
 def _main_result_row_value(

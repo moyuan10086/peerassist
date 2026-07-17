@@ -4,9 +4,11 @@ import json
 import tomllib
 from pathlib import Path
 
-from common.pipeline_context import write_json_file
-from peerassist.eval_cli import load_eval_records, main as eval_cli_main
 from tests.peerassist.test_eval_record_builder import _seed_stage
+
+from common.pipeline_context import write_json_file
+from peerassist.eval_cli import load_eval_records
+from peerassist.eval_cli import main as eval_cli_main
 
 
 def _manifest(path: Path) -> None:

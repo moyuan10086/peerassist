@@ -141,7 +141,7 @@ def run_parse_stage(
         runtime_error = str(own_payload.get("error") or "").strip()
         runtime_message = str(own_payload.get("message") or "").strip()
         runtime_status = str(own_payload.get("status") or "").strip()
-        detail = runtime_error or runtime_message or f"runtime status={runtime_status!r}" or "no detail"
+        detail = runtime_error or runtime_message or f"runtime status={runtime_status!r}"
         error = f"MinerU markdown not produced ({detail})"
     return StageResult(
         status="ok" if md_ok else "failed",

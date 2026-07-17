@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from peerassist.confirmations import apply_confirmations
 from peerassist.concerns import concern_from_agent_draft, concerns_from_checks
+from peerassist.confirmations import apply_confirmations
 from schemas.peerassist import (
     AgentConcernDraft,
-    ConcernStatus,
     ConcernLevel,
+    ConcernStatus,
     DeterministicCheck,
     DeterministicCheckApplicability,
     DeterministicCheckStatus,

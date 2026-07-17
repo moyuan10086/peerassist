@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from peerassist.capabilities import (
-    CapabilityRegistry,
     CapabilitySource,
     PermissionClass,
     default_capability_registry,

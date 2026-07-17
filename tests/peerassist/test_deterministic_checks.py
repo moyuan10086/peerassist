@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from peerassist.evidence_ledger import build_evidence_ledger
 from peerassist.deterministic_checks import run_deterministic_checks
+from peerassist.evidence_ledger import build_evidence_ledger
 from schemas.peerassist import (
     DeterministicCheckApplicability,
     DeterministicCheckStatus,
