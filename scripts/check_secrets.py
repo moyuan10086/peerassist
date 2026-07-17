@@ -37,7 +37,10 @@ class Finding:
     rule: str
 
     def render(self) -> str:
-        return f"{self.path.as_posix()}:{self.line}: {self.rule}"
+        path = self.path.as_posix()
+        for _, pattern in _RULES:
+            path = pattern.sub("<redacted>", path)
+        return f"{path}:{self.line}: {self.rule}"
 
 
 def _default_files(root: Path) -> list[Path]:

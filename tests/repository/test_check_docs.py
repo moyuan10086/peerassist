@@ -102,3 +102,23 @@ def test_check_docs_cli_prints_only_path_and_target(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert result.stdout == "README.md: missing.md\n"
     assert result.stderr == ""
+
+
+def test_overlong_local_destination_is_reported_without_filesystem_exception(tmp_path: Path) -> None:
+    raw_target = "(" * 5000 + ")" * 5000
+    source = tmp_path / "README.md"
+    source.write_text(f"[overlong]({raw_target})\n", encoding="utf-8")
+
+    assert find_broken_links(tmp_path, [source]) == [(Path("README.md"), raw_target)]
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_docs.py"), str(source)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == f"README.md: {raw_target}\n"
+    assert result.stderr == ""

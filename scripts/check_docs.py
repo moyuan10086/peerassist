@@ -172,13 +172,14 @@ def find_broken_links(root: Path, files: Iterable[Path]) -> list[tuple[Path, str
             decoded = unquote(split.path)
             if not decoded:
                 continue
-            candidate = (source.parent / decoded).resolve()
             try:
+                candidate = (source.parent / decoded).resolve()
                 candidate.relative_to(root)
-            except ValueError:
+                exists = candidate.exists()
+            except (OSError, RuntimeError, ValueError):
                 broken.add((source_rel.as_posix(), raw_target))
                 continue
-            if not candidate.exists():
+            if not exists:
                 broken.add((source_rel.as_posix(), raw_target))
     return [(Path(source), target) for source, target in sorted(broken)]
 

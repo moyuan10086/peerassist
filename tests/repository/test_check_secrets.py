@@ -174,3 +174,29 @@ def test_check_secrets_cli_never_prints_matched_value(tmp_path: Path) -> None:
     assert result.stdout == "config.txt:1: openai-api-key\n"
     assert secret not in result.stdout
     assert result.stderr == ""
+
+
+def test_secret_shaped_filename_is_redacted_only_when_rendered(tmp_path: Path) -> None:
+    secret = _github_token()
+    sample = tmp_path / f"captured-{secret}.txt"
+    sample.write_text(secret, encoding="utf-8")
+
+    findings = scan_files(tmp_path, [sample])
+
+    assert findings == [Finding(Path(sample.name), 1, "github-token")]
+    assert findings[0].path == Path(sample.name)
+    assert findings[0].render() == "captured-<redacted>.txt:1: github-token"
+    assert secret not in findings[0].render()
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py"), str(sample)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "captured-<redacted>.txt:1: github-token\n"
+    assert secret not in result.stdout
+    assert result.stderr == ""
