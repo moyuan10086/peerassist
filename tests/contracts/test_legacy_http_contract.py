@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import re
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +24,56 @@ from schemas.peerassist_jobs import PaperRecord, ReviewJobState
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures" / "contracts"
 PAPER_SHA256 = "8c22d331f340849a1a2afced41d775340996bf754cda8dec3c7525f82fcf6456"
+CONTRACT = json.loads(
+    (FIXTURES / "legacy_http_contract.v1.json").read_text(encoding="utf-8")
+)
+
+
+def _route_pattern(template: str) -> re.Pattern[str]:
+    parts = re.split(r"(\{[^}]+\})", template)
+    pattern = "".join("[^/]+" if part.startswith("{") else re.escape(part) for part in parts)
+    return re.compile(f"^{pattern}$")
+
+
+def _contract_route(method: str, path: str) -> dict[str, Any]:
+    route_path = path.split("?", 1)[0]
+    matches = [
+        route
+        for route in CONTRACT["routes"]
+        if route["method"] == method and _route_pattern(route["path"]).fullmatch(route_path)
+    ]
+    assert len(matches) == 1, f"missing or ambiguous contract for {method} {route_path}"
+    return matches[0]
+
+
+def _field(payload: Any, dotted_path: str) -> Any:
+    current = payload
+    for segment in dotted_path.split("."):
+        assert isinstance(current, dict) and segment in current, f"missing field {dotted_path}"
+        current = current[segment]
+    return current
+
+
+def _assert_contract_response(
+    method: str,
+    path: str,
+    status: int,
+    headers: dict[str, str],
+    content: bytes,
+) -> None:
+    route = _contract_route(method, path)
+    allowed = {
+        int(route[name])
+        for name in ("status", "range_status", "conflict_status", "interruption_status")
+        if name in route
+    }
+    assert status in allowed
+    for name in route["required_headers"]:
+        assert name.lower() in headers, f"missing header {name} for {method} {path}"
+    if status == route["status"] and route["required_fields"]:
+        payload = json.loads(content.decode("utf-8"))
+        for name in route["required_fields"]:
+            _field(payload, name)
 
 
 class _NoopScheduler:
@@ -46,6 +97,7 @@ def _request(
     response = connection.getresponse()
     result = response.status, {key.lower(): value for key, value in response.getheaders()}, response.read()
     connection.close()
+    _assert_contract_response(method, path, *result)
     return result
 
 
@@ -141,7 +193,7 @@ def _seed_transition_job(
 
 
 def test_legacy_http_snapshot_declares_the_complete_supported_surface() -> None:
-    contract = json.loads((FIXTURES / "legacy_http_contract.v1.json").read_text(encoding="utf-8"))
+    contract = CONTRACT
     assert contract["schema_version"] == "peerassist.legacy_http_contract.v1"
     actual = {(route["method"], route["path"]) for route in contract["routes"]}
     expected = {
@@ -197,6 +249,25 @@ def test_contract_fixtures_are_public_deterministic_and_self_consistent() -> Non
         assert payload["schema_version"] == schema
 
     assert hashlib.sha256(pdf).hexdigest() == PAPER_SHA256
+
+
+def test_runtime_response_validation_is_driven_by_the_json_contract(
+    tmp_path: Path,
+) -> None:
+    route = _contract_route("GET", "/api/health")
+    original = list(route["required_fields"])
+    route["required_fields"].append("field_that_cannot_exist")
+    server = create_review_job_server(data_dir=tmp_path, port=0)
+    try:
+        with _running(server) as port:
+            try:
+                _json_request(port, "GET", "/api/health")
+            except AssertionError as exc:
+                assert "field_that_cannot_exist" in str(exc)
+            else:
+                raise AssertionError("mutated JSON contract did not fail a real response")
+    finally:
+        route["required_fields"] = original
 
 
 def test_workspace_routes_and_pdf_bytes_match_the_frozen_contract(tmp_path: Path) -> None:
@@ -412,3 +483,93 @@ def test_review_api_freezes_create_read_approval_transition_and_artifact_contrac
         assert report["confirmation_revision"] == 1
         assert report["concerns"][0]["evidence_ids"] == expected_final["required_evidence_ids"]
         assert expected_final["required_citation_ids"][0] in report["concerns"][0]["metadata"]["citation_finding_ids"]
+
+
+def test_decision_event_is_reconciled_after_an_interrupted_audit_append(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    data_dir = tmp_path / "repository"
+    _seed_paper(data_dir)
+    primary = _seed_workspace(data_dir)
+    server = create_review_job_server(data_dir=data_dir, port=0)
+    server.review_service.scheduler.shutdown(wait=True)
+    server.review_service.scheduler = _NoopScheduler()
+    concern = _load("concern.v1.json")
+    payload = {
+        "concern_id": concern["id"],
+        "finding_lineage_id": concern["finding_lineage_id"],
+        "finding_id": concern["finding_id"],
+        "finding_revision": concern["revision"],
+        "confirmation_revision": 0,
+        "action": "confirm",
+        "reviewer_id": "contract-reviewer",
+        "timestamp": "2026-07-17T00:01:00Z",
+    }
+    original_append = server.review_service.repository.append_event
+
+    def fail_append(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("simulated audit append interruption")
+
+    monkeypatch.setattr(server.review_service.repository, "append_event", fail_append)
+    with _running(server) as port:
+        status, _, failed = _json_request(
+            port, "POST", f"/api/jobs/{primary.id}/decisions", payload
+        )
+        assert status == 500
+        assert failed["error"] == "decision_commit_interrupted"
+        persisted = ReviewJobRepository(data_dir).get(primary.id)
+        assert persisted.confirmation_revision == 1
+        assert persisted.last_event_id == 0
+
+        monkeypatch.setattr(server.review_service.repository, "append_event", original_append)
+        status, _, recovered = _json_request(port, "GET", f"/api/jobs/{primary.id}")
+        assert status == 200
+        assert recovered["job"]["confirmation_revision"] == 1
+        assert recovered["job"]["last_event_id"] == 1
+        events = ReviewJobRepository(data_dir).replay_events(primary.id)
+        assert [(event.event_type, event.payload["confirmation_revision"]) for event in events] == [
+            ("confirmation_decision_applied", 1)
+        ]
+
+
+def test_decision_state_is_reconciled_after_an_interrupted_job_update(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    data_dir = tmp_path / "repository"
+    _seed_paper(data_dir)
+    primary = _seed_workspace(data_dir)
+    server = create_review_job_server(data_dir=data_dir, port=0)
+    server.review_service.scheduler.shutdown(wait=True)
+    server.review_service.scheduler = _NoopScheduler()
+    concern = _load("concern.v1.json")
+    payload = {
+        "concern_id": concern["id"],
+        "finding_lineage_id": concern["finding_lineage_id"],
+        "finding_id": concern["finding_id"],
+        "finding_revision": concern["revision"],
+        "confirmation_revision": 0,
+        "action": "confirm",
+        "reviewer_id": "contract-reviewer",
+        "timestamp": "2026-07-17T00:01:00Z",
+    }
+    original_update = server.review_service.repository.update
+
+    def fail_update(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("simulated aggregate update interruption")
+
+    monkeypatch.setattr(server.review_service.repository, "update", fail_update)
+    with _running(server) as port:
+        status, _, failed = _json_request(
+            port, "POST", f"/api/jobs/{primary.id}/decisions", payload
+        )
+        assert status == 500
+        assert failed["error"] == "decision_commit_interrupted"
+        persisted = ReviewJobRepository(data_dir).get(primary.id)
+        assert persisted.confirmation_revision == 0
+        assert persisted.last_event_id == 0
+
+        monkeypatch.setattr(server.review_service.repository, "update", original_update)
+        status, _, recovered = _json_request(port, "GET", f"/api/jobs/{primary.id}")
+        assert status == 200
+        assert recovered["job"]["confirmation_revision"] == 1
+        assert recovered["job"]["last_event_id"] == 1

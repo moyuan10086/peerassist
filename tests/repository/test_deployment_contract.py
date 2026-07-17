@@ -19,7 +19,6 @@ def test_systemd_examples_are_portable_private_and_hardened() -> None:
         "NoNewPrivileges=true",
         "PrivateTmp=true",
         "ProtectSystem=strict",
-        "ReadWritePaths=/var/lib/peerassist",
     }
     for name in ("peerassist-review-api.service", "peerassist-ui.service"):
         source = (SYSTEMD / name).read_text(encoding="utf-8")
@@ -36,9 +35,15 @@ def test_systemd_examples_are_portable_private_and_hardened() -> None:
     workspace = (SYSTEMD / "peerassist-ui.service").read_text(encoding="utf-8")
     assert "--host 127.0.0.1 --port 8767" in review
     assert "--data-dir /var/lib/peerassist/data" in review
+    assert "ReadWritePaths=/var/lib/peerassist/data" in review
+    assert "ReadWritePaths=/var/lib/peerassist/workspace" not in review
+    assert "InaccessiblePaths=/var/lib/peerassist/workspace" in review
     assert "--host 127.0.0.1 --port 8766" in workspace
     assert "--run-dir /var/lib/peerassist/workspace/run" in workspace
     assert "--paper-id current" in workspace
+    assert "ReadWritePaths=/var/lib/peerassist/workspace" in workspace
+    assert "ReadWritePaths=/var/lib/peerassist/data" not in workspace
+    assert "InaccessiblePaths=/var/lib/peerassist/data" in workspace
 
 
 def test_systemd_environment_and_smoke_script_are_safe_examples() -> None:

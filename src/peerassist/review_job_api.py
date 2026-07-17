@@ -9,6 +9,7 @@ import re
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
@@ -63,6 +64,10 @@ _REVIEW_STAGE_PREDECESSOR = {
 }
 
 
+class DecisionCommitInterruptedError(RuntimeError):
+    """A decision persisted but its aggregate state or audit event needs reconciliation."""
+
+
 class ReviewJobService:
     def __init__(self, data_dir: Path) -> None:
         self.paper_repository = PaperRepository(data_dir)
@@ -73,6 +78,7 @@ class ReviewJobService:
             owner=f"api-{uuid4().hex}",
         )
         self.scheduler = ReviewJobScheduler(self.runner, max_workers=2)
+        self._decision_reconciliation_lock = Lock()
         self.scheduler.recover_orphans()
 
     def create_review(
@@ -109,6 +115,7 @@ class ReviewJobService:
         self.scheduler.shutdown(wait=True)
 
     def job_view(self, state: ReviewJobState) -> dict[str, Any]:
+        state = self._reconcile_confirmation_commit(state)
         events = self.repository.replay_events(state.id)
         attempts: dict[str, int] = {}
         stage_starts: dict[tuple[str, ReviewStage], Any] = {}
@@ -169,7 +176,7 @@ class ReviewJobService:
         return source, record.paper_id
 
     def workspace(self, job_id: UUID | str) -> tuple[ReviewJobState, dict[str, Any]]:
-        state = self.repository.get(job_id)
+        state = self._reconcile_confirmation_commit(self.repository.get(job_id))
         run_dir = self._run_dir(state)
         workspace = load_confirmation_state(run_dir=run_dir)
         out_dir = peerassist_stage_dir(run_dir)
@@ -536,8 +543,32 @@ class ReviewJobService:
                 break
             except RepositoryConflictError:
                 continue
+            except Exception as exc:
+                raise DecisionCommitInterruptedError(
+                    "decision_commit_interrupted"
+                ) from exc
         else:
-            raise RepositoryConflictError("unable to persist confirmation revision")
+            raise DecisionCommitInterruptedError("decision_commit_interrupted")
+        try:
+            self._append_confirmation_event(
+                state,
+                concern_id=str(payload.get("concern_id") or ""),
+                action=str(payload.get("action") or ""),
+                confirmation_revision=confirmation_revision,
+            )
+        except Exception as exc:
+            raise DecisionCommitInterruptedError("decision_commit_interrupted") from exc
+        state, workspace = self.workspace(job_id)
+        return state, result, workspace
+
+    def _append_confirmation_event(
+        self,
+        state: ReviewJobState,
+        *,
+        concern_id: str,
+        action: str,
+        confirmation_revision: int,
+    ) -> None:
         self.repository.append_event(
             state.id,
             "confirmation_decision_applied",
@@ -545,13 +576,60 @@ class ReviewJobService:
             status=state.status,
             attempt_id=state.attempt_id,
             payload={
-                "concern_id": str(payload.get("concern_id") or ""),
-                "action": str(payload.get("action") or ""),
+                "concern_id": concern_id,
+                "action": action,
                 "confirmation_revision": confirmation_revision,
             },
         )
-        state, workspace = self.workspace(job_id)
-        return state, result, workspace
+
+    def _reconcile_confirmation_commit(self, state: ReviewJobState) -> ReviewJobState:
+        with self._decision_reconciliation_lock:
+            run_dir = self._run_dir(state)
+            confirmations = read_json_file(
+                peerassist_stage_dir(run_dir) / "human_confirmations.json"
+            )
+            file_revision = max(0, int(confirmations.get("revision") or 0))
+            if file_revision > state.confirmation_revision:
+                for _ in range(3):
+                    current = self.repository.get(state.id)
+                    if current.confirmation_revision >= file_revision:
+                        state = current
+                        break
+                    try:
+                        state = self.repository.update(
+                            state.id,
+                            expected_revision=current.revision,
+                            confirmation_revision=file_revision,
+                        )
+                        break
+                    except RepositoryConflictError:
+                        continue
+                else:
+                    raise RepositoryConflictError(
+                        "unable to reconcile confirmation revision"
+                    )
+
+            events = self.repository.replay_events(state.id)
+            recorded = {
+                int(event.payload.get("confirmation_revision") or 0)
+                for event in events
+                if event.event_type == "confirmation_decision_applied"
+            }
+            actions = (
+                confirmations.get("actions")
+                if isinstance(confirmations.get("actions"), list)
+                else []
+            )
+            for revision, row in enumerate(actions[:file_revision], start=1):
+                if revision in recorded or not isinstance(row, dict):
+                    continue
+                self._append_confirmation_event(
+                    state,
+                    concern_id=str(row.get("concern_id") or ""),
+                    action=str(row.get("action") or ""),
+                    confirmation_revision=revision,
+                )
+            return self.repository.get(state.id)
 
     def _run_dir(self, state: ReviewJobState) -> Path:
         run_dir = (self.repository.data_dir / state.run_dir).resolve(strict=True)
@@ -695,6 +773,9 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
                 state, result, workspace = self.service.apply_decision(
                     decision.group("job"), payload
                 )
+            except DecisionCommitInterruptedError as exc:
+                self._send_json({"error": str(exc)}, status=500)
+                return
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return

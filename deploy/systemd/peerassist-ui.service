@@ -18,7 +18,8 @@ RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/peerassist
+ReadWritePaths=/var/lib/peerassist/workspace
+InaccessiblePaths=/var/lib/peerassist/data
 
 [Install]
 WantedBy=multi-user.target
