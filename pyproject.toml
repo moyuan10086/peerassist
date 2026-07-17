@@ -137,6 +137,8 @@ packages = [
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/pipeline_full.py" = "pipeline_full.py"
+"RefCopilot/src/refcopilot" = "refcopilot"
+"web/peerassist-workspace/dist" = "web/peerassist-workspace/dist"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "demos", "README.md", "LICENSE"]

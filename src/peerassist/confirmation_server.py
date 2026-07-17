@@ -24,8 +24,8 @@ from peerassist.review_context import build_review_context
 from peerassist.review_job_api import create_review_job_server as create_review_job_server
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
-_FRONTEND_APP_ROOT = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace"
-_FRONTEND_DIST_ROOT = _FRONTEND_APP_ROOT / "dist"
+_SOURCE_FRONTEND_APP_ROOT = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace"
+_PACKAGED_FRONTEND_DIST_ROOT = Path(__file__).resolve().parents[1] / "web" / "peerassist-workspace" / "dist"
 _WORKSPACE_ROUTES = {"/", "/paper", "/agent", "/queue", "/trace", "/confirm", "/artifacts"}
 
 
@@ -5408,7 +5408,11 @@ def render_workspace_app(*, run_dir: Path, paper_id: str) -> str:
 
 
 def _frontend_root() -> Path:
-    return _FRONTEND_DIST_ROOT if (_FRONTEND_DIST_ROOT / "index.html").is_file() else _FRONTEND_APP_ROOT
+    source_dist_root = _SOURCE_FRONTEND_APP_ROOT / "dist"
+    for candidate in (source_dist_root, _PACKAGED_FRONTEND_DIST_ROOT, _SOURCE_FRONTEND_APP_ROOT):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return _SOURCE_FRONTEND_APP_ROOT
 
 
 def _load_workspace_state(*, run_dir: Path, paper_id: str) -> dict[str, Any]:

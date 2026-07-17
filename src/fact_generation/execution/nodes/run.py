@@ -743,7 +743,7 @@ def run_node(state: dict[str, Any]) -> dict[str, Any]:
                 if host_venv_bin not in path_parts:
                     path_parts.insert(0, host_venv_bin)
                 env["PATH"] = os.pathsep.join(path_parts)
-                env.setdefault("VIRTUAL_ENV", str(Path(host_venv_bin).parent))
+                env["VIRTUAL_ENV"] = str(Path(host_venv_bin).parent)
             _apply_run_local_jupyter_env(env, run_dir, cfg)
         (run_dir / "outputs" / task_id).mkdir(parents=True, exist_ok=True)
         artifact_paths = task.get("artifact_paths") or []
