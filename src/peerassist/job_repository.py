@@ -244,6 +244,64 @@ class ReviewJobRepository:
             transform=apply_changes,
         )
 
+    def update_with_event(
+        self,
+        job_id: UUID | str,
+        *,
+        expected_revision: int,
+        event_type: str,
+        message: str = "",
+        event_payload: dict[str, Any] | None = None,
+        **changes: Any,
+    ) -> ReviewJobState:
+        """Persist an event before exposing the state transition to readers."""
+        if not event_type:
+            raise ValueError("event_type is required")
+        with exclusive_file_lock(self._lock_path(job_id)):
+            current = self._load_state(job_id)
+            if current.revision != expected_revision:
+                raise RepositoryConflictError(
+                    f"revision conflict: expected {expected_revision}, found {current.revision}"
+                )
+            payload = current.model_dump(mode="python")
+            payload.update(changes)
+            payload["id"] = current.id
+            payload["revision"] = current.revision + 1
+            payload["updated_at"] = _utcnow()
+            candidate = ReviewJobState.model_validate(payload)
+
+            target_revision = candidate.revision
+            events = self._read_events_locked(job_id)
+            event = next(
+                (
+                    existing
+                    for existing in events
+                    if existing.event_type == event_type
+                    and existing.payload.get("state_revision") == target_revision
+                ),
+                None,
+            )
+            if event is None:
+                durable_payload = dict(event_payload or {})
+                durable_payload["state_revision"] = target_revision
+                event = ReviewJobEvent(
+                    job_id=current.id,
+                    event_id=len(events) + 1,
+                    event_type=event_type,
+                    stage=candidate.stage,
+                    status=candidate.status,
+                    attempt_id=candidate.attempt_id,
+                    message=message,
+                    payload=durable_payload,
+                )
+                path = self._events_path(job_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._append_event_row(path, event)
+
+            updated = candidate.model_copy(update={"last_event_id": event.event_id})
+            write_json_atomic(self._state_path(job_id), _json_payload(updated))
+            return updated
+
     def delete(self, job_id: UUID | str, *, expected_revision: int) -> Path:
         with exclusive_file_lock(self._lock_path(job_id)):
             current = self._load_state(job_id)

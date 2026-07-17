@@ -79,13 +79,14 @@ class RecoverableReviewJobRunner:
             while True:
                 state = self.repository.get(job_id)
                 if state.cancel_requested:
-                    cancelled = self._update(
-                        state,
+                    cancelled = self.repository.update_with_event(
+                        state.id,
+                        expected_revision=state.revision,
+                        event_type="job_cancelled",
                         status=ReviewJobStatus.CANCELLED,
                         error_code=None,
                         error=None,
                     )
-                    self._event(cancelled, "job_cancelled")
                     return cancelled
                 if state.stage in {
                     ReviewStage.AWAIT_CONFIRMATION,
