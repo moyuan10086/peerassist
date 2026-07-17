@@ -121,14 +121,12 @@ do not exist, and status plus content hashes are captured before any LFS operati
 - [ ] **Step 3: Create the branch and worktree**
 
 ```bash
-LFS_OID="$(git show "${M0_PLAN_COMMIT}:demos/Text/bert/paper.pdf" \
-  | sed -n 's/^oid sha256://p')"
-test -n "${LFS_OID}"
-git lfs fetch origin --object-id "${LFS_OID}"
+git lfs fetch origin "${M0_PLAN_COMMIT}" \
+  --include='demos/Text/bert/paper.pdf'
 GIT_LFS_SKIP_SMUDGE=1 git worktree add -b peerassist-m0 \
   /root/.worktrees/peerassist-m0 "${M0_PLAN_COMMIT}"
 cd /root/.worktrees/peerassist-m0
-git lfs checkout --include='demos/Text/bert/paper.pdf'
+git lfs checkout demos/Text/bert/paper.pdf
 test "$(head -c 5 demos/Text/bert/paper.pdf)" = "%PDF-"
 git status --short
 ```
@@ -158,17 +156,19 @@ allowed to gain only `/root/.worktrees/peerassist-m0`.
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[runtime,positioning,refcheck,dev]"
+.venv/bin/python -m pip install --index-url https://pypi.org/simple --upgrade pip
+.venv/bin/python -m pip install --index-url https://pypi.org/simple \
+  -e ".[runtime,positioning,refcheck,dev]"
 npm ci --prefix web/peerassist-workspace
 .venv/bin/python -m pytest -q \
   tests/peerassist/test_confirmation_server.py::test_workspace_frontend_contains_pdfjs_review_reader
 .venv/bin/python -m ruff check src tests scripts --output-format concise
 ```
 
-Expected: the clean checkpoint's focused frontend contract passes; Ruff reports the known
-findings recorded in `docs/system_review_2026-07-17.md`. Record fresh counts instead of assuming
-the dirty source worktree's earlier one-failure result.
+Expected: the clean checkpoint's focused frontend contract and full suite pass (`865 passed, 1
+skipped, 3 deselected` on the recorded host); Ruff 0.15.22 reports 21 findings. The host's default
+package mirror returned a wheel whose bytes did not match the index hash, so the reproducible
+setup uses explicit official PyPI without weakening hash verification.
 
 ### Task 2: Make The Frontend Contract Shape-Stable And Validate User UI Separately
 
@@ -255,6 +255,7 @@ git commit -m "test: align PDF selection contract with snapshots"
 - Modify: `src/fact_generation/execution/tools/task_infer.py`
 - Modify: `src/peerassist/mcp_registry.py`
 - Modify: `src/peerassist/ocr_providers.py`
+- Modify: `src/preprocessing/parse/stage_runner.py`
 - Modify: `src/review/teaser/teaser.py`
 - Modify: `tests/peerassist/test_capabilities.py`
 - Modify: `tests/peerassist/test_concerns.py`
@@ -271,12 +272,13 @@ git commit -m "test: align PDF selection contract with snapshots"
   src/fact_generation/execution/tools/task_infer.py \
   src/peerassist/mcp_registry.py \
   src/peerassist/ocr_providers.py \
+  src/preprocessing/parse/stage_runner.py \
   src/review/teaser/teaser.py \
   tests/peerassist/test_capabilities.py \
   tests/peerassist/test_concerns.py \
   tests/peerassist/test_deterministic_checks.py \
   tests/peerassist/test_eval_cli.py
-.venv/bin/python -c 'import subprocess; actual = set(subprocess.check_output(["git", "diff", "--name-only", "-z"]).decode().split("\0")) - {""}; allowed = {"src/agent_runtime/agent_tools.py", "src/common/run_stats.py", "src/common/state.py", "src/fact_generation/execution/tools/task_infer.py", "src/peerassist/mcp_registry.py", "src/peerassist/ocr_providers.py", "src/review/teaser/teaser.py", "tests/peerassist/test_capabilities.py", "tests/peerassist/test_concerns.py", "tests/peerassist/test_deterministic_checks.py", "tests/peerassist/test_eval_cli.py"}; assert actual, "Ruff made no changes; inspect the recorded baseline"; assert actual <= allowed, f"Ruff changed paths outside the M0 allowlist: {sorted(actual - allowed)}"'
+.venv/bin/python -c 'import subprocess; actual = set(subprocess.check_output(["git", "diff", "--name-only", "-z"]).decode().split("\0")) - {""}; allowed = {"src/agent_runtime/agent_tools.py", "src/common/run_stats.py", "src/common/state.py", "src/fact_generation/execution/tools/task_infer.py", "src/peerassist/mcp_registry.py", "src/peerassist/ocr_providers.py", "src/preprocessing/parse/stage_runner.py", "src/review/teaser/teaser.py", "tests/peerassist/test_capabilities.py", "tests/peerassist/test_concerns.py", "tests/peerassist/test_deterministic_checks.py", "tests/peerassist/test_eval_cli.py"}; assert actual, "Ruff made no changes; inspect the recorded baseline"; assert actual <= allowed, f"Ruff changed paths outside the M0 allowlist: {sorted(actual - allowed)}"'
 ```
 
 Expected: safe import, unused-import, conversion, annotation, and simplification fixes apply.
@@ -332,6 +334,7 @@ git add -- \
   src/fact_generation/execution/tools/task_infer.py \
   src/peerassist/mcp_registry.py \
   src/peerassist/ocr_providers.py \
+  src/preprocessing/parse/stage_runner.py \
   src/review/teaser/teaser.py \
   tests/peerassist/test_capabilities.py \
   tests/peerassist/test_concerns.py \
@@ -708,8 +711,8 @@ bash scripts/bootstrap_smoke.sh
 
 The script is the single outer/inner acceptance entry point. On normal invocation it requires the
 source checkout itself to be clean, creates a temporary `git clone --local --no-hardlinks` at the
-same commit, extracts the demo PDF OID from the pointer, runs a restricted `git lfs fetch origin
---object-id <oid>` and `git lfs checkout --include=demos/Text/bert/paper.pdf` inside that clone,
+same commit, then runs a restricted `git lfs fetch origin <commit>
+--include=demos/Text/bert/paper.pdf` and `git lfs checkout demos/Text/bert/paper.pdf` inside that clone,
 then re-executes the cloned script with an internal guard variable. The guarded inner phase must
 refuse recursion, verify the fresh clone commit/status and real `%PDF-`, create `.venv`, install
 the declared development extras, run `npm ci`, run canonical `verify_repository.py all`, start
