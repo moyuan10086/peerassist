@@ -132,7 +132,7 @@ def scan_files(root: Path, files: Iterable[Path]) -> list[Finding]:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     root = Path.cwd().resolve()
-    files = [Path(item).resolve() for item in args] if args else _default_files(root)
+    files = [root / item for item in args] if args else _default_files(root)
     findings = scan_files(root, files)
     for finding in findings:
         print(finding.render())

@@ -147,3 +147,15 @@ def test_symlink_loop_is_skipped_by_api_and_default_cli(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert result.stdout == ""
     assert result.stderr == ""
+
+    explicit = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_docs.py"), "loop.md"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert explicit.returncode == 0
+    assert explicit.stdout == ""
+    assert explicit.stderr == ""

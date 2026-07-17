@@ -199,7 +199,7 @@ def find_broken_links(root: Path, files: Iterable[Path]) -> list[tuple[Path, str
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     root = Path.cwd().resolve()
-    files = [Path(item).resolve() for item in args] if args else _tracked_markdown(root)
+    files = [root / item for item in args] if args else _tracked_markdown(root)
     findings = find_broken_links(root, files)
     for path, target in findings:
         print(f"{path.as_posix()}: {target}")
