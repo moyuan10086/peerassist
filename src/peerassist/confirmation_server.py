@@ -7,7 +7,6 @@ import hashlib
 import html
 import json
 import mimetypes
-import os
 import re
 from datetime import UTC, datetime
 from email.utils import formatdate
@@ -17,6 +16,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from common.config import get_settings
 from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
@@ -6084,43 +6084,26 @@ def _chat_completion(
 
 
 def _model_request_timeout_seconds() -> float:
-    raw = os.getenv("PEERASSIST_OPENAI_TIMEOUT_SECONDS", "240").strip()
-    try:
-        timeout = float(raw)
-    except ValueError:
-        return 240
-    return timeout if timeout > 0 else 240
+    return get_settings().peerassist_openai_timeout_seconds
 
 
 def _resolve_model_api_key() -> str:
-    return (
-        os.getenv("PEERASSIST_OPENAI_API_KEY")
-        or os.getenv("EXECUTION_OPENAI_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or ""
-    ).strip()
+    return str(get_settings().peerassist_openai_api_key or "").strip()
 
 
 def _resolve_model_config() -> dict[str, str]:
+    settings = get_settings()
     api_key = _resolve_model_api_key()
-    base_url = (
-        os.getenv("PEERASSIST_OPENAI_BASE_URL")
-        or os.getenv("EXECUTION_OPENAI_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or "https://deepkey.top/v1"
-    ).strip()
-    model = (
-        os.getenv("PEERASSIST_OPENAI_MODEL")
-        or os.getenv("EXECUTION_OPENAI_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or "gpt-5.4"
-    ).strip()
     return {
         "provider": "openai-compatible",
-        "model": model,
-        "base_url": base_url,
+        "model": settings.peerassist_openai_model.strip(),
+        "base_url": settings.peerassist_openai_base_url,
         "api_key_configured": "true" if api_key else "false",
     }
+
+
+def _review_api_base_url() -> str:
+    return get_settings().peerassist_review_api_url.rstrip("/")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -6300,7 +6283,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             if length:
                 headers["Content-Length"] = str(length)
             request = Request(
-                f"http://127.0.0.1:8767{self.path}",
+                f"{_review_api_base_url()}{self.path}",
                 data=body,
                 method=self.command,
                 headers=headers,

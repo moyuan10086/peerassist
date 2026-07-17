@@ -4,7 +4,10 @@ import os
 import sys
 from argparse import Namespace
 
-from common.config import Settings
+import pytest
+from pydantic import ValidationError
+
+from common.config import Settings, get_settings
 from pipeline_full import _apply_cli_env_overrides, parse_args
 
 
@@ -44,6 +47,40 @@ def test_paper_search_is_enabled_by_default(monkeypatch) -> None:
     assert settings.paper_search_enabled is True
     assert settings.paper_search_provider == "arxiv"
     assert settings.paper_search_base_url is None
+
+
+def test_workspace_defaults_are_local_and_inactive(monkeypatch) -> None:
+    for name in (
+        "PEERASSIST_OPENAI_API_KEY",
+        "PEERASSIST_OPENAI_BASE_URL",
+        "PEERASSIST_OPENAI_MODEL",
+        "PEERASSIST_REVIEW_API_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+
+        assert settings.peerassist_openai_api_key is None
+        assert settings.peerassist_openai_base_url == "https://api.openai.com/v1"
+        assert settings.peerassist_openai_model == "gpt-5"
+        assert settings.peerassist_review_api_url == "http://127.0.0.1:8767"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "ftp://review-api:8767",
+        "http://user:password@review-api:8767",
+        "http://review-api:8767?token=secret",
+        "http://review-api:8767/#fragment",
+    ),
+)
+def test_workspace_review_api_rejects_unsafe_urls(url: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, PEERASSIST_REVIEW_API_URL=url)
 
 
 def test_peerassist_mode_defaults_to_off(monkeypatch) -> None:

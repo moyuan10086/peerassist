@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +54,52 @@ class Settings(BaseSettings):
     agent_max_tokens: int = 4096
     agent_max_turns: int = 1000
     agent_resume_attempts: int = 2
+
+    # PeerAssist workspace model and internal review service.
+    peerassist_openai_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "PEERASSIST_OPENAI_API_KEY", "EXECUTION_OPENAI_API_KEY", "OPENAI_API_KEY"
+        ),
+    )
+    peerassist_openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices(
+            "PEERASSIST_OPENAI_BASE_URL", "EXECUTION_OPENAI_BASE_URL", "OPENAI_BASE_URL"
+        ),
+    )
+    peerassist_openai_model: str = Field(
+        default="gpt-5",
+        validation_alias=AliasChoices(
+            "PEERASSIST_OPENAI_MODEL", "EXECUTION_OPENAI_MODEL", "OPENAI_MODEL"
+        ),
+    )
+    peerassist_openai_timeout_seconds: float = Field(
+        default=240.0,
+        gt=0,
+        validation_alias=AliasChoices("PEERASSIST_OPENAI_TIMEOUT_SECONDS"),
+    )
+    peerassist_review_max_tokens: int = Field(
+        default=900,
+        validation_alias=AliasChoices("PEERASSIST_REVIEW_MAX_TOKENS"),
+    )
+    peerassist_review_api_url: str = Field(
+        default="http://127.0.0.1:8767",
+        validation_alias=AliasChoices("PEERASSIST_REVIEW_API_URL"),
+    )
+
+    @field_validator("peerassist_openai_base_url", "peerassist_review_api_url")
+    @classmethod
+    def validate_http_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("URL must use HTTP(S) and include a hostname")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("URL must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("URL must not contain a query or fragment")
+        return normalized
 
     max_pdf_bytes: int = 50 * 1024 * 1024
 

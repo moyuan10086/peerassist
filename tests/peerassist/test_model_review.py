@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from peerassist.model_review import ModelReviewConfig, run_batched_model_review
+from common.config import get_settings
+from peerassist.model_review import (
+    ModelReviewConfig,
+    resolve_model_review_config,
+    run_batched_model_review,
+)
 
 
 class _Response:
@@ -27,6 +32,26 @@ class _Response:
             ],
             "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
         }
+
+
+def test_model_review_uses_typed_workspace_settings(monkeypatch) -> None:
+    monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("PEERASSIST_OPENAI_BASE_URL", "https://example.test/v1/")
+    monkeypatch.setenv("PEERASSIST_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("PEERASSIST_OPENAI_TIMEOUT_SECONDS", "180")
+    get_settings.cache_clear()
+    try:
+        config = resolve_model_review_config()
+
+        assert config == ModelReviewConfig(
+            api_key="test-key",
+            base_url="https://example.test/v1",
+            model="gpt-test",
+            max_tokens=900,
+            timeout_seconds=180.0,
+        )
+    finally:
+        get_settings.cache_clear()
 
 
 def test_batched_model_review_enforces_fast_token_budget_and_returns_usage() -> None:

@@ -226,8 +226,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) 
     assert "智能体审稿入口" in html
     assert "开始全篇智能审稿" in html
     assert "证据台账、确定性核查和代理结果" in html
-    assert "gpt-5.4" in html
-    assert "https://deepkey.top/v1" in html
+    assert "gpt-5" in html
+    assert "https://api.openai.com/v1" in html
     assert "下一步动作" in html
     assert "data-agent-workflow" in html
     assert "data-agent-stage-board" in html
@@ -733,7 +733,7 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
         assert bootstrap["assets"]["legacy_url"] == "/legacy"
         assert bootstrap["windows"][0]["id"] == "paper"
         assert bootstrap["state"]["pending_count"] == 1
-        assert bootstrap["model_config"]["model"] == "gpt-5.4"
+        assert bootstrap["model_config"]["model"] == "gpt-5"
 
         with urllib.request.urlopen(f"{base_url}/api/state", timeout=5) as response:
             state = json.loads(response.read().decode("utf-8"))
@@ -919,6 +919,7 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
     run_dir = tmp_path / "run"
     out_dir = _seed_peerassist_stage(run_dir)
     monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "test-key")
+    confirmation_server.get_settings.cache_clear()
     observed: dict[str, str] = {}
 
     def fake_chat_completion(**kwargs) -> str:
@@ -981,6 +982,7 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        confirmation_server.get_settings.cache_clear()
 
 
 def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:
@@ -1004,17 +1006,29 @@ def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:
         return FakeResponse()
 
     monkeypatch.setenv("PEERASSIST_OPENAI_TIMEOUT_SECONDS", "180")
+    confirmation_server.get_settings.cache_clear()
     monkeypatch.setattr(confirmation_server, "urlopen", fake_urlopen)
+    try:
+        result = confirmation_server._chat_completion(
+            api_key="test-key",
+            base_url="https://example.test/v1",
+            model="gpt-test",
+            messages=[{"role": "user", "content": "review"}],
+        )
 
-    result = confirmation_server._chat_completion(
-        api_key="test-key",
-        base_url="https://example.test/v1",
-        model="gpt-test",
-        messages=[{"role": "user", "content": "review"}],
-    )
+        assert result == "审稿建议"
+        assert observed["timeout"] == 180
+    finally:
+        confirmation_server.get_settings.cache_clear()
 
-    assert result == "审稿建议"
-    assert observed["timeout"] == 180
+
+def test_review_api_base_url_uses_workspace_setting(monkeypatch) -> None:
+    monkeypatch.setenv("PEERASSIST_REVIEW_API_URL", "http://review-api:8767/")
+    confirmation_server.get_settings.cache_clear()
+    try:
+        assert confirmation_server._review_api_base_url() == "http://review-api:8767"
+    finally:
+        confirmation_server.get_settings.cache_clear()
 
 
 def test_peerassist_confirm_server_console_script_is_registered() -> None:

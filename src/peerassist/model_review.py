@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import requests
+
+from common.config import get_settings
 
 
 @dataclass(frozen=True)
@@ -21,23 +22,16 @@ class ModelReviewConfig:
 
 
 def resolve_model_review_config() -> ModelReviewConfig | None:
-    api_key = str(os.getenv("PEERASSIST_OPENAI_API_KEY") or "").strip()
+    settings = get_settings()
+    api_key = str(settings.peerassist_openai_api_key or "").strip()
     if not api_key:
         return None
-    try:
-        max_tokens = int(os.getenv("PEERASSIST_REVIEW_MAX_TOKENS") or "900")
-    except ValueError:
-        max_tokens = 900
-    try:
-        timeout_seconds = float(os.getenv("PEERASSIST_OPENAI_TIMEOUT_SECONDS") or "240")
-    except ValueError:
-        timeout_seconds = 240
     return ModelReviewConfig(
         api_key=api_key,
-        base_url=str(os.getenv("PEERASSIST_OPENAI_BASE_URL") or "https://api.openai.com/v1").strip(),
-        model=str(os.getenv("PEERASSIST_OPENAI_MODEL") or "gpt-5").strip(),
-        max_tokens=min(1200, max(256, max_tokens)),
-        timeout_seconds=min(300.0, max(10.0, timeout_seconds)),
+        base_url=settings.peerassist_openai_base_url,
+        model=settings.peerassist_openai_model.strip(),
+        max_tokens=min(1200, max(256, settings.peerassist_review_max_tokens)),
+        timeout_seconds=min(300.0, max(10.0, settings.peerassist_openai_timeout_seconds)),
     )
 
 
