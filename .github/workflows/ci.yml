@@ -1,0 +1,79 @@
+name: CI
+
+"on":
+  push:
+    branches: [peerassist-mvp, main]
+  pull_request:
+    branches: [peerassist-mvp, main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Python dependencies
+        run: python -m pip install --index-url https://pypi.org/simple '.[runtime,positioning,refcheck,dev]'
+      - name: Ruff
+        run: python -m ruff check src tests scripts
+      - name: Pytest
+        run: python -m pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/peerassist-workspace/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix web/peerassist-workspace
+      - name: Build frontend
+        run: npm run build --prefix web/peerassist-workspace
+      - name: Verify committed distribution
+        run: git diff --exit-code -- web/peerassist-workspace/dist
+
+  repository-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install policy dependencies
+        run: python -m pip install --index-url https://pypi.org/simple '.[runtime]'
+      - name: Documentation policy
+        run: python scripts/check_docs.py
+      - name: Secret policy
+        run: python scripts/check_secrets.py
+
+  clean-checkout-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Clean checkout smoke
+        run: bash scripts/bootstrap_smoke.sh

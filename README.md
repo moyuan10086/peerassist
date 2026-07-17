@@ -4,6 +4,12 @@ PeerAssist 是以 [DEFENSE-SEU/FactReview](https://github.com/DEFENSE-SEU/FactRe
 
 当前系统已完成一个可运行的 MVP：前端采用 React、TypeScript、Vite、PDF.js 和 lucide-react，后端由 Python 提供审稿状态、PDF、模型调用、人工确认和产物导出 API。界面语言以中文为主，证据原文保留论文原语言，避免误译影响审稿判断。
 
+开发规范与提交检查见 [CONTRIBUTING.md](CONTRIBUTING.md)。提交前的统一验证命令是：
+
+```bash
+python scripts/verify_repository.py all
+```
+
 ## 在线访问
 
 - 公网服务：<http://101.47.158.17:8766/>
@@ -202,7 +208,7 @@ runs/arxiv_real_data/runs/arxiv_2607_08522_v1/stages/peerassist/
 
 - <https://my.feishu.cn/docx/XuVIdkaGgoykehxox9Kc3Qnhnw2>
 
-本地固定记录见 `docs/peerassist_lark_sync.md`。同步时只追加新章节，不覆盖整篇文档；不要写入 API Key、GitHub token、模型 key 或审稿私密材料。
+本地固定记录见 `docs/peerassist_lark_sync.md`。同步时只对 10 个固定章节做精确更新，不追加日期日志或重复章节；不要写入 API Key、GitHub token、模型 key 或审稿私密材料。
 
 ## GitHub 作者说明
 
