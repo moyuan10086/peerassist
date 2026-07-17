@@ -26,6 +26,10 @@ def _aws_access_key() -> str:
     return "AK" + "IA" + "C" * 16
 
 
+def _aws_session_key() -> str:
+    return "AS" + "IA" + "D" * 16
+
+
 def _private_key_header() -> str:
     return "-----BEGIN " + "PRIVATE KEY-----"
 
@@ -80,6 +84,33 @@ def test_scan_files_allows_documented_password_placeholders(tmp_path: Path) -> N
     )
 
     assert scan_files(tmp_path, [sample]) == []
+
+
+def test_scan_files_rejects_shell_default_password_expansions(tmp_path: Path) -> None:
+    sample = tmp_path / "config.env"
+    sample.write_text(
+        "PASSWORD=${DB_PASSWORD:-RealSecret123!}\n"
+        "SECOND_PASSWORD=${DB_PASSWORD:=RealSecret123!}\n"
+        "THIRD_PASSWORD=${DB_PASSWORD-RealSecret123!}\n",
+        encoding="utf-8",
+    )
+
+    assert [(item.line, item.rule) for item in scan_files(tmp_path, [sample])] == [
+        (1, "password-assignment"),
+        (2, "password-assignment"),
+        (3, "password-assignment"),
+    ]
+
+
+def test_scan_files_detects_aws_session_access_key(tmp_path: Path) -> None:
+    sample = tmp_path / "config.txt"
+    secret = _aws_session_key()
+    sample.write_text(secret, encoding="utf-8")
+
+    findings = scan_files(tmp_path, [sample])
+
+    assert findings == [Finding(Path("config.txt"), 1, "aws-access-key")]
+    assert secret not in findings[0].render()
 
 
 def test_scan_files_is_stable_deduplicated_and_skips_unsafe_inputs(tmp_path: Path) -> None:
@@ -271,3 +302,32 @@ def test_symlink_loop_is_skipped_by_api_and_default_cli(tmp_path: Path) -> None:
     assert explicit.returncode == 0
     assert explicit.stdout == ""
     assert explicit.stderr == ""
+
+
+def test_tracked_symlink_payload_is_scanned_without_following_target(tmp_path: Path) -> None:
+    secret = _github_token()
+    link = tmp_path / "leak-link"
+    try:
+        link.symlink_to(secret)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are not supported on this platform")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "leak-link"], cwd=tmp_path, check=True)
+
+    findings = scan_files(tmp_path, [link])
+
+    assert findings == [Finding(Path("leak-link"), 1, "github-token")]
+    assert secret not in findings[0].render()
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py")],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "leak-link:1: github-token\n"
+    assert secret not in result.stdout
+    assert result.stderr == ""
