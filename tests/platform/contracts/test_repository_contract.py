@@ -365,6 +365,72 @@ def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clo
             uow.commands.reserve_or_replay(scope, changed)
 
 
+def test_completed_command_result_is_frozen_but_identical_retry_is_idempotent(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    record = CommandRecord(
+        uuid4(),
+        scope.organization_id,
+        principal.actor_id,
+        "project.create",
+        "same-key",
+        "a" * 64,
+        clock(),
+        project_id=scope.project_id,
+    )
+    completed = replace(record, response_status=201, response_body={"result": "first"}, completed_at=clock())
+    with uow_factory(principal) as uow:
+        uow.commands.reserve(scope, record)
+        uow.commands.complete(scope, completed)
+        uow.commands.complete(scope, completed)
+        for changed in (
+            replace(completed, response_status=202),
+            replace(completed, response_body={"result": "second"}),
+            replace(completed, completed_at=clock() + timedelta(seconds=1)),
+        ):
+            with pytest.raises(IdempotencyConflict):
+                uow.commands.complete(scope, changed)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.commands.reserve_or_replay(scope, record) == completed
+
+
+def test_concurrent_different_command_completions_only_first_result_wins(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    record = CommandRecord(
+        uuid4(),
+        scope.organization_id,
+        principal.actor_id,
+        "project.create",
+        "race-key",
+        "a" * 64,
+        clock(),
+        project_id=scope.project_id,
+    )
+    first = replace(record, response_status=201, response_body={"winner": "first"}, completed_at=clock())
+    second = replace(record, response_status=202, response_body={"winner": "second"}, completed_at=clock())
+    with uow_factory(principal) as uow:
+        uow.commands.reserve(scope, record)
+        uow.commit()
+
+    def complete(candidate: CommandRecord) -> CommandRecord | None:
+        try:
+            with uow_factory(principal) as uow:
+                uow.commands.complete(scope, candidate)
+                uow.commit()
+                return candidate
+        except IdempotencyConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(complete, (first, second)))
+    assert sum(outcome is not None for outcome in outcomes) == 1
+    winner = next(outcome for outcome in outcomes if outcome is not None)
+    with uow_factory(principal) as uow:
+        assert uow.commands.reserve_or_replay(scope, record) == winner
+
+
 @pytest.mark.parametrize(
     "replacement",
     [

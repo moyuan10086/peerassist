@@ -473,6 +473,10 @@ class _Commands:
         existing = self._state.commands.get(key)
         if existing is None or self._identity(existing) != self._identity(command):
             raise IdempotencyConflict()
+        if existing.completed_at is not None:
+            if existing == command:
+                return
+            raise IdempotencyConflict()
         self._state.commands[key] = command
 
     @staticmethod
