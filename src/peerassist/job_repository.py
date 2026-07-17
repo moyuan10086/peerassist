@@ -194,6 +194,9 @@ class ReviewJobRepository:
         key = idempotency_key.strip()
         if not key:
             return self.create(validated)
+        metadata = dict(validated.metadata)
+        metadata["idempotency_key"] = key
+        validated = validated.model_copy(update={"metadata": metadata})
         identity = hashlib.sha256(f"{validated.paper_id}\0{key}".encode()).hexdigest()
         with exclusive_file_lock(self.idempotency_locks_dir / f"{identity}.lock"):
             for existing in self.list():

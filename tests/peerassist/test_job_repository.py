@@ -390,20 +390,22 @@ def test_create_idempotent_converges_across_threads(tmp_path: Path) -> None:
 
     def create(index: int) -> ReviewJobState:
         job_id = uuid4()
+        raw_key = " same-key " if index % 2 else "same-key"
         state = ReviewJobState(
             id=job_id,
             paper_id=PAPER_SHA,
             run_dir=f"jobs/{job_id}/run",
             attempt_id=f"attempt-{index}",
-            metadata={"idempotency_key": "same-key"},
+            metadata={"idempotency_key": raw_key},
         )
-        return repository.create_idempotent(state, idempotency_key="same-key")
+        return repository.create_idempotent(state, idempotency_key=raw_key)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         states = list(pool.map(create, range(16)))
 
     assert len({state.id for state in states}) == 1
     assert len(repository.list()) == 1
+    assert states[0].metadata["idempotency_key"] == "same-key"
 
 
 def test_legacy_job_state_load_contract_preserves_artifacts_and_accepts_migration_metadata() -> None:
