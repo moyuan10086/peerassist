@@ -12,7 +12,7 @@ from peerassist.platform.models import (
     Role,
     TenantScope,
 )
-from peerassist.platform.permissions import decide_permission
+from peerassist.platform.permissions import ActionScope, action_scope, decide_permission
 
 ORG_ID = uuid4()
 PROJECT_ID = uuid4()
@@ -90,10 +90,11 @@ def test_roles_use_an_explicit_action_policy(
 ) -> None:
     for action in allowed:
         grant = service_grant() if role is Role.SERVICE_AGENT else None
+        resource_scope = ORG_SCOPE if action.value.startswith("organization.") else PROJECT_SCOPE
         decision = decide_permission(
             role=role,
             membership_scope=membership_scope,
-            resource_scope=PROJECT_SCOPE,
+            resource_scope=resource_scope,
             action=action,
             actor=SERVICE_ACTOR if grant else None,
             grant=grant,
@@ -228,6 +229,59 @@ def test_internal_grant_does_not_elevate_a_non_service_agent_role() -> None:
         )
         is Decision.FORBIDDEN
     )
+
+
+@pytest.mark.parametrize(
+    ("role", "membership_scope", "resource_scope", "action"),
+    [
+        (Role.ORGANIZATION_ADMIN, ORG_SCOPE, PROJECT_SCOPE, Action.ORGANIZATION_MANAGE_MEMBERS),
+        (Role.ORGANIZATION_ADMIN, ORG_SCOPE, ORG_SCOPE, Action.PROJECT_READ),
+        (Role.PROJECT_OWNER, PROJECT_SCOPE, ORG_SCOPE, Action.PROJECT_MANAGE_SETTINGS),
+        (Role.REVIEWER, PROJECT_SCOPE, ORG_SCOPE, Action.PAPER_UPLOAD),
+        (Role.VIEWER, PROJECT_SCOPE, ORG_SCOPE, Action.PAPER_READ),
+    ],
+)
+def test_actions_deny_scope_level_mismatches(
+    role: Role,
+    membership_scope: TenantScope,
+    resource_scope: TenantScope,
+    action: Action,
+) -> None:
+    assert (
+        decide_permission(
+            role=role,
+            membership_scope=membership_scope,
+            resource_scope=resource_scope,
+            action=action,
+        )
+        is Decision.FORBIDDEN
+    )
+
+
+def test_service_grant_denies_internal_action_at_organization_scope() -> None:
+    organization_grant = service_grant(scope=ORG_SCOPE)
+    assert (
+        decide_permission(
+            role=Role.SERVICE_AGENT,
+            membership_scope=ORG_SCOPE,
+            resource_scope=ORG_SCOPE,
+            action=Action.INTERNAL_TOOL_EXECUTE,
+            actor=SERVICE_ACTOR,
+            grant=organization_grant,
+            audience="peerassist-worker",
+            now=NOW,
+        )
+        is Decision.FORBIDDEN
+    )
+
+
+def test_every_action_has_an_explicit_scope_classification() -> None:
+    classifications = {action: action_scope(action) for action in Action}
+
+    assert set(classifications) == set(Action)
+    assert classifications[Action.ORGANIZATION_READ] is ActionScope.ORGANIZATION
+    assert classifications[Action.PROJECT_READ] is ActionScope.PROJECT
+    assert classifications[Action.INTERNAL_TOOL_EXECUTE] is ActionScope.PROJECT
 
 
 def test_cross_tenant_resources_are_hidden_before_action_policy_is_checked() -> None:

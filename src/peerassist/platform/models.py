@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -23,23 +24,74 @@ FrozenJsonValue: TypeAlias = (
     None | bool | int | float | str | FrozenJsonArray | Mapping[str, "FrozenJsonValue"]
 )
 
-_FORBIDDEN_PUBLIC_JSON_KEYS = frozenset(
+_SENSITIVE_KEY_WORDS = frozenset(
+    {"authorization", "cookie", "credential", "password", "secret", "token"}
+)
+_SENSITIVE_KEY_PHRASES = frozenset(
     {
-        "access_token",
-        "authorization",
-        "cookie",
-        "csrf_secret",
-        "encrypted_pkce_verifier",
-        "manuscript_content",
-        "object_key",
-        "pkce_verifier",
-        "presigned_url",
-        "provider_response",
-        "raw_token",
-        "refresh_token",
+        ("api", "key"),
+        ("manuscript", "content"),
+        ("object", "key"),
+        ("presigned", "url"),
+        ("private", "path"),
+        ("provider", "response"),
+        ("signed", "url"),
     }
 )
-_FORBIDDEN_PUBLIC_JSON_KEY_SUFFIXES = ("_access_token", "_refresh_token", "_raw_token")
+_SENSITIVE_COMPACT_SUFFIXES = (
+    "apikey",
+    "authorization",
+    "clientsecret",
+    "credential",
+    "manuscripttext",
+    "objectkey",
+    "password",
+    "pdfcontent",
+    "presignedurl",
+    "privatepath",
+    "providerresponse",
+    "rawtoken",
+    "refreshtoken",
+    "secret",
+    "signedurl",
+    "token",
+)
+_KEY_SEPARATOR = re.compile(r"[^a-z0-9]+")
+_STANDARD_OIDC_CLAIMS = frozenset(
+    {
+        "address",
+        "aud",
+        "auth_time",
+        "azp",
+        "birthdate",
+        "email",
+        "email_verified",
+        "exp",
+        "family_name",
+        "gender",
+        "given_name",
+        "groups",
+        "iat",
+        "iss",
+        "jti",
+        "locale",
+        "middle_name",
+        "name",
+        "nbf",
+        "nickname",
+        "phone_number",
+        "phone_number_verified",
+        "picture",
+        "preferred_username",
+        "profile",
+        "roles",
+        "sub",
+        "updated_at",
+        "website",
+        "zoneinfo",
+    }
+)
+_SAFE_CLAIM_EXTENSION = re.compile(r"[A-Za-z][A-Za-z0-9_.:/-]{0,127}")
 
 
 def freeze_json(value: JsonValue | FrozenJsonValue) -> FrozenJsonValue:
@@ -88,6 +140,33 @@ def freeze_public_json(value: JsonValue | FrozenJsonValue) -> FrozenJsonValue:
     return freeze_json(value)
 
 
+def freeze_identity_claims(value: Mapping[str, JsonValue]) -> Mapping[str, FrozenJsonValue]:
+    """Freeze standard OIDC claims and syntactically safe provider extensions."""
+    for key in value:
+        if _is_sensitive_public_key(key):
+            raise ValueError("safe public JSON must not contain secret or provider-private fields")
+        if key not in _STANDARD_OIDC_CLAIMS and _SAFE_CLAIM_EXTENSION.fullmatch(key) is None:
+            raise ValueError("identity claim key is neither standard nor a safe extension")
+    frozen = freeze_public_json(value)
+    if not isinstance(frozen, Mapping):
+        raise TypeError("identity claims must be a JSON object")
+    return frozen
+
+
+def _is_sensitive_public_key(key: str) -> bool:
+    words = tuple(word for word in _KEY_SEPARATOR.sub("_", key.casefold()).split("_") if word)
+    if any(word in _SENSITIVE_KEY_WORDS for word in words):
+        return True
+    compact = "".join(words)
+    if compact.endswith(_SENSITIVE_COMPACT_SUFFIXES):
+        return True
+    return any(
+        words[index : index + len(phrase)] == phrase
+        for phrase in _SENSITIVE_KEY_PHRASES
+        for index in range(len(words) - len(phrase) + 1)
+    )
+
+
 def _validate_public_json(value: JsonValue | FrozenJsonValue) -> None:
     if isinstance(value, str):
         if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() or value.startswith("file:"):
@@ -103,10 +182,7 @@ def _validate_public_json(value: JsonValue | FrozenJsonValue) -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("safe public JSON keys must be strings")
-            normalized_key = key.casefold()
-            if normalized_key in _FORBIDDEN_PUBLIC_JSON_KEYS or normalized_key.endswith(
-                _FORBIDDEN_PUBLIC_JSON_KEY_SUFFIXES
-            ):
+            if _is_sensitive_public_key(key):
                 raise ValueError("safe public JSON must not contain secret or provider-private fields")
             _validate_public_json(item)
 
@@ -315,7 +391,7 @@ class ExternalIdentity:
         _utc(self.last_seen_at, "last_seen_at")
         _utc(self.created_at, "created_at")
         _utc(self.disabled_at, "disabled_at")
-        object.__setattr__(self, "verified_claims", freeze_public_json(self.verified_claims))
+        object.__setattr__(self, "verified_claims", freeze_identity_claims(self.verified_claims))
 
 
 @dataclass(frozen=True, slots=True)
@@ -796,7 +872,7 @@ class AuthenticatedIdentity:
         _nonempty(self.issuer, "issuer")
         _nonempty(self.subject, "subject")
         _utc(self.expires_at, "expires_at")
-        object.__setattr__(self, "claims", freeze_public_json(self.claims))
+        object.__setattr__(self, "claims", freeze_identity_claims(self.claims))
 
 
 @dataclass(frozen=True, slots=True)

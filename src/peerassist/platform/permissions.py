@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from .models import Action, Actor, ActorKind, Decision, InternalServiceGrant, Role, TenantScope
 
@@ -60,6 +61,56 @@ _ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
 _INTERNAL_ACTIONS = frozenset(
     {Action.INTERNAL_TOOL_EXECUTE, Action.INTERNAL_WORK_CLAIM, Action.INTERNAL_WORK_COMPLETE}
 )
+
+
+class ActionScope(StrEnum):
+    ORGANIZATION = "organization"
+    PROJECT = "project"
+
+
+_ACTION_SCOPE: dict[Action, ActionScope] = {
+    Action.ORGANIZATION_READ: ActionScope.ORGANIZATION,
+    Action.ORGANIZATION_MANAGE_POLICY: ActionScope.ORGANIZATION,
+    Action.ORGANIZATION_MANAGE_MEMBERS: ActionScope.ORGANIZATION,
+    Action.ORGANIZATION_READ_AUDIT: ActionScope.ORGANIZATION,
+    Action.PROJECT_READ: ActionScope.PROJECT,
+    Action.PROJECT_MANAGE_SETTINGS: ActionScope.PROJECT,
+    Action.PROJECT_MANAGE_MEMBERS: ActionScope.PROJECT,
+    Action.PAPER_READ: ActionScope.PROJECT,
+    Action.PAPER_UPLOAD: ActionScope.PROJECT,
+    Action.PAPER_ADD_VERSION: ActionScope.PROJECT,
+    Action.REVIEW_JOB_READ: ActionScope.PROJECT,
+    Action.REVIEW_JOB_CREATE: ActionScope.PROJECT,
+    Action.REVIEW_JOB_CANCEL: ActionScope.PROJECT,
+    Action.REVIEW_JOB_RETRY: ActionScope.PROJECT,
+    Action.REVIEW_EVENT_READ: ActionScope.PROJECT,
+    Action.ARTIFACT_READ: ActionScope.PROJECT,
+    Action.CONCERN_DECIDE: ActionScope.PROJECT,
+    Action.REPORT_DRAFT: ActionScope.PROJECT,
+    Action.REPORT_FINALIZE: ActionScope.PROJECT,
+    Action.RETENTION_MANAGE: ActionScope.PROJECT,
+    Action.PUBLICATION_GRANT: ActionScope.PROJECT,
+    Action.LEGACY_READ: ActionScope.PROJECT,
+    Action.INTERNAL_TOOL_EXECUTE: ActionScope.PROJECT,
+    Action.INTERNAL_WORK_CLAIM: ActionScope.PROJECT,
+    Action.INTERNAL_WORK_COMPLETE: ActionScope.PROJECT,
+}
+
+
+def action_scope(action: Action) -> ActionScope | None:
+    """Return the explicit resource scope classification; unknown actions stay denied."""
+    return _ACTION_SCOPE.get(action)
+
+
+def _scope_is_compatible(action: Action, resource_scope: TenantScope) -> bool:
+    required = action_scope(action)
+    if required is None:
+        return False
+    if required is ActionScope.ORGANIZATION:
+        return resource_scope.project_id is None
+    return resource_scope.project_id is not None
+
+
 def decide_permission(
     *,
     role: Role,
@@ -72,6 +123,10 @@ def decide_permission(
     now: datetime | None = None,
 ) -> Decision:
     """Decide visibility before permissions so tenant existence is never leaked."""
+    if membership_scope.organization_id != resource_scope.organization_id:
+        return Decision.NOT_FOUND
+    if not _scope_is_compatible(action, resource_scope):
+        return Decision.FORBIDDEN
     if not membership_scope.contains(resource_scope):
         return Decision.NOT_FOUND
     if role is Role.SERVICE_AGENT:

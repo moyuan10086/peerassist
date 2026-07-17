@@ -431,6 +431,56 @@ def test_platform_error_internal_cause_never_enters_public_fields_or_display() -
         assert "secret-value" not in rendered
 
 
+def test_platform_error_public_snapshot_cannot_be_mutated_after_construction() -> None:
+    original_details = {"resource_type": "paper", "reason": "membership_revoked"}
+    error = Forbidden(details=original_details)
+    original_details["reason"] = "changed"
+
+    assert error.public_fields(request_id="request-1")["details"]["reason"] == "membership_revoked"
+    for name, value in (
+        ("message", "provider secret"),
+        ("details", {"reason": "provider_secret"}),
+        ("code", "provider_secret"),
+        ("retryable", True),
+    ):
+        with pytest.raises((AttributeError, TypeError)):
+            setattr(error, name, value)
+
+    error.__dict__.update(
+        {
+            "_public_code": "provider_secret",
+            "_public_message": "provider token secret",
+            "_public_details": {"reason": "provider_secret"},
+            "_sealed": False,
+        }
+    )
+    assert error.public_fields(request_id="request-1") == {
+        "code": "forbidden",
+        "message": "The requested operation is not permitted.",
+        "request_id": "request-1",
+        "retryable": False,
+        "details": {"resource_type": "paper", "reason": "membership_revoked"},
+    }
+    with pytest.raises(AttributeError):
+        error.message = "provider token secret"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "/srv/private/request",
+        "request token secret",
+        "request\nforged",
+        "x" * 129,
+        "",
+    ],
+)
+def test_platform_error_rejects_unsafe_request_ids(request_id: str) -> None:
+    error = Forbidden()
+    with pytest.raises(ValueError, match="request_id"):
+        error.public_fields(request_id=request_id)
+
+
 @pytest.mark.parametrize(
     "unsafe_details",
     [
@@ -453,6 +503,70 @@ def test_persisted_json_snapshots_reject_noncanonical_values(unsafe_value: objec
             issuer="https://identity.example.test",
             subject="subject-1",
             claims={"value": unsafe_value},
+            expires_at=NOW + timedelta(minutes=5),
+        )
+
+
+@pytest.mark.parametrize(
+    "unsafe_key",
+    [
+        "TOKEN",
+        "id-token",
+        "session token",
+        "client.secret",
+        "Api-Key",
+        "PASSWORD",
+        "authORIZATION",
+        "signed url",
+        "private.path",
+        "Provider-Response",
+        "manuscript content",
+        "object key",
+        "oidc.client_secret",
+        "accessToken",
+        "clientSecret",
+        "presignedUrl",
+        "providerResponse",
+        "manuscriptText",
+        "pdf-content",
+    ],
+)
+def test_public_json_key_normalization_closes_secret_bypasses(unsafe_key: str) -> None:
+    with pytest.raises(ValueError, match="safe public JSON"):
+        AuditEvent(
+            id=uuid4(),
+            actor_id=uuid4(),
+            organization_id=uuid4(),
+            action=Action.PAPER_UPLOAD,
+            resource_type="paper",
+            resource_id=uuid4(),
+            outcome="denied",
+            request_id="request-1",
+            safe_metadata={"nested": {unsafe_key: "secret-value"}},
+            created_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "claim_key",
+    [
+        "id_token",
+        "session-token",
+        "client secret",
+        "api.key",
+        "password",
+        "authorization",
+        "cookie",
+        "sessionToken",
+        "apiKey",
+    ],
+)
+def test_identity_claims_reject_raw_credential_variants(claim_key: str) -> None:
+    with pytest.raises(ValueError, match="safe public JSON"):
+        AuthenticatedIdentity(
+            issuer="https://identity.example.test",
+            subject="subject-1",
+            claims={claim_key: "secret-value"},
             expires_at=NOW + timedelta(minutes=5),
         )
 
