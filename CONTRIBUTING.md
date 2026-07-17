@@ -27,7 +27,7 @@ Before opening or updating a pull request:
 - explain the user-facing outcome, architecture impact, migrations, and rollback path;
 - include tests for behavior, authorization, compatibility, and failure handling as applicable;
 - run focused tests, Ruff, and relevant frontend checks;
-- run `python scripts/verify_repository.py all` as the canonical final gate once available;
+- run `python scripts/verify_repository.py all` as the canonical final gate;
 - review both the working-tree diff and staged diff for scope and generated artifacts;
 - update PRD, API conventions, ADRs, and operations guidance when contracts change;
 - disclose skipped or gated checks and the reason;

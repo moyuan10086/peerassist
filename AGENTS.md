@@ -33,7 +33,7 @@ Run the narrowest relevant test while developing, then the repository verificati
 - Keep changes scoped. Review the full diff and staged diff; reject generated files, secrets, and unrelated cleanup.
 - Run focused tests for changed behavior and the affected subsystem.
 - Run Ruff and any relevant frontend build or contract check.
-- The final canonical gate is `python scripts/verify_repository.py all`. This entrypoint is introduced by the engineering-baseline work; until it lands, run the equivalent commands listed here.
+- The final canonical gate is `python scripts/verify_repository.py all`; the verifier runs every check from the repository root.
 - Record skips, deselections, warnings, and unavailable external services in the handoff.
 
 ## Architecture Boundaries
