@@ -223,3 +223,33 @@ def test_cli_fails_closed_outside_git_and_for_missing_explicit_path(tmp_path: Pa
     assert missing.stdout == ""
     assert missing.stderr == "repository scan failed\n"
     assert "Traceback" not in missing.stderr
+
+
+def test_intermediate_symlink_escape_is_not_read_and_explicit_cli_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    external = outside / "outside.md"
+    external.write_text("[external](missing.md)\n", encoding="utf-8")
+    link = root / "sub"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are not supported on this platform")
+
+    assert find_broken_links(root, [link / "outside.md"]) == []
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_docs.py"), "sub/outside.md"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "repository scan failed\n"
+    assert "missing.md" not in result.stderr
+    assert "Traceback" not in result.stderr

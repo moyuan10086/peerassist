@@ -331,3 +331,34 @@ def test_tracked_symlink_payload_is_scanned_without_following_target(tmp_path: P
     assert result.stdout == "leak-link:1: github-token\n"
     assert secret not in result.stdout
     assert result.stderr == ""
+
+
+def test_intermediate_symlink_escape_is_not_read_and_explicit_cli_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    secret = _github_token()
+    external = outside / "outside.txt"
+    external.write_text(secret, encoding="utf-8")
+    link = root / "sub"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are not supported on this platform")
+
+    assert scan_files(root, [link / "outside.txt"]) == []
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py"), "sub/outside.txt"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "repository scan failed\n"
+    assert secret not in result.stderr
+    assert "Traceback" not in result.stderr

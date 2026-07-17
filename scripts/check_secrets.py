@@ -72,6 +72,20 @@ def _relative(root: Path, path: Path) -> Path | None:
         return None
 
 
+def _safe_item(root: Path, item: Path) -> tuple[Path, os.stat_result] | None:
+    path = Path(os.path.abspath(item if item.is_absolute() else root / item))
+    try:
+        path.relative_to(root)
+        root_real = root.resolve(strict=True)
+        path.parent.resolve(strict=True).relative_to(root_real)
+        metadata = path.lstat()
+        if not stat.S_ISLNK(metadata.st_mode):
+            path.resolve(strict=True).relative_to(root_real)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path, metadata
+
+
 def _contains_parts(parts: tuple[str, ...], subsequence: tuple[str, ...]) -> bool:
     length = len(subsequence)
     return any(parts[index : index + length] == subsequence for index in range(len(parts) - length + 1))
@@ -98,12 +112,10 @@ def _placeholder(value: str) -> bool:
 def _safe_files(root: Path, files: Iterable[Path]) -> list[Path]:
     paths: set[Path] = set()
     for item in files:
-        path = Path(os.path.abspath(item if Path(item).is_absolute() else root / item))
-        try:
-            path.relative_to(root)
-            path.lstat()
-        except (OSError, ValueError):
+        safe = _safe_item(root, Path(item))
+        if safe is None:
             continue
+        path, _ = safe
         paths.add(path)
     return sorted(paths, key=lambda item: item.as_posix())
 
@@ -145,12 +157,10 @@ def scan_files(root: Path, files: Iterable[Path]) -> list[Finding]:
 def _explicit_files(root: Path, args: list[str]) -> list[Path]:
     files: list[Path] = []
     for item in args:
-        path = Path(os.path.abspath(root / item))
-        try:
-            path.relative_to(root)
-            path.lstat()
-        except (OSError, ValueError) as exc:
-            raise RepositoryScanError from exc
+        safe = _safe_item(root, Path(item))
+        if safe is None:
+            raise RepositoryScanError
+        path, _ = safe
         files.append(path)
     return files
 

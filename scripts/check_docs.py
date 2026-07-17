@@ -61,14 +61,29 @@ def _lexical_path(root: Path, item: Path) -> Path | None:
     return candidate
 
 
+def _safe_item(root: Path, item: Path) -> tuple[Path, os.stat_result] | None:
+    path = _lexical_path(root, item)
+    if path is None:
+        return None
+    try:
+        root_real = root.resolve(strict=True)
+        path.parent.resolve(strict=True).relative_to(root_real)
+        metadata = path.lstat()
+        if not stat.S_ISLNK(metadata.st_mode):
+            path.resolve(strict=True).relative_to(root_real)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path, metadata
+
+
 def _safe_sources(root: Path, files: Iterable[Path]) -> list[Path]:
     sources: set[Path] = set()
     for item in files:
-        try:
-            source = _lexical_path(root, Path(item))
-            if source is None or stat.S_ISLNK(source.lstat().st_mode):
-                continue
-        except OSError:
+        safe = _safe_item(root, Path(item))
+        if safe is None:
+            continue
+        source, metadata = safe
+        if stat.S_ISLNK(metadata.st_mode):
             continue
         sources.add(source)
     return sorted(sources, key=lambda path: path.as_posix())
@@ -77,13 +92,10 @@ def _safe_sources(root: Path, files: Iterable[Path]) -> list[Path]:
 def _explicit_files(root: Path, args: list[str]) -> list[Path]:
     files: list[Path] = []
     for item in args:
-        path = _lexical_path(root, Path(item))
-        try:
-            if path is None:
-                raise RepositoryScanError
-            path.lstat()
-        except OSError as exc:
-            raise RepositoryScanError from exc
+        safe = _safe_item(root, Path(item))
+        if safe is None:
+            raise RepositoryScanError
+        path, _ = safe
         files.append(path)
     return files
 
