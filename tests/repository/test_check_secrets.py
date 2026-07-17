@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.check_secrets import Finding, scan_files
+from scripts.check_secrets import Finding, RepositoryScanError, scan_files
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -173,7 +173,7 @@ def test_scan_files_is_stable_deduplicated_and_skips_unsafe_inputs(tmp_path: Pat
     ]
 
 
-def test_scan_files_skips_oversized_and_unreadable_files(tmp_path: Path, monkeypatch) -> None:
+def test_scan_files_skips_oversized_but_fails_closed_on_unreadable_file(tmp_path: Path, monkeypatch) -> None:
     oversized = tmp_path / "large.txt"
     unreadable = tmp_path / "unreadable.txt"
     oversized.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
@@ -187,7 +187,34 @@ def test_scan_files_skips_oversized_and_unreadable_files(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
-    assert scan_files(tmp_path, [oversized, unreadable]) == []
+    assert scan_files(tmp_path, [oversized]) == []
+    with pytest.raises(RepositoryScanError):
+        scan_files(tmp_path, [unreadable])
+
+
+def test_invalid_utf8_secret_input_fails_closed_for_api_default_and_explicit_cli(tmp_path: Path) -> None:
+    source = tmp_path / "bad.txt"
+    source.write_bytes(b"\xff\xfe" + _github_token().encode())
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "bad.txt"], cwd=tmp_path, check=True)
+
+    with pytest.raises(RepositoryScanError):
+        scan_files(tmp_path, [source])
+
+    for args in ([], ["bad.txt"]):
+        result = subprocess.run(
+            [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py"), *args],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert result.stderr == "repository scan failed: unable to read secret-scan input\n"
+        assert _github_token() not in result.stderr
+        assert "Traceback" not in result.stderr
 
 
 def test_default_scan_skips_policy_sources_but_explicit_scan_still_checks_them(tmp_path: Path) -> None:

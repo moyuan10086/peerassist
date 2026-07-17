@@ -42,6 +42,10 @@ _ENV_REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 class RepositoryScanError(Exception):
     """Raised when the requested repository file set cannot be scanned safely."""
 
+    def __init__(self, message: str = "repository scan failed") -> None:
+        super().__init__(message)
+        self.safe_message = message
+
 
 @dataclass(frozen=True, order=True)
 class Finding:
@@ -142,14 +146,14 @@ def scan_files(root: Path, files: Iterable[Path]) -> list[Finding]:
                 if metadata.st_size > MAX_FILE_SIZE:
                     continue
                 content = path.read_bytes()
-        except OSError:
-            continue
+        except OSError as exc:
+            raise RepositoryScanError("repository scan failed: unable to read secret-scan input") from exc
         if b"\0" in content or content.startswith(_LFS_HEADER):
             continue
         try:
             text = content.decode("utf-8")
-        except UnicodeError:
-            continue
+        except UnicodeError as exc:
+            raise RepositoryScanError("repository scan failed: unable to read secret-scan input") from exc
         for line_number, line in enumerate(text.splitlines(), start=1):
             for rule, pattern in _RULES:
                 if pattern.search(line):
@@ -179,7 +183,11 @@ def main(argv: list[str] | None = None) -> int:
     except RepositoryScanError:
         print("repository scan failed", file=sys.stderr)
         return 2
-    findings = scan_files(root, files)
+    try:
+        findings = scan_files(root, files)
+    except RepositoryScanError as exc:
+        print(exc.safe_message, file=sys.stderr)
+        return 2
     for finding in findings:
         print(finding.render())
     return 1 if findings else 0
