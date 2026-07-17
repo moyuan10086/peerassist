@@ -75,3 +75,10 @@ def test_cli_individual_docs_and_secrets_runs_from_subdirectory() -> None:
     assert "[check] docs" in result.stdout
     assert "[check] secrets" in result.stdout
     assert result.stderr == ""
+
+
+def test_makefile_compose_aliases_target_development_profile() -> None:
+    source = (REPOSITORY_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "docker compose -f infrastructure/compose/compose.yml up --build" in source
+    assert "docker compose -f infrastructure/compose/compose.yml down" in source

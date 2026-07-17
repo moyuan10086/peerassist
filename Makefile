@@ -28,7 +28,7 @@ dist:
 	python scripts/verify_repository.py dist
 
 compose-up:
-	docker compose up -d
+	docker compose -f infrastructure/compose/compose.yml up --build
 
 compose-down:
-	docker compose down
+	docker compose -f infrastructure/compose/compose.yml down
