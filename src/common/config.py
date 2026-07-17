@@ -1,11 +1,106 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_address, ip_network
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _http_url(value: str, *, field_name: str) -> str:
+    normalized = value.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{field_name} must use HTTP(S) and include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{field_name} must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{field_name} must not contain a query or fragment")
+    return normalized
+
+
+class PlatformSettings(BaseSettings):
+    """Configuration for the M1 platform boundary, isolated from legacy runtime settings."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="PEERASSIST_PLATFORM_",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    environment: Literal["development", "test", "production"] = "development"
+    database_url: SecretStr
+    oidc_issuer: str
+    oidc_audience: str
+    oidc_algorithms: list[str] = Field(default_factory=lambda: ["RS256"], min_length=1)
+    s3_endpoint: str
+    s3_bucket: str = Field(min_length=1)
+    s3_path_style: bool = True
+    s3_access_key_id: SecretStr | None = None
+    s3_secret_access_key: SecretStr | None = None
+    public_base_url: str
+    allowed_origins: list[str] = Field(default_factory=list)
+    trusted_proxy_cidrs: list[str] = Field(default_factory=list)
+    session_key_ring: list[SecretStr] = Field(default_factory=list)
+    scratch_root: Path = Path("./data/platform-scratch")
+    scratch_ttl_seconds: int = Field(default=86400, gt=0)
+    internal_legacy_audience: str = Field(min_length=1)
+    legacy_bind_host: str = "127.0.0.1"
+
+    @field_validator("oidc_issuer", "s3_endpoint", "public_base_url")
+    @classmethod
+    def validate_platform_url(cls, value: str, info: object) -> str:
+        return _http_url(value, field_name=getattr(info, "field_name", "URL"))
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def validate_origins(cls, values: list[str]) -> list[str]:
+        return [value if value == "*" else _http_url(value, field_name="allowed origin") for value in values]
+
+    @field_validator("trusted_proxy_cidrs")
+    @classmethod
+    def validate_proxy_cidrs(cls, values: list[str]) -> list[str]:
+        for value in values:
+            ip_network(value, strict=False)
+        return values
+
+    @model_validator(mode="after")
+    def validate_production_boundary(self) -> PlatformSettings:
+        if self.environment != "production":
+            return self
+
+        if urlsplit(self.oidc_issuer).scheme != "https":
+            raise ValueError("production OIDC issuer must use HTTPS")
+        if urlsplit(self.public_base_url).scheme != "https":
+            raise ValueError("production public base URL must use HTTPS")
+        if "*" in self.allowed_origins:
+            raise ValueError("production allowed origins must not contain wildcards")
+        if not self.session_key_ring:
+            raise ValueError("production session key ring must not be empty")
+        try:
+            legacy_address = ip_address(self.legacy_bind_host.strip("[]"))
+        except ValueError:
+            legacy_address = None
+        if self.legacy_bind_host != "localhost" and not (legacy_address and legacy_address.is_loopback):
+            raise ValueError("production legacy service must not bind publicly")
+
+        database_url = self.database_url.get_secret_value().lower()
+        if not database_url.startswith(("postgresql://", "postgresql+psycopg://")):
+            raise ValueError("platform database URL must use PostgreSQL with Psycopg")
+        forbidden_defaults = {"postgres:postgres", "minioadmin"}
+        credentials = [
+            database_url,
+            self.s3_access_key_id.get_secret_value().lower() if self.s3_access_key_id else "",
+            self.s3_secret_access_key.get_secret_value().lower() if self.s3_secret_access_key else "",
+        ]
+        if any(default in credential for default in forbidden_defaults for credential in credentials):
+            raise ValueError("production credentials must not use provider defaults")
+        return self
 
 
 class Settings(BaseSettings):
@@ -91,15 +186,7 @@ class Settings(BaseSettings):
     @field_validator("peerassist_openai_base_url", "peerassist_review_api_url")
     @classmethod
     def validate_http_base_url(cls, value: str) -> str:
-        normalized = value.strip().rstrip("/")
-        parsed = urlsplit(normalized)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("URL must use HTTP(S) and include a hostname")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("URL must not contain credentials")
-        if parsed.query or parsed.fragment:
-            raise ValueError("URL must not contain a query or fragment")
-        return normalized
+        return _http_url(value, field_name="URL")
 
     max_pdf_bytes: int = 50 * 1024 * 1024
 
