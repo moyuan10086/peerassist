@@ -244,6 +244,71 @@ def test_creates_require_initial_version_and_paper_revision_progresses_one_step(
             )
 
 
+def test_paper_versions_advance_aggregate_pointer_version_and_timestamp(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    manuscript, initial_version = paper(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.papers.add(scope, manuscript, initial_version)
+        uow.commit()
+
+    clock.now += timedelta(seconds=1)
+    revision_two = replace(initial_version, id=uuid4(), revision=2, created_at=clock())
+    with uow_factory(principal) as uow:
+        uow.papers.add_version(scope, revision_two, expected_paper_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.papers.get(scope, manuscript.id) == replace(
+            manuscript, current_version_id=revision_two.id, version=2, updated_at=revision_two.created_at
+        )
+
+    clock.now += timedelta(seconds=1)
+    revision_three = replace(revision_two, id=uuid4(), revision=3, created_at=clock())
+    with uow_factory(principal) as uow:
+        uow.papers.add_version(scope, revision_three, expected_paper_version=2)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.papers.get(scope, manuscript.id) == replace(
+            manuscript,
+            current_version_id=revision_three.id,
+            version=3,
+            updated_at=revision_three.created_at,
+        )
+
+
+def test_failed_paper_version_additions_leave_aggregate_and_versions_unchanged(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    manuscript, initial_version = paper(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.papers.add(scope, manuscript, initial_version)
+        uow.commit()
+
+    candidates = (
+        (replace(initial_version, id=uuid4(), revision=2), 0),
+        (replace(initial_version, id=uuid4(), revision=3), 1),
+        (replace(initial_version, id=uuid4(), revision=2), 2),
+    )
+    for candidate, expected_version in candidates:
+        with uow_factory(principal) as uow:
+            with pytest.raises(StaleVersion):
+                uow.papers.add_version(scope, candidate, expected_paper_version=expected_version)
+            uow.commit()
+        with uow_factory(principal) as uow:
+            assert uow.papers.get(scope, manuscript.id) == manuscript
+            assert uow.papers.get_version(scope, candidate.id) is None
+
+    cross_scope = TenantScope(uuid4(), scope.project_id)
+    candidate = replace(initial_version, id=uuid4(), revision=2)
+    with uow_factory(principal) as uow:
+        with pytest.raises(NotFound):
+            uow.papers.add_version(cross_scope, candidate, expected_paper_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.papers.get(scope, manuscript.id) == manuscript
+        assert uow.papers.get_version(scope, candidate.id) is None
+
+
 def test_optimistic_save_rejects_a_lower_replacement_version(uow_factory, clock) -> None:
     principal = actor()
     scope = TenantScope(uuid4(), uuid4())

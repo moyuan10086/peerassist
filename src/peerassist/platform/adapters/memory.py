@@ -270,6 +270,14 @@ class _Papers:
     def find_by_content_digest(self, scope: TenantScope, sha256: str) -> Paper | None:
         return next((item for item in self.list(scope) if item.content_sha256 == sha256), None)
 
+    def get_version(self, scope: TenantScope, version_id: UUID) -> PaperVersion | None:
+        item = self._state.paper_versions.get(version_id)
+        return (
+            item
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
+            else None
+        )
+
     def list(self, scope: TenantScope) -> tuple[Paper, ...]:
         return tuple(
             item
@@ -300,6 +308,12 @@ class _Papers:
                 }
             )
         self._state.paper_versions[version.id] = version
+        self._state.papers[version.paper_id] = replace(
+            paper,
+            current_version_id=version.id,
+            version=expected_paper_version + 1,
+            updated_at=version.created_at,
+        )
 
 
 class _ReviewJobs:
