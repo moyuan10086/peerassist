@@ -12,10 +12,14 @@ from peerassist.platform.idempotency import canonical_json_digest
 from peerassist.platform.models import (
     Actor,
     ActorKind,
+    Artifact,
     BrowserSession,
     CommandRecord,
     ExternalIdentity,
+    LegacyRegistration,
+    ObjectDescriptor,
     OidcTransaction,
+    Organization,
     Paper,
     PaperVersion,
     Project,
@@ -514,3 +518,156 @@ def test_identity_sessions_and_oidc_transactions_obey_lifecycle(uow_factory, clo
     with uow_factory(principal) as uow:
         assert uow.oidc_transactions.get_for_update(transaction.id).consumed_at == clock()
         assert uow.browser_sessions.get_by_digest(session.session_digest).revoked_at == clock()
+
+
+def test_primary_create_paths_reject_conflicting_duplicate_ids(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    user = User(uuid4(), "active", "Ada", clock(), clock())
+    aggregate = project(scope, clock())
+    manuscript, version = paper(scope, clock())
+    review = job(scope, clock())
+    artifact = Artifact(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        review.id,
+        "report",
+        ObjectDescriptor("object-1", 3, "a" * 64, "application/pdf"),
+        "ready",
+        clock(),
+    )
+    registration = LegacyRegistration(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        "review_job",
+        "legacy-1",
+        "b" * 64,
+        "read_only",
+        1,
+        clock(),
+    )
+    organization_scope = TenantScope(scope.organization_id)
+    organization = Organization(scope.organization_id, "alpha", "Alpha", "active", 1, clock(), clock())
+    other_org_id = uuid4()
+    with uow_factory(principal) as uow:
+        uow.users.add(user)
+        uow.organizations.add(organization_scope, organization)
+        uow.projects.add(scope, aggregate)
+        uow.papers.add(scope, manuscript, version)
+        uow.review_jobs.add(scope, review)
+        uow.artifacts.add(scope, artifact)
+        uow.legacy_registrations.add(scope, registration)
+        for operation in (
+            lambda: uow.users.add(replace(user, display_name="Grace")),
+            lambda: uow.organizations.add(organization_scope, replace(organization, name="Changed")),
+            lambda: uow.organizations.add(
+                TenantScope(other_org_id),
+                replace(organization, id=other_org_id, name="Other"),
+            ),
+            lambda: uow.projects.add(scope, replace(aggregate, name="Changed")),
+            lambda: uow.papers.add(scope, replace(manuscript, status="changed"), version),
+            lambda: uow.review_jobs.add(scope, replace(review, status="changed")),
+            lambda: uow.artifacts.add(scope, replace(artifact, status="changed")),
+            lambda: uow.artifacts.add(scope, replace(artifact, id=uuid4())),
+            lambda: uow.legacy_registrations.add(scope, replace(registration, opaque_locator="legacy-2")),
+        ):
+            with pytest.raises(ValueError, match="already exists"):
+                operation()
+
+
+def test_paper_business_and_version_keys_cannot_overwrite_existing_records(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    first_paper, first_version = paper(scope, clock())
+    second_paper, second_version = paper(scope, clock())
+    second_paper = replace(second_paper, content_sha256="c" * 64)
+    second_version = replace(second_version, sha256="c" * 64)
+    with uow_factory(principal) as uow:
+        uow.papers.add(scope, first_paper, first_version)
+        with pytest.raises(ValueError, match="already exists"):
+            uow.papers.add(
+                scope,
+                replace(second_paper, content_sha256=first_paper.content_sha256),
+                second_version,
+            )
+        uow.papers.add(scope, second_paper, second_version)
+        uow.commit()
+    conflicting = replace(second_version, id=first_version.id, revision=2)
+    with uow_factory(principal) as uow:
+        with pytest.raises(ValueError, match="already exists"):
+            uow.papers.add_version(scope, conflicting, expected_paper_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.papers.get(scope, second_paper.id) == second_paper
+        assert uow.papers.get_version(scope, first_version.id) == first_version
+
+
+def test_identity_session_and_oidc_create_paths_reject_conflicting_keys(uow_factory, clock) -> None:
+    principal = actor()
+    user = User(uuid4(), "active", "Ada", clock(), clock())
+    identity = ExternalIdentity(
+        uuid4(), user.id, "https://issuer.example", "ada", {"sub": "ada"}, clock(), clock()
+    )
+    session = BrowserSession(
+        uuid4(),
+        user.id,
+        identity.id,
+        "a" * 64,
+        "b" * 64,
+        "credential-ref",
+        clock() + timedelta(hours=2),
+        clock() + timedelta(hours=1),
+        clock(),
+    )
+    transaction = OidcTransaction(
+        uuid4(),
+        "c" * 64,
+        "d" * 64,
+        b"ciphertext",
+        "key-1",
+        "/compat/",
+        clock() + timedelta(minutes=10),
+        clock(),
+    )
+    with uow_factory(principal) as uow:
+        uow.users.add(user)
+        uow.users.add_identity(identity)
+        uow.browser_sessions.save(session)
+        uow.oidc_transactions.add(transaction)
+        uow.users.add_identity(identity)
+        with pytest.raises(ValueError, match="already exists"):
+            uow.users.add_identity(replace(identity, id=uuid4()))
+        with pytest.raises(ValueError, match="already exists"):
+            uow.browser_sessions.save(replace(session, id=uuid4()))
+        with pytest.raises(ValueError, match="already exists"):
+            uow.browser_sessions.save(replace(session, session_digest="e" * 64))
+        with pytest.raises(ValueError, match="already exists"):
+            uow.oidc_transactions.add(replace(transaction, return_path="/other"))
+        with pytest.raises(ValueError, match="already exists"):
+            uow.oidc_transactions.add(replace(transaction, id=uuid4()))
+
+
+def test_oidc_consume_rejects_forged_replacement_without_partial_write(uow_factory, clock) -> None:
+    principal = actor()
+    transaction = OidcTransaction(
+        uuid4(),
+        "c" * 64,
+        "d" * 64,
+        b"ciphertext",
+        "key-1",
+        "/compat/",
+        clock() + timedelta(minutes=10),
+        clock(),
+    )
+    with uow_factory(principal) as uow:
+        uow.oidc_transactions.add(transaction)
+        uow.commit()
+    forged = replace(transaction, state_digest="e" * 64, consumed_at=clock())
+    with uow_factory(principal) as uow:
+        with pytest.raises(ValueError, match="identity"):
+            uow.oidc_transactions.consume(forged)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.oidc_transactions.get_for_update(transaction.id) == transaction

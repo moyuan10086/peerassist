@@ -80,6 +80,15 @@ def _record_scope_matches(scope: TenantScope, organization_id: UUID, project_id:
     return scope.organization_id == organization_id and scope.project_id == project_id
 
 
+def _insert_immutable(mapping: dict[object, object], key: object, value: object) -> None:
+    existing = mapping.get(key)
+    if existing is not None:
+        if existing == value:
+            return
+        raise ValueError("record already exists with different immutable data")
+    mapping[key] = value
+
+
 def _require_project_scope(scope: TenantScope, value: _TenantOwned) -> None:
     project_id = getattr(value, "project_id", None)
     if isinstance(value, Project):
@@ -133,13 +142,17 @@ class _Users:
         return self._state.identities.get((issuer, subject))
 
     def add(self, user: User) -> None:
-        self._state.users[user.id] = user
+        _insert_immutable(self._state.users, user.id, user)
 
     def add_identity(self, identity: ExternalIdentity) -> None:
         key = (identity.issuer, identity.subject)
         existing = self._state.identities.get(key)
-        if existing is not None and existing.id != identity.id:
-            raise ValueError("issuer and subject already identify another identity")
+        if existing is not None:
+            if existing == identity:
+                return
+            raise ValueError("external identity already exists with different immutable data")
+        if any(current.id == identity.id for current in self._state.identities.values()):
+            raise ValueError("external identity ID already exists")
         self._state.identities[key] = identity
 
 
@@ -154,7 +167,12 @@ class _Organizations:
         if not _organization_scope_matches(scope, organization.id):
             raise NotFound()
         _require_initial_version(organization)
-        self._state.organizations[organization.id] = organization
+        if any(current.slug == organization.slug for current in self._state.organizations.values()):
+            existing = self._state.organizations.get(organization.id)
+            if existing == organization:
+                return
+            raise ValueError("organization slug already exists")
+        _insert_immutable(self._state.organizations, organization.id, organization)
 
     def get_membership(self, scope: TenantScope, user_id: UUID) -> OrganizationMembership | None:
         return self._state.organization_memberships.get((scope.organization_id, user_id))
@@ -225,7 +243,7 @@ class _Projects:
     def add(self, scope: TenantScope, project: Project) -> None:
         _require_project_scope(scope, project)
         _require_initial_version(project)
-        self._state.projects[project.id] = project
+        _insert_immutable(self._state.projects, project.id, project)
 
     def save(self, scope: TenantScope, project: Project, expected_version: int) -> None:
         _require_project_scope(scope, project)
@@ -293,6 +311,20 @@ class _Papers:
             raise StaleVersion(details={"expected_version": 1, "current_version": version.revision})
         if version.paper_id != paper.id or version.id != paper.current_version_id:
             raise ValueError("paper and initial version do not match")
+        if any(
+            current.project_id == paper.project_id
+            and current.organization_id == paper.organization_id
+            and current.content_sha256 == paper.content_sha256
+            and current.id != paper.id
+            for current in self._state.papers.values()
+        ):
+            raise ValueError("paper content digest already exists in project")
+        existing_paper = self._state.papers.get(paper.id)
+        existing_version = self._state.paper_versions.get(version.id)
+        if existing_paper is not None or existing_version is not None:
+            if existing_paper == paper and existing_version == version:
+                return
+            raise ValueError("paper or initial version already exists with different immutable data")
         self._state.papers[paper.id] = paper
         self._state.paper_versions[version.id] = version
 
@@ -307,6 +339,9 @@ class _Papers:
                     "current_version": version.revision,
                 }
             )
+        existing_version = self._state.paper_versions.get(version.id)
+        if existing_version is not None and existing_version != version:
+            raise ValueError("paper version already exists with different immutable data")
         self._state.paper_versions[version.id] = version
         self._state.papers[version.paper_id] = replace(
             paper,
@@ -338,7 +373,7 @@ class _ReviewJobs:
     def add(self, scope: TenantScope, job: ReviewJob) -> None:
         _require_project_scope(scope, job)
         _require_initial_version(job)
-        self._state.review_jobs[job.id] = job
+        _insert_immutable(self._state.review_jobs, job.id, job)
 
     def save(self, scope: TenantScope, job: ReviewJob, expected_version: int) -> None:
         _require_project_scope(scope, job)
@@ -382,7 +417,14 @@ class _Artifacts:
 
     def add(self, scope: TenantScope, artifact: Artifact) -> None:
         _require_project_scope(scope, artifact)
-        self._state.artifacts[artifact.id] = artifact
+        if any(
+            current.job_id == artifact.job_id
+            and current.logical_name == artifact.logical_name
+            and current.id != artifact.id
+            for current in self._state.artifacts.values()
+        ):
+            raise ValueError("artifact logical name already exists for job")
+        _insert_immutable(self._state.artifacts, artifact.id, artifact)
 
 
 class _Commands:
@@ -454,6 +496,11 @@ class _WorkItems:
 
     def enqueue(self, scope: TenantScope, item: WorkItem) -> None:
         _require_project_scope(scope, item)
+        existing = self._state.work_items.get(item.id)
+        if existing is not None:
+            if existing == item:
+                return
+            raise ValueError("work item already exists with different immutable data")
         dedupe = (item.job_id, item.attempt_id, item.stage, item.input_revision)
         if any(
             (current.job_id, current.attempt_id, current.stage, current.input_revision) == dedupe
@@ -520,11 +567,15 @@ class _WorkItems:
     def fail(self, scope: TenantScope, item: WorkItem, lease_owner: str) -> None:
         current = self.get(scope, item.id)
         self._require_active_lease(current, lease_owner)
+        now = self._clock()
+        exhausted = current.attempt_count >= current.max_attempts
         self._state.work_items[item.id] = replace(
             current,
             lease_owner=None,
             lease_expires_at=None,
-            available_at=self._clock(),
+            available_at=now,
+            dead_lettered_at=now if exhausted else None,
+            safe_error_code="attempts_exhausted" if exhausted else current.safe_error_code,
         )
 
     def _require_active_lease(self, item: WorkItem | None, lease_owner: str) -> None:
@@ -606,7 +657,7 @@ class _LegacyRegistrations:
 
     def add(self, scope: TenantScope, registration: LegacyRegistration) -> None:
         _require_project_scope(scope, registration)
-        self._state.legacy_registrations[registration.id] = registration
+        _insert_immutable(self._state.legacy_registrations, registration.id, registration)
 
 
 class _BrowserSessions:
@@ -618,7 +669,12 @@ class _BrowserSessions:
         return self._state.browser_sessions.get(session_digest)
 
     def save(self, session: BrowserSession) -> None:
-        self._state.browser_sessions[session.session_digest] = session
+        if any(
+            existing.id == session.id and digest != session.session_digest
+            for digest, existing in self._state.browser_sessions.items()
+        ):
+            raise ValueError("browser session ID already exists")
+        _insert_immutable(self._state.browser_sessions, session.session_digest, session)
 
     def revoke_for_user(self, user_id: UUID) -> None:
         for digest, session in tuple(self._state.browser_sessions.items()):
@@ -634,15 +690,28 @@ class _OidcTransactions:
         return self._state.oidc_transactions.get(transaction_id)
 
     def add(self, transaction: OidcTransaction) -> None:
+        if any(
+            existing.state_digest == transaction.state_digest
+            or existing.nonce_digest == transaction.nonce_digest
+            for existing in self._state.oidc_transactions.values()
+        ):
+            existing = self._state.oidc_transactions.get(transaction.id)
+            if existing == transaction:
+                return
+            raise ValueError("OIDC transaction state or nonce already exists")
         if transaction.id in self._state.oidc_transactions:
-            raise ValueError("OIDC transaction already exists")
+            if self._state.oidc_transactions[transaction.id] == transaction:
+                return
+            raise ValueError("OIDC transaction ID already exists")
         self._state.oidc_transactions[transaction.id] = transaction
 
     def consume(self, transaction: OidcTransaction) -> None:
         current = self._state.oidc_transactions.get(transaction.id)
         if current is None or current.consumed_at is not None or transaction.consumed_at is None:
             raise ValueError("OIDC transaction is absent, consumed, or not marked consumed")
-        self._state.oidc_transactions[transaction.id] = transaction
+        if replace(transaction, consumed_at=current.consumed_at) != current:
+            raise ValueError("OIDC transaction identity cannot change while consuming")
+        self._state.oidc_transactions[transaction.id] = replace(current, consumed_at=transaction.consumed_at)
 
     def delete(self, transaction_id: UUID) -> None:
         self._state.oidc_transactions.pop(transaction_id, None)
@@ -738,6 +807,7 @@ class MemoryObjectStore:
         self._lock = threading.RLock()
         self._temporary: dict[UUID, _TemporaryObject] = {}
         self._published: dict[str, _PublishedObject] = {}
+        self._tombstones: dict[str, TenantScope] = {}
 
     def create_temporary(self, scope: TenantScope, maximum_size_bytes: int) -> UUID:
         if maximum_size_bytes <= 0:
@@ -791,6 +861,8 @@ class MemoryObjectStore:
                 temporary.sha256,
                 "application/octet-stream",
             )
+            if object_id in self._tombstones:
+                raise ImmutableResource()
             existing = self._published.get(object_id)
             if existing is not None:
                 if existing.scope == scope and existing.descriptor.sha256 == descriptor.sha256:
@@ -833,6 +905,7 @@ class MemoryObjectStore:
             if item is None or item.scope != scope:
                 raise NotFound()
             del self._published[object_id]
+            self._tombstones[object_id] = scope
 
     def delete_temporary(self, scope: TenantScope, upload_id: UUID) -> None:
         with self._lock:

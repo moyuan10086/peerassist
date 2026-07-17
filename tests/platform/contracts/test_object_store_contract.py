@@ -80,3 +80,22 @@ def test_cleanup_tombstone_and_descriptor_snapshots(object_store_factory) -> Non
     assert store.metadata(scope, "object-1") is None
     with pytest.raises(NotFound):
         store.open_immutable(scope, "object-1")
+
+
+def test_tombstone_permanently_claims_object_key(object_store_factory) -> None:
+    store = object_store_factory()
+    scope = TenantScope(uuid4(), uuid4())
+    first_upload = store.create_temporary(scope, 5)
+    first = store.write_temporary(scope, first_upload, io.BytesIO(b"first"))
+    store.publish(scope, first, "object-1")
+    store.tombstone(scope, "object-1")
+    store.delete_temporary(scope, first_upload)
+
+    for content in (b"first", b"other"):
+        upload = store.create_temporary(scope, 5)
+        temporary = store.write_temporary(scope, upload, io.BytesIO(content))
+        with pytest.raises(ImmutableResource):
+            store.publish(scope, temporary, "object-1")
+    assert store.metadata(scope, "object-1") is None
+    with pytest.raises(NotFound):
+        store.read_range(scope, "object-1", 0, 0)

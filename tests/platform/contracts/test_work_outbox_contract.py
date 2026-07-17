@@ -100,6 +100,40 @@ def test_three_lease_expiries_dead_letter_work(uow_factory, clock) -> None:
         assert stored.attempt_count == 3
 
 
+def test_three_explicit_nacks_dead_letter_without_a_fourth_attempt(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    item = work(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.work_items.enqueue(scope, item)
+        uow.commit()
+    for attempt in range(1, 4):
+        with uow_factory(principal) as uow:
+            claimed = uow.work_items.claim(scope, f"worker-{attempt}", 30)
+            assert claimed is not None and claimed.attempt_count == attempt
+            uow.work_items.fail(scope, claimed, f"worker-{attempt}")
+            uow.commit()
+    with uow_factory(principal) as uow:
+        stored = uow.work_items.get(scope, item.id)
+        assert stored.attempt_count == stored.max_attempts == 3
+        assert stored.dead_lettered_at == clock()
+        assert stored.safe_error_code == "attempts_exhausted"
+        assert stored.lease_owner is None
+        assert stored.lease_expires_at is None
+        assert stored.available_at == clock()
+        assert uow.work_items.claim(scope, "worker-4", 30) is None
+
+
+def test_work_enqueue_rejects_duplicate_id_with_different_identity(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    item = work(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.work_items.enqueue(scope, item)
+        with pytest.raises(ValueError, match="already exists"):
+            uow.work_items.enqueue(scope, replace(item, stage="review"))
+
+
 def test_wrong_lease_owner_cannot_renew_ack_or_nack(uow_factory, clock) -> None:
     principal = actor()
     scope = TenantScope(uuid4(), uuid4())
