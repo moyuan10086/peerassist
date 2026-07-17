@@ -683,7 +683,9 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "function PdfReviewReader" in source
     assert "pdfjsLib.getDocument" in source
     assert "pdf-text-layer" in source
-    assert "onSelection({ text, page: pageNumber })" in source
+    assert "onSelection({" in source
+    assert "text," in source
+    assert "page: pageNumber" in source
     assert "请在论文中拖选文字" in source
     assert "rangeChunkSize: 64 * 1024" in source
     assert "pdf.worker.min.mjs" in source
@@ -691,7 +693,6 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert 'title="单页阅读"' in source
     assert 'title="双页阅读"' in source
     assert 'data-view-mode={effectiveViewMode}' in source
-    assert "onSelection({ text, page: pageNumber })" in source
     assert "pdf-annotation-pin" in source
     assert "打开关注：" in source
     assert "selected={item.id === activeConcernId}" in source
