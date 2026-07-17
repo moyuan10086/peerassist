@@ -54,7 +54,13 @@ source .venv/bin/activate
 python scripts/verify_repository.py all
 
 docker compose -f infrastructure/compose/compose.yml up -d --build
-workspace_address="$(docker compose -f "$COMPOSE_FILE" port workspace 8766)"
+workspace_address=""
+for _ in $(seq 1 30); do
+  workspace_address="$(docker compose -f "$COMPOSE_FILE" port workspace 8766 2>/dev/null || true)"
+  test -n "$workspace_address" && break
+  sleep 1
+done
+test -n "$workspace_address"
 healthy=0
 for _ in $(seq 1 60); do
   running_services="$(docker compose -f "$COMPOSE_FILE" ps --status running --services)"

@@ -101,6 +101,8 @@ def test_bootstrap_smoke_contract_is_isolated_bounded_and_does_not_dump_environm
         "workspace",
         "PEERASSIST_WORKSPACE_BIND_PORT=0",
         'docker compose -f "$COMPOSE_FILE" port workspace 8766',
+        "seq 1 30",
+        'test -n "$workspace_address"',
         'http://$workspace_address/api/health',
         "down -v",
         "Content-Range",
