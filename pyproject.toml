@@ -141,7 +141,14 @@ packages = [
 "web/peerassist-workspace/dist" = "web/peerassist-workspace/dist"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "demos", "README.md", "LICENSE"]
+include = [
+  "src",
+  "RefCopilot/src/refcopilot",
+  "web/peerassist-workspace/dist",
+  "demos",
+  "README.md",
+  "LICENSE",
+]
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]

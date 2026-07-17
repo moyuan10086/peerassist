@@ -91,22 +91,16 @@ class ReviewJobService:
         self.paper_repository.get(paper_id)
         if mode != "fast":
             raise ValueError("mode_unavailable")
-        if idempotency_key:
-            for existing in self.repository.list():
-                if (
-                    existing.paper_id == paper_id
-                    and existing.metadata.get("idempotency_key") == idempotency_key
-                ):
-                    return existing
         job_id = uuid4()
-        state = self.repository.create(
+        state = self.repository.create_idempotent(
             ReviewJobState(
                 id=job_id,
                 paper_id=paper_id,
                 run_dir=f"jobs/{job_id}/run",
                 attempt_id=f"attempt-{uuid4().hex}",
                 metadata={"idempotency_key": idempotency_key},
-            )
+            ),
+            idempotency_key=idempotency_key,
         )
         self.scheduler.submit(state.id)
         return state

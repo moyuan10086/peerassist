@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -434,6 +435,43 @@ def test_cancel_request_is_durable_before_worker_observes_it(tmp_path) -> None:
 
     assert cancelled.cancel_requested is True
     assert cancelled.status is ReviewJobStatus.CANCEL_REQUESTED
+
+
+def test_state_guarded_commands_converge_under_thread_contention(tmp_path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    runner = RecoverableReviewJobRunner(repository, _adapters([]), owner="worker-1")
+
+    consent_job = _job(repository)
+    consent_job = repository.update(
+        consent_job.id,
+        expected_revision=consent_job.revision,
+        status=ReviewJobStatus.BLOCKED,
+        resume_stage=ReviewStage.AGENTS,
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        granted = list(
+            pool.map(
+                lambda _: runner.grant_consent(consent_job.id, service="model", actor="reviewer"),
+                range(16),
+            )
+        )
+    assert {state.model_consent.decision for state in granted} == {ConsentDecision.GRANTED}
+
+    cancel_job = _job(repository)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        cancelled = list(pool.map(lambda _: runner.request_cancel(cancel_job.id), range(16)))
+    assert all(state.cancel_requested for state in cancelled)
+
+    retry_job = _job(repository)
+    retry_job = repository.update(
+        retry_job.id,
+        expected_revision=retry_job.revision,
+        status=ReviewJobStatus.FAILED,
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        retried = list(pool.map(lambda _: runner.retry(retry_job.id), range(16)))
+    assert {state.status for state in retried} == {ReviewJobStatus.QUEUED}
+    assert len({state.attempt_id for state in retried}) == 1
 
 
 def test_real_local_stages_commit_before_model_consent_gate(tmp_path) -> None:

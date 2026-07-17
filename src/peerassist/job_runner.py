@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 from common.storage import write_json_atomic
 from peerassist.confirmation_workflow import finalize_confirmed_report
-from peerassist.job_repository import ReviewJobRepository
+from peerassist.job_repository import RepositoryConflictError, ReviewJobRepository
 from schemas.peerassist_jobs import (
     ConsentDecision,
     ReviewJobState,
@@ -155,68 +155,81 @@ class RecoverableReviewJobRunner:
     def grant_consent(self, job_id: UUID | str, *, service: str, actor: str) -> ReviewJobState:
         if service not in {"parse", "search", "model"}:
             raise ValueError(f"unsupported consent service: {service}")
-        state = self.repository.get(job_id)
         field = f"{service}_consent"
-        consent = getattr(state, field)
-        if consent.decision is ConsentDecision.GRANTED:
-            return state
-        granted = consent.model_copy(
-            update={
-                "decision": ConsentDecision.GRANTED,
-                "decided_by": actor,
-                "decided_at": datetime.now(UTC),
-                "reason": "",
-            }
-        )
-        resume_stage = state.resume_stage or state.stage
-        updated = self._update(
-            state,
-            **{
-                field: granted,
-                "stage": resume_stage,
-                "status": ReviewJobStatus.QUEUED,
-                "blocked_reason": None,
-                "required_consents": [],
-                "resume_stage": None,
-            },
-        )
-        self._event(updated, "consent_granted", payload={"service": service, "actor": actor})
-        return updated
+        while True:
+            state = self.repository.get(job_id)
+            consent = getattr(state, field)
+            if consent.decision is ConsentDecision.GRANTED:
+                return state
+            granted = consent.model_copy(
+                update={
+                    "decision": ConsentDecision.GRANTED,
+                    "decided_by": actor,
+                    "decided_at": datetime.now(UTC),
+                    "reason": "",
+                }
+            )
+            resume_stage = state.resume_stage or state.stage
+            try:
+                return self.repository.update_with_event(
+                    state.id,
+                    expected_revision=state.revision,
+                    event_type="consent_granted",
+                    event_payload={"service": service, "actor": actor},
+                    **{
+                        field: granted,
+                        "stage": resume_stage,
+                        "status": ReviewJobStatus.QUEUED,
+                        "blocked_reason": None,
+                        "required_consents": [],
+                        "resume_stage": None,
+                    },
+                )
+            except RepositoryConflictError:
+                continue
 
     def retry(self, job_id: UUID | str) -> ReviewJobState:
-        state = self.repository.get(job_id)
-        if state.status not in {
-            ReviewJobStatus.FAILED,
-            ReviewJobStatus.INTERRUPTED,
-            ReviewJobStatus.CANCELLED,
-        }:
-            return state
-        updated = self._update(
-            state,
-            attempt_id=f"attempt-{uuid4().hex}",
-            status=ReviewJobStatus.QUEUED,
-            cancel_requested=False,
-            error_code=None,
-            error=None,
-        )
-        self._event(updated, "job_retried")
-        return updated
+        while True:
+            state = self.repository.get(job_id)
+            if state.status not in {
+                ReviewJobStatus.FAILED,
+                ReviewJobStatus.INTERRUPTED,
+                ReviewJobStatus.CANCELLED,
+            }:
+                return state
+            try:
+                return self.repository.update_with_event(
+                    state.id,
+                    expected_revision=state.revision,
+                    event_type="job_retried",
+                    attempt_id=f"attempt-{uuid4().hex}",
+                    status=ReviewJobStatus.QUEUED,
+                    cancel_requested=False,
+                    error_code=None,
+                    error=None,
+                )
+            except RepositoryConflictError:
+                continue
 
     def request_cancel(self, job_id: UUID | str) -> ReviewJobState:
-        state = self.repository.get(job_id)
-        if state.cancel_requested or state.status in {
-            ReviewJobStatus.CANCEL_REQUESTED,
-            ReviewJobStatus.CANCELLED,
-            ReviewJobStatus.COMPLETED,
-        }:
-            return state
-        updated = self._update(
-            state,
-            cancel_requested=True,
-            status=ReviewJobStatus.CANCEL_REQUESTED,
-        )
-        self._event(updated, "cancel_requested")
-        return updated
+        while True:
+            state = self.repository.get(job_id)
+            if state.cancel_requested or state.status in {
+                ReviewJobStatus.CANCEL_REQUESTED,
+                ReviewJobStatus.CANCELLED,
+                ReviewJobStatus.COMPLETED,
+            }:
+                return state
+            try:
+                return self.repository.update_with_event(
+                    state.id,
+                    expected_revision=state.revision,
+                    event_type="cancel_requested",
+                    cancel_requested=True,
+                    status=ReviewJobStatus.CANCEL_REQUESTED,
+                )
+            except RepositoryConflictError:
+                continue
 
     def finalize(
         self,

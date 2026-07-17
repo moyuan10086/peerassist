@@ -134,9 +134,11 @@ class ReviewJobRepository:
         self.data_dir = Path(data_dir or get_settings().data_dir).resolve()
         self.jobs_dir = self.data_dir / "jobs"
         self.locks_dir = self.jobs_dir / ".locks"
+        self.idempotency_locks_dir = self.jobs_dir / ".idempotency-locks"
         self.deleted_dir = self.jobs_dir / ".deleted"
         _ensure_repository_directory(self.jobs_dir)
         _ensure_repository_directory(self.locks_dir)
+        _ensure_repository_directory(self.idempotency_locks_dir)
         _ensure_repository_directory(self.deleted_dir)
 
     def _job_dir(self, job_id: UUID | str) -> Path:
@@ -180,6 +182,27 @@ class ReviewJobRepository:
                 self._fsync_directory(self.jobs_dir)
             write_json_atomic(path, _json_payload(validated))
         return validated
+
+    def create_idempotent(
+        self,
+        state: ReviewJobState,
+        *,
+        idempotency_key: str,
+    ) -> ReviewJobState:
+        """Create once for a paper/key pair across threads and processes."""
+        validated = ReviewJobState.model_validate(state)
+        key = idempotency_key.strip()
+        if not key:
+            return self.create(validated)
+        identity = hashlib.sha256(f"{validated.paper_id}\0{key}".encode()).hexdigest()
+        with exclusive_file_lock(self.idempotency_locks_dir / f"{identity}.lock"):
+            for existing in self.list():
+                if (
+                    existing.paper_id == validated.paper_id
+                    and existing.metadata.get("idempotency_key") == key
+                ):
+                    return existing
+            return self.create(validated)
 
     def get(self, job_id: UUID | str) -> ReviewJobState:
         with exclusive_file_lock(self._lock_path(job_id)):

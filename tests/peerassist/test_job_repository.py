@@ -383,6 +383,29 @@ def test_review_job_status_contract_includes_startup_recovery_states() -> None:
     assert ReviewJobStatus.INTERRUPTED == "interrupted"
 
 
+def test_create_idempotent_converges_across_threads(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    repository = ReviewJobRepository(tmp_path)
+
+    def create(index: int) -> ReviewJobState:
+        job_id = uuid4()
+        state = ReviewJobState(
+            id=job_id,
+            paper_id=PAPER_SHA,
+            run_dir=f"jobs/{job_id}/run",
+            attempt_id=f"attempt-{index}",
+            metadata={"idempotency_key": "same-key"},
+        )
+        return repository.create_idempotent(state, idempotency_key="same-key")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        states = list(pool.map(create, range(16)))
+
+    assert len({state.id for state in states}) == 1
+    assert len(repository.list()) == 1
+
+
 def test_legacy_job_state_load_contract_preserves_artifacts_and_accepts_migration_metadata() -> None:
     legacy_payload = {
         "title": "Legacy review",
