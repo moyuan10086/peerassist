@@ -878,6 +878,16 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
     assert "原始 PDF" in html
     assert "paper.pdf" in html
 
+
+def test_source_pdf_prefers_canonical_paper_over_generated_report(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    source = run_dir / "paper.pdf"
+    source.write_bytes(b"%PDF-1.4\n% source\n%%EOF\n")
+    (run_dir / "report.pdf").write_bytes(b"%PDF-1.4\n% report\n%%EOF\n")
+
+    assert confirmation_server._discover_source_pdf(run_dir=run_dir, paper_id="demo") == source
+
     server = create_confirmation_server(
         run_dir=run_dir,
         paper_id="paper",

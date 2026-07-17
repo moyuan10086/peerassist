@@ -5459,6 +5459,10 @@ def _discover_source_pdf(*, run_dir: Path, paper_id: str) -> Path | None:
     for name in direct_names:
         candidates.append(run_dir / name)
 
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
     search_roots = [run_dir, *list(run_dir.parents[:5])]
     for source_root in _evidence_source_roots(run_dir):
         search_roots.extend([source_root, *list(source_root.parents[:3])])
