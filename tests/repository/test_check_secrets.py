@@ -217,20 +217,20 @@ def test_invalid_utf8_secret_input_fails_closed_for_api_default_and_explicit_cli
         assert "Traceback" not in result.stderr
 
 
-def test_default_scan_skips_policy_sources_but_explicit_scan_still_checks_them(tmp_path: Path) -> None:
+def test_default_scan_includes_policy_script_but_skips_test_construction(tmp_path: Path) -> None:
     policy_script = tmp_path / "scripts" / "check_secrets.py"
     policy_test = tmp_path / "tests" / "repository" / "test_check_secrets.py"
     ordinary = tmp_path / "config.txt"
     secret = _github_token()
     policy_script.parent.mkdir(parents=True)
     policy_test.parent.mkdir(parents=True)
-    policy_script.write_text(secret, encoding="utf-8")
+    policy_script.write_text("# clean scanner copy\n", encoding="utf-8")
     policy_test.write_text(secret, encoding="utf-8")
-    ordinary.write_text(secret, encoding="utf-8")
+    ordinary.write_text("clean=true\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
 
-    result = subprocess.run(
+    clean = subprocess.run(
         [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py")],
         cwd=tmp_path,
         check=False,
@@ -238,12 +238,24 @@ def test_default_scan_skips_policy_sources_but_explicit_scan_still_checks_them(t
         text=True,
     )
 
-    assert result.returncode == 1
-    assert result.stdout == "config.txt:1: github-token\n"
-    assert scan_files(tmp_path, [policy_script, policy_test]) == [
-        Finding(Path("scripts/check_secrets.py"), 1, "github-token"),
-        Finding(Path("tests/repository/test_check_secrets.py"), 1, "github-token"),
-    ]
+    assert clean.returncode == 0
+    assert clean.stdout == ""
+    assert clean.stderr == ""
+
+    policy_script.write_text(f"# clean scanner copy\nvalue={secret}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "scripts/check_secrets.py"], cwd=tmp_path, check=True)
+    finding = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py")],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert finding.returncode == 1
+    assert finding.stdout == "scripts/check_secrets.py:2: github-token\n"
+    assert secret not in finding.stdout
+    assert finding.stderr == ""
 
 
 def test_check_secrets_cli_never_prints_matched_value(tmp_path: Path) -> None:

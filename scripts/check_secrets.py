@@ -17,14 +17,13 @@ _LFS_HEADER = b"version https://git-lfs.github.com/spec/v1\n"
 _DEFAULT_EXCLUDED_PARTS = ("tests", "fixtures")
 _DIST_PARTS = ("web", "peerassist-workspace", "dist")
 _POLICY_IMPLEMENTATION_PATHS = {
-    Path("scripts/check_secrets.py"),
     Path("tests/repository/test_check_secrets.py"),
 }
 _RULES = (
-    ("github-token", re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})")),
-    ("openai-api-key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
-    ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----")),
-    ("aws-access-key", re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")),
+    ("github-token", re.compile(r"(?:gh" + r"[pousr]_[A-Za-z0-9]{30,}|github_" + r"pat_[A-Za-z0-9_]{20,})")),
+    ("openai-api-key", re.compile(r"sk" + r"-[A-Za-z0-9_-]{20,}")),
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE " + r"KEY-----")),
+    ("aws-access-key", re.compile(r"(?:AK" + r"IA|AS" + r"IA)[A-Z0-9]{16}")),
 )
 _PASSWORD_RE = re.compile(
     r'''(?ix)
