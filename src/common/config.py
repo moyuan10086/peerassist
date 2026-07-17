@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -8,6 +11,10 @@ from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+OIDC_ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"})
+SESSION_KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SESSION_KEY_MATERIAL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
 
 
 def _http_url(value: str, *, field_name: str) -> str:
@@ -20,6 +27,34 @@ def _http_url(value: str, *, field_name: str) -> str:
     if parsed.query or parsed.fragment:
         raise ValueError(f"{field_name} must not contain a query or fragment")
     return normalized
+
+
+def _origin_url(value: str) -> str:
+    normalized = value.strip()
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("allowed origin must use HTTP(S) and include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("allowed origin must not contain credentials")
+    if parsed.path or parsed.query or parsed.fragment:
+        raise ValueError("allowed origin must contain only scheme, host, and optional port")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("allowed origin contains an invalid port") from exc
+    del port
+    return normalized
+
+
+def _decode_session_key_material(value: str) -> bytes:
+    if re.fullmatch(r"[0-9A-Fa-f]{64}", value):
+        return bytes.fromhex(value)
+    if not SESSION_KEY_MATERIAL_PATTERN.fullmatch(value):
+        raise ValueError("session key material must be hex or base64url")
+    try:
+        return base64.urlsafe_b64decode(value.rstrip("=") + "=" * (-len(value.rstrip("=")) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("session key material must be valid base64url") from exc
 
 
 class PlatformSettings(BaseSettings):
@@ -72,14 +107,28 @@ class PlatformSettings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: SecretStr, info: ValidationInfo) -> SecretStr:
-        database_url = value.get_secret_value().lower()
-        if not database_url.startswith(("postgresql://", "postgresql+psycopg://")):
+        database_url = value.get_secret_value()
+        parsed = urlsplit(database_url)
+        if parsed.scheme != "postgresql+psycopg":
             raise ValueError("platform database URL must use PostgreSQL with Psycopg")
+        if not parsed.hostname:
+            raise ValueError("platform database URL must include a hostname")
+        if not parsed.path.lstrip("/"):
+            raise ValueError("platform database URL must include a database name")
         if info.data.get("environment") == "production" and any(
-            default in database_url for default in ("postgres:postgres", "change-me")
+            default in database_url.lower() for default in ("postgres:postgres", "change-me")
         ):
             raise ValueError("production database credentials must not use defaults")
         return value
+
+    @field_validator("oidc_algorithms")
+    @classmethod
+    def validate_oidc_algorithms(cls, values: list[str]) -> list[str]:
+        if any(value not in OIDC_ASYMMETRIC_ALGORITHMS for value in values):
+            raise ValueError("OIDC algorithms must use the supported asymmetric allowlist")
+        if len(values) != len(set(values)):
+            raise ValueError("OIDC algorithms must not contain duplicates")
+        return values
 
     @field_validator("oidc_issuer", "s3_endpoint", "public_base_url")
     @classmethod
@@ -105,11 +154,13 @@ class PlatformSettings(BaseSettings):
     @field_validator("allowed_origins")
     @classmethod
     def validate_origins(cls, values: list[str], info: ValidationInfo) -> list[str]:
-        normalized = [
-            value if value == "*" else _http_url(value, field_name="allowed origin") for value in values
-        ]
+        normalized = [value if value == "*" else _origin_url(value) for value in values]
         if info.data.get("environment") == "production" and "*" in normalized:
             raise ValueError("production allowed origins must not contain wildcards")
+        if info.data.get("environment") == "production" and any(
+            urlsplit(value).scheme != "https" for value in normalized
+        ):
+            raise ValueError("production allowed origins must use HTTPS")
         return normalized
 
     @field_validator("trusted_proxy_cidrs")
@@ -124,12 +175,25 @@ class PlatformSettings(BaseSettings):
     def validate_session_key_ring(
         cls, values: list[SecretStr], info: ValidationInfo
     ) -> list[SecretStr]:
-        if info.data.get("environment") != "production":
-            return values
-        if not values:
+        production = info.data.get("environment") == "production"
+        if production and not values:
             raise ValueError("production session key ring must not be empty")
-        if any("change-me" in value.get_secret_value().lower() for value in values):
-            raise ValueError("production session keys must not use defaults")
+        key_ids: set[str] = set()
+        for secret in values:
+            serialized = secret.get_secret_value()
+            key_id, separator, material = serialized.partition("=")
+            if not separator or not SESSION_KEY_ID_PATTERN.fullmatch(key_id):
+                raise ValueError("session key must use kid=key-material format")
+            if key_id in key_ids:
+                raise ValueError("session key IDs must be unique")
+            key_ids.add(key_id)
+            if production and material.lower() in {"change-me", "changeme", "placeholder", "secret"}:
+                raise ValueError("production session keys must not use placeholders")
+            decoded_material = _decode_session_key_material(material)
+            if len(decoded_material) != 32:
+                raise ValueError("session key material must decode to exactly 32 bytes")
+            if len(set(decoded_material)) < 16:
+                raise ValueError("session key material has insufficient byte diversity")
         return values
 
     @field_validator("legacy_bind_host")
