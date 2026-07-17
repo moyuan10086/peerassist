@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from uuid import UUID
@@ -125,6 +125,42 @@ class TenantScope:
         return self.organization_id == other.organization_id and (
             self.project_id is None or self.project_id == other.project_id
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InternalServiceGrant:
+    service_actor_id: UUID
+    scope: TenantScope
+    audience: str
+    actions: frozenset[Action]
+    issued_at: datetime
+    expires_at: datetime
+    grant_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        _uuid(self.service_actor_id, "service_actor_id")
+        if self.grant_id is not None:
+            _uuid(self.grant_id, "grant_id")
+        if not isinstance(self.scope, TenantScope):
+            raise TypeError("scope must be a TenantScope")
+        _nonempty(self.audience, "audience")
+        if not isinstance(self.actions, frozenset) or not self.actions:
+            raise ValueError("actions must be a nonempty frozenset")
+        if any(not isinstance(action, Action) for action in self.actions):
+            raise TypeError("actions must contain Action values")
+        internal_actions = {
+            Action.INTERNAL_TOOL_EXECUTE,
+            Action.INTERNAL_WORK_CLAIM,
+            Action.INTERNAL_WORK_COMPLETE,
+        }
+        if not self.actions.issubset(internal_actions):
+            raise ValueError("service grants may contain only internal actions")
+        _utc(self.issued_at, "issued_at")
+        _utc(self.expires_at, "expires_at")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("expires_at must be after issued_at")
+        if self.expires_at - self.issued_at > timedelta(minutes=15):
+            raise ValueError("service grants must be short-lived (at most 15 minutes)")
 
 
 @dataclass(frozen=True, slots=True)

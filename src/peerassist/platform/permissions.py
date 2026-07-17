@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .models import Action, Decision, Role, TenantScope
+from datetime import datetime
+
+from .models import Action, Actor, ActorKind, Decision, InternalServiceGrant, Role, TenantScope
 
 _PROJECT_READ_ACTIONS = {
     Action.PROJECT_READ,
@@ -49,7 +51,6 @@ _ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
             Action.REVIEW_JOB_RETRY,
             Action.CONCERN_DECIDE,
             Action.REPORT_DRAFT,
-            Action.PUBLICATION_GRANT,
         }
     ),
     Role.VIEWER: frozenset(_PROJECT_READ_ACTIONS),
@@ -59,29 +60,40 @@ _ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
 _INTERNAL_ACTIONS = frozenset(
     {Action.INTERNAL_TOOL_EXECUTE, Action.INTERNAL_WORK_CLAIM, Action.INTERNAL_WORK_COMPLETE}
 )
-_ORGANIZATION_ACTIONS = frozenset(
-    {
-        Action.ORGANIZATION_READ,
-        Action.ORGANIZATION_MANAGE_POLICY,
-        Action.ORGANIZATION_MANAGE_MEMBERS,
-        Action.ORGANIZATION_READ_AUDIT,
-    }
-)
-
-
 def decide_permission(
     *,
     role: Role,
     membership_scope: TenantScope,
     resource_scope: TenantScope,
     action: Action,
-    internal_grant: frozenset[Action] = frozenset(),
+    actor: Actor | None = None,
+    grant: InternalServiceGrant | None = None,
+    audience: str | None = None,
+    now: datetime | None = None,
 ) -> Decision:
     """Decide visibility before permissions so tenant existence is never leaked."""
     if not membership_scope.contains(resource_scope):
         return Decision.NOT_FOUND
     if role is Role.SERVICE_AGENT:
-        return Decision.ALLOW if action in _INTERNAL_ACTIONS and action in internal_grant else Decision.FORBIDDEN
+        if (
+            actor is None
+            or actor.kind is not ActorKind.SERVICE
+            or grant is None
+            or audience is None
+            or now is None
+            or now.tzinfo is None
+            or now.utcoffset() is None
+            or now.utcoffset().total_seconds() != 0
+            or actor.actor_id != grant.service_actor_id
+            or audience != grant.audience
+            or grant.scope != resource_scope
+            or action not in _INTERNAL_ACTIONS
+            or action not in grant.actions
+            or now < grant.issued_at
+            or now >= grant.expires_at
+        ):
+            return Decision.FORBIDDEN
+        return Decision.ALLOW
     if action in _INTERNAL_ACTIONS:
         return Decision.FORBIDDEN
     return Decision.ALLOW if action in _ROLE_ACTIONS[role] else Decision.FORBIDDEN

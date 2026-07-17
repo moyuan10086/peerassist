@@ -8,12 +8,14 @@ from uuid import UUID, uuid4
 import pytest
 
 from peerassist.platform.models import (
+    Action,
     Actor,
     ActorKind,
     AuditEvent,
     BrowserSession,
     CommandRecord,
     ExternalIdentity,
+    InternalServiceGrant,
     LegacyRegistration,
     ObjectDescriptor,
     OidcTransaction,
@@ -235,3 +237,42 @@ def test_uow_exposes_domain_repositories_without_a_provider_session() -> None:
         TenantScope,
         "TenantScope",
     }
+
+
+@pytest.mark.parametrize(
+    ("issued_at", "expires_at"),
+    [
+        (NOW, NOW),
+        (NOW, NOW - timedelta(seconds=1)),
+        (NOW, NOW + timedelta(minutes=15, seconds=1)),
+        (NOW.replace(tzinfo=None), NOW + timedelta(minutes=5)),
+    ],
+)
+def test_internal_service_grants_are_utc_and_short_lived(
+    issued_at: datetime,
+    expires_at: datetime,
+) -> None:
+    with pytest.raises(ValueError, match=r"UTC|expires_at|short-lived"):
+        InternalServiceGrant(
+            service_actor_id=uuid4(),
+            scope=TenantScope(uuid4(), uuid4()),
+            audience="peerassist-worker",
+            actions=frozenset({Action.INTERNAL_TOOL_EXECUTE}),
+            issued_at=issued_at,
+            expires_at=expires_at,
+        )
+
+
+def test_internal_service_grant_contains_no_raw_token() -> None:
+    grant = InternalServiceGrant(
+        grant_id=uuid4(),
+        service_actor_id=uuid4(),
+        scope=TenantScope(uuid4(), uuid4()),
+        audience="peerassist-worker",
+        actions=frozenset({Action.INTERNAL_TOOL_EXECUTE}),
+        issued_at=NOW,
+        expires_at=NOW + timedelta(minutes=5),
+    )
+
+    assert not hasattr(grant, "raw_token")
+    assert not hasattr(grant, "token")
