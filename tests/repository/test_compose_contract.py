@@ -59,6 +59,7 @@ def test_dockerfile_runs_as_fixed_non_root_user_without_secret_defaults() -> Non
     assert "groupadd --gid 10001 peerassist" in dockerfile
     assert "useradd --uid 10001" in dockerfile
     assert "PYTHONPATH=/app/src" in dockerfile
+    assert "COPY --chown=peerassist:peerassist . /app" in dockerfile
     assert "USER peerassist" in dockerfile
     assert "%PDF-" in dockerfile
     assert "git lfs pull" in dockerfile
