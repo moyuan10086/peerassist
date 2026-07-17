@@ -516,7 +516,7 @@ def _load_citation_audit(path: Path) -> tuple[CitationAudit | None, str]:
     payload = read_json_file(path)
     if not payload:
         return None, ""
-    return CitationAudit.model_validate(payload), str(path)
+    return CitationAudit.model_validate(payload), path.name
 
 
 def _validate_confirmation_actions(*, out_dir: Path, paper_id: str, rows: list[dict[str, Any]]) -> None:

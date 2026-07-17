@@ -1,0 +1,15 @@
+{
+  "schema_version": "peerassist.review_job.v2",
+  "id": "00000000-0000-4000-8000-000000000001",
+  "paper_id": "8c22d331f340849a1a2afced41d775340996bf754cda8dec3c7525f82fcf6456",
+  "run_dir": "jobs/00000000-0000-4000-8000-000000000001/run",
+  "mode": "fast",
+  "stage": "await_confirmation",
+  "status": "awaiting_human_confirmation",
+  "revision": 0,
+  "attempt_id": "attempt-contract-v1",
+  "confirmation_revision": 0,
+  "created_at": "2026-07-17T00:00:00Z",
+  "updated_at": "2026-07-17T00:00:00Z",
+  "metadata": {"idempotency_key": "contract-review-v1"}
+}

@@ -538,6 +538,18 @@ class ReviewJobService:
                 continue
         else:
             raise RepositoryConflictError("unable to persist confirmation revision")
+        self.repository.append_event(
+            state.id,
+            "confirmation_decision_applied",
+            stage=state.stage,
+            status=state.status,
+            attempt_id=state.attempt_id,
+            payload={
+                "concern_id": str(payload.get("concern_id") or ""),
+                "action": str(payload.get("action") or ""),
+                "confirmation_revision": confirmation_revision,
+            },
+        )
         state, workspace = self.workspace(job_id)
         return state, result, workspace
 
@@ -722,13 +734,19 @@ class _ReviewJobHandler(BaseHTTPRequestHandler):
             state = self.service.runner.retry(job_id)
             self.service.scheduler.submit(state.id)
         elif action == "/finalize":
-            state = self.service.runner.finalize(
-                job_id,
-                expected_confirmation_revision=int(
-                    payload.get("confirmation_revision") or 0
-                ),
-                override_reason=str(payload.get("override_reason") or ""),
-            )
+            try:
+                state = self.service.runner.finalize(
+                    job_id,
+                    expected_confirmation_revision=int(
+                        payload.get("confirmation_revision") or 0
+                    ),
+                    override_reason=str(payload.get("override_reason") or ""),
+                )
+            except ValueError as exc:
+                if str(exc) != "confirmation_revision_conflict":
+                    raise
+                self._send_json({"error": str(exc)}, status=409)
+                return
         else:
             self._send_json({"error": "not_found"}, status=404)
             return

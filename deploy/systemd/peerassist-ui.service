@@ -1,15 +1,24 @@
 [Unit]
-Description=PeerAssist Chinese review workspace
+Description=PeerAssist review workspace
 After=network-online.target peerassist-review-api.service
 Wants=network-online.target peerassist-review-api.service
 
 [Service]
 Type=simple
-WorkingDirectory=/root/peerassist-review-system-20260710/peerassist
+User=peerassist
+Group=peerassist
+UMask=0077
+WorkingDirectory=/opt/peerassist
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/root/peerassist-review-system-20260710/peerassist/.venv/bin/python -m peerassist.confirmation_server --run-dir /root/peerassist-review-system-20260710/peerassist/runs/arxiv_real_data/runs/arxiv_2607_08522_v1 --paper-id arxiv_2607_08522_v1 --host 0.0.0.0 --port 8766
+Environment=PYTHONPATH=/opt/peerassist/src
+EnvironmentFile=/etc/peerassist/peerassist.env
+ExecStart=/opt/peerassist/.venv/bin/python -m peerassist.confirmation_server --run-dir /var/lib/peerassist/workspace/run --paper-id current --host 127.0.0.1 --port 8766
 Restart=on-failure
 RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/peerassist
 
 [Install]
 WantedBy=multi-user.target

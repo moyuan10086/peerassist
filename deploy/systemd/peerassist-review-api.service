@@ -5,11 +5,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/peerassist-review-system-20260710/peerassist
+User=peerassist
+Group=peerassist
+UMask=0077
+WorkingDirectory=/opt/peerassist
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/root/peerassist-review-system-20260710/peerassist/.venv/bin/python -m peerassist.review_job_api --data-dir data --host 0.0.0.0 --port 8767
+Environment=PYTHONPATH=/opt/peerassist/src
+EnvironmentFile=/etc/peerassist/peerassist.env
+ExecStart=/opt/peerassist/.venv/bin/python -m peerassist.review_job_api --data-dir /var/lib/peerassist/data --host 127.0.0.1 --port 8767
 Restart=on-failure
 RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/peerassist
 
 [Install]
 WantedBy=multi-user.target

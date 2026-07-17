@@ -1,0 +1,18 @@
+{
+  "schema_version": "peerassist.concern.v1",
+  "id": "concern-contract-v1",
+  "finding_lineage_id": "fln_contract_statistics",
+  "finding_id": "fnd_contract_statistics_v1",
+  "revision": 1,
+  "display_revision": 1,
+  "importance": "supporting",
+  "level": "clarification_needed",
+  "category": "statistics",
+  "title": "Public sample size needs clarification",
+  "evidence_ids": ["P01-L001"],
+  "impact": "The public synthetic result cannot be interpreted without sample size.",
+  "author_action": "Report the synthetic sample-size rationale.",
+  "status": "pending_human_confirmation",
+  "source_agent_ids": ["contract_agent"],
+  "metadata": {"citation_finding_ids": ["CF-CONTRACT-1"]}
+}

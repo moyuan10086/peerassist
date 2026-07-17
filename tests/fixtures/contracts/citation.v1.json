@@ -1,0 +1,53 @@
+{
+  "schema_version": "peerassist.citation_audit.v1",
+  "paper_id": "8c22d331f340849a1a2afced41d775340996bf754cda8dec3c7525f82fcf6456",
+  "parse_version": "contract-v1",
+  "records": [{
+    "id": "R-CONTRACT-1",
+    "reference_number": 1,
+    "source_evidence_ids": ["R-E-1"],
+    "raw_text": "[1] Public Synthetic Study. 2026.",
+    "title": "Public Synthetic Study",
+    "doi": "10.0000/peerassist.contract",
+    "year": 2026,
+    "parse_confidence": 1.0
+  }],
+  "links": [{
+    "id": "L-CONTRACT-1",
+    "mention_evidence_id": "M-1",
+    "reference_number": 1,
+    "status": "linked",
+    "reference_record_ids": ["R-CONTRACT-1"],
+    "reference_evidence_ids": ["R-E-1"]
+  }],
+  "verifications": [{
+    "id": "V-CONTRACT-1",
+    "reference_record_id": "R-CONTRACT-1",
+    "source": "offline-contract",
+    "status": "unavailable",
+    "adapter": {"name": "offline-contract", "version": "1"},
+    "query": {"doi": "10.0000/peerassist.contract"},
+    "attempt_id": "attempt-citation-contract",
+    "attempt_number": 1,
+    "checked_at": "2026-07-17T00:00:00Z",
+    "tool_call_id": "call-citation-contract",
+    "error_code": "offline_contract_fixture",
+    "observed_metadata": {},
+    "field_differences": []
+  }],
+  "findings": [{
+    "id": "CF-CONTRACT-1",
+    "status": "insufficient_evidence",
+    "severity": "clarification_needed",
+    "citation_link_ids": ["L-CONTRACT-1"],
+    "reference_record_ids": ["R-CONTRACT-1"],
+    "mention_evidence_ids": ["M-1"],
+    "reference_evidence_ids": ["R-E-1"],
+    "verification_ids": ["V-CONTRACT-1"],
+    "message": "The public synthetic citation is intentionally offline.",
+    "requires_human_review": true,
+    "metadata": {}
+  }],
+  "coverage": {"records": 1, "links": 1, "verifications": 1, "findings": 1},
+  "warnings": []
+}

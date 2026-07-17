@@ -203,7 +203,11 @@ class RecoverableReviewJobRunner:
 
     def request_cancel(self, job_id: UUID | str) -> ReviewJobState:
         state = self.repository.get(job_id)
-        if state.status in {ReviewJobStatus.CANCELLED, ReviewJobStatus.COMPLETED}:
+        if state.cancel_requested or state.status in {
+            ReviewJobStatus.CANCEL_REQUESTED,
+            ReviewJobStatus.CANCELLED,
+            ReviewJobStatus.COMPLETED,
+        }:
             return state
         updated = self._update(
             state,
@@ -221,6 +225,13 @@ class RecoverableReviewJobRunner:
         override_reason: str = "",
     ) -> ReviewJobState:
         state = self.repository.get(job_id)
+        if (
+            state.status is ReviewJobStatus.COMPLETED
+            and state.stage is ReviewStage.COMPLETE
+        ):
+            if state.confirmation_revision == expected_confirmation_revision:
+                return state
+            raise ValueError("confirmation_revision_conflict")
         exporting = self._update(
             state,
             stage=ReviewStage.FINALIZE,

@@ -4,9 +4,7 @@
 
 ## 1. 系统入口
 
-当前公网服务地址：
-
-- `http://101.47.158.17:8766/`
+默认服务仅监听 `127.0.0.1:8766`，没有内置身份认证，不得直接暴露到公网。远程或多人使用时，必须由受信任的反向代理提供 TLS、身份认证、访问控制和请求限制，再代理到回环地址。
 
 主要页面：
 
@@ -29,14 +27,14 @@
 | `src/peerassist/confirmation_cli.py` | 人工确认命令行工具 |
 | `web/peerassist-workspace` | React + TypeScript 前端源码 |
 | `web/peerassist-workspace/dist` | 前端生产构建产物，后端以 `/workspace/` 静态路径提供 |
-| `runs/arxiv_real_data/runs/arxiv_2607_08522_v1` | 当前演示 run 目录 |
+| `/var/lib/peerassist/workspace/run` | systemd 示例使用的工作区 run 目录 |
 | `docs/peerassist_lark_sync.md` | 飞书同步文档固定入口和本地追加记录 |
 | `deploy/nginx/peerassist-subdomains.conf` | 子域名/前后端分离部署示例 |
 
-当前演示 run 的 PeerAssist 产物位于：
+PeerAssist 产物位于所选 run 的阶段目录：
 
 ```text
-runs/arxiv_real_data/runs/arxiv_2607_08522_v1/stages/peerassist/
+<run-dir>/stages/peerassist/
 ```
 
 常用产物：
@@ -60,37 +58,50 @@ runs/arxiv_real_data/runs/arxiv_2607_08522_v1/stages/peerassist/
 从仓库根目录执行：
 
 ```bash
+PYTHONPATH=src .venv/bin/python -m peerassist.review_job_api \
+  --data-dir data \
+  --host 127.0.0.1 \
+  --port 8767
+
 PYTHONPATH=src \
-PEERASSIST_OPENAI_API_KEY="<your-runtime-key>" \
-PEERASSIST_OPENAI_BASE_URL="https://deepkey.top/v1" \
-PEERASSIST_OPENAI_MODEL="gpt-5.4" \
-PEERASSIST_OPENAI_TIMEOUT_SECONDS="240" \
+PEERASSIST_REVIEW_API_URL=http://127.0.0.1:8767 \
 .venv/bin/python -m peerassist.confirmation_server \
-  --run-dir runs/arxiv_real_data/runs/arxiv_2607_08522_v1 \
-  --paper-id arxiv_2607_08522_v1 \
-  --host 0.0.0.0 \
+  --run-dir <run-dir> \
+  --paper-id <paper-id> \
+  --host 127.0.0.1 \
   --port 8766
 ```
 
-生产环境使用仓库中的 systemd 单元：
+生产环境示例固定安装到 `/opt/peerassist`，以无登录权限的 `peerassist` 用户运行，并将可写数据放在 `/var/lib/peerassist`。先创建环境文件；仓库中的 `peerassist.env.example` 不含密钥：
 
 ```bash
-sudo cp deploy/systemd/peerassist-review-api.service /etc/systemd/system/
-sudo cp deploy/systemd/peerassist-ui.service /etc/systemd/system/
+sudo useradd --system --user-group --home-dir /nonexistent \
+  --shell /usr/sbin/nologin peerassist
+sudo install -d -m 0755 /opt/peerassist
+sudo install -d -m 0750 -o peerassist -g peerassist \
+  /var/lib/peerassist/data /var/lib/peerassist/workspace/run
+# 将干净的已验证版本及其运行依赖安装到 /opt/peerassist。
+sudo install -d -m 0750 -o root -g peerassist /etc/peerassist
+sudo install -m 0640 -o root -g peerassist \
+  deploy/systemd/peerassist.env.example /etc/peerassist/peerassist.env
+sudo install -m 0644 deploy/systemd/peerassist-review-api.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/peerassist-ui.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now peerassist-review-api.service peerassist-ui.service
 systemctl status peerassist-review-api.service peerassist-ui.service
 ```
 
-公网工作区只需要放行 `8766/tcp`。`8767` 是后端 Review Job API，由 `8766` 网关代理，不建议额外暴露。使用 firewalld 的服务器执行：
+两个服务都只监听回环地址：`8767` 是私有 Review Job API，`8766` 是工作区入口。不要为任一端口配置公网防火墙放行规则；反向代理与 PeerAssist 同机部署并代理到 `http://127.0.0.1:8766`。当前服务没有内置认证，反向代理认证不是可选项。
+
+交付前静态检查 unit；在不会覆盖已有系统资源的专用 systemd 测试机上运行实际启动 smoke：
 
 ```bash
-sudo firewall-cmd --zone=public --add-port=8766/tcp
-sudo firewall-cmd --zone=public --add-port=8766/tcp --permanent
-sudo firewall-cmd --zone=public --list-all
+systemd-analyze verify /etc/systemd/system/peerassist-review-api.service \
+  /etc/systemd/system/peerassist-ui.service
+sudo bash deploy/systemd/smoke_systemd.sh
 ```
 
-不要只检查 `ufw`；本机实际生效的可能是 firewalld/nftables。`firewall-cmd --state` 为 `running` 时，以 firewalld zone 规则为准。
+实际 smoke 会安装并启动交付的两个 unit 本身；如果目标用户、目录、unit 或端口已存在，它会拒绝执行。
 
 健康检查：
 
@@ -135,7 +146,7 @@ npm run build
 
 ## 5. 审稿操作流程
 
-1. 打开 `http://101.47.158.17:8766/`，默认进入论文阅读窗口。
+1. 本机打开 `http://127.0.0.1:8766/`，或通过已配置认证和 TLS 的反向代理地址进入论文阅读窗口。
 2. 在大尺寸 PDF 阅读区浏览原文。阅读器支持单页/双页、适应宽度、放大缩小、页码输入、翻页、下载和在新窗口打开原始 PDF。
 3. 拖选 PDF 文字后，原文和页码会自动进入右侧“审稿助手”；可直接发起选区智能审稿，或补充人工批注后加入证据队列。页边消息图标表示绑定到当前页的 concern，点击可反向打开对应关注卡片。
 4. 右侧审稿栏可拖动左侧边缘调整宽度，也可通过右上角图标收起；收起后 PDF 自动扩展到可用宽度。
