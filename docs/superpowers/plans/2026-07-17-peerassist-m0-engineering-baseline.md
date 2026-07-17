@@ -1002,6 +1002,7 @@ git commit -m "build: add secure two-service development profile"
 - Create: `tests/contracts/test_legacy_http_contract.py`
 - Modify: `src/peerassist/confirmation_workflow.py`
 - Modify: `src/peerassist/job_runner.py`
+- Modify: `src/peerassist/job_repository.py`
 - Modify: `src/peerassist/review_job_api.py`
 - Modify: `docs/peerassist_operation_manual.md`
 
@@ -1068,7 +1069,8 @@ Expected: missing environment template/snapshot and hard-coded services fail.
 - [ ] **Step 4: Parameterize systemd**
 
 Use the literal `WorkingDirectory=/opt/peerassist` and literal
-`ExecStart=/opt/peerassist/.venv/bin/python`, `User=peerassist`, `Group=peerassist`, `UMask=0077`,
+`ExecStart=/opt/peerassist/.venv/bin/python`, separate `peerassist-api` and `peerassist-ui`
+system users/groups, `UMask=0077`,
 `EnvironmentFile=/etc/peerassist/peerassist.env`, and literal loopback hosts/data/run paths in
 arguments. Do not put `${PEERASSIST_*}` in `WorkingDirectory`, `ExecStart` executable paths, or
 concatenated arguments: systemd does not perform shell-style expansion there. Add
@@ -1138,6 +1140,7 @@ git add -- deploy/systemd/peerassist-review-api.service \
   tests/fixtures/contracts/legacy_http_contract.v1.json \
   src/peerassist/confirmation_workflow.py \
   src/peerassist/job_runner.py \
+  src/peerassist/job_repository.py \
   src/peerassist/review_job_api.py
 # Run the staging gate with exactly the paths above.
 git commit -m "test: freeze secure legacy deployment contracts"

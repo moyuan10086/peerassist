@@ -404,6 +404,53 @@ class ReviewJobRepository:
                 self._update_last_event_id(job_id, event.event_id)
             return event
 
+    def append_event_once(
+        self,
+        job_id: UUID | str,
+        event_type: str,
+        *,
+        payload_key: str,
+        payload_value: Any,
+        stage: ReviewStage | None = None,
+        status: Any = None,
+        attempt_id: str | None = None,
+        message: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> ReviewJobEvent:
+        """Append one event for a durable payload identity under the repository lock."""
+        if not event_type or not payload_key:
+            raise ValueError("event_type and payload_key are required")
+        with exclusive_file_lock(self._lock_path(job_id)):
+            state = self._load_state(job_id)
+            events = self._read_events_locked(job_id)
+            existing = next(
+                (
+                    event
+                    for event in events
+                    if event.event_type == event_type
+                    and event.payload.get(payload_key) == payload_value
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            event = ReviewJobEvent(
+                job_id=state.id,
+                event_id=len(events) + 1,
+                event_type=event_type,
+                stage=stage,
+                status=status,
+                attempt_id=attempt_id,
+                message=message,
+                payload=payload or {},
+            )
+            path = self._events_path(job_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._append_event_row(path, event)
+            if state.last_event_id != event.event_id:
+                self._update_last_event_id(job_id, event.event_id)
+            return event
+
     def replay_events(
         self,
         job_id: UUID | str,

@@ -1212,3 +1212,28 @@ def test_legacy_atomic_writer_still_accepts_dict_payload(tmp_path: Path) -> None
     write_json_atomic(path, {"legacy": True})
 
     assert json.loads(path.read_text(encoding="utf-8")) == {"legacy": True}
+
+
+def test_append_event_once_deduplicates_by_durable_payload_identity(tmp_path: Path) -> None:
+    repository = ReviewJobRepository(tmp_path)
+    job = repository.create(_job_contract())
+    payload = {"confirmation_revision": 1, "concern_id": "concern-1"}
+
+    first = repository.append_event_once(
+        job.id,
+        "confirmation_decision_applied",
+        payload_key="confirmation_revision",
+        payload_value=1,
+        payload=payload,
+    )
+    repeated = repository.append_event_once(
+        job.id,
+        "confirmation_decision_applied",
+        payload_key="confirmation_revision",
+        payload_value=1,
+        payload={**payload, "concern_id": "unexpected-duplicate"},
+    )
+
+    assert repeated == first
+    assert repository.get(job.id).last_event_id == 1
+    assert repository.replay_events(job.id) == [first]

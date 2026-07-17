@@ -12,8 +12,6 @@ SYSTEMD = ROOT / "deploy" / "systemd"
 def test_systemd_examples_are_portable_private_and_hardened() -> None:
     required = {
         "EnvironmentFile=/etc/peerassist/peerassist.env",
-        "User=peerassist",
-        "Group=peerassist",
         "UMask=0077",
         "WorkingDirectory=/opt/peerassist",
         "NoNewPrivileges=true",
@@ -33,17 +31,27 @@ def test_systemd_examples_are_portable_private_and_hardened() -> None:
 
     review = (SYSTEMD / "peerassist-review-api.service").read_text(encoding="utf-8")
     workspace = (SYSTEMD / "peerassist-ui.service").read_text(encoding="utf-8")
+    assert "User=peerassist-api" in review
+    assert "Group=peerassist-api" in review
+    assert "User=peerassist-ui" in workspace
+    assert "Group=peerassist-ui" in workspace
+    for source in (review, workspace):
+        assert "SupplementaryGroups=peerassist" in source
+        assert "ProtectProc=invisible" in source
+        assert "ProcSubset=pid" in source
     assert "--host 127.0.0.1 --port 8767" in review
     assert "--data-dir /var/lib/peerassist/data" in review
     assert "ReadWritePaths=/var/lib/peerassist/data" in review
     assert "ReadWritePaths=/var/lib/peerassist/workspace" not in review
     assert "InaccessiblePaths=/var/lib/peerassist/workspace" in review
+    assert "Environment=DATA_DIR=/var/lib/peerassist/data" in review
     assert "--host 127.0.0.1 --port 8766" in workspace
     assert "--run-dir /var/lib/peerassist/workspace/run" in workspace
     assert "--paper-id current" in workspace
     assert "ReadWritePaths=/var/lib/peerassist/workspace" in workspace
     assert "ReadWritePaths=/var/lib/peerassist/data" not in workspace
     assert "InaccessiblePaths=/var/lib/peerassist/data" in workspace
+    assert "Environment=DATA_DIR=/var/lib/peerassist/workspace/data" in workspace
 
 
 def test_systemd_environment_and_smoke_script_are_safe_examples() -> None:
@@ -68,6 +76,10 @@ def test_systemd_environment_and_smoke_script_are_safe_examples() -> None:
         "trap cleanup EXIT",
         "127.0.0.1:8766",
         "127.0.0.1:8767",
+        "peerassist-api",
+        "peerassist-ui",
+        "runuser -u peerassist-ui",
+        "runuser -u peerassist-api",
     ):
         assert token in source
     assert "systemd-run" not in source

@@ -31,8 +31,11 @@ refuse() {
   exit 2
 }
 
-getent passwd peerassist >/dev/null && refuse "user peerassist"
 getent group peerassist >/dev/null && refuse "group peerassist"
+for identity in peerassist-api peerassist-ui; do
+  getent passwd "${identity}" >/dev/null && refuse "user ${identity}"
+  getent group "${identity}" >/dev/null && refuse "group ${identity}"
+done
 [[ -e ${install_root} || -L ${install_root} ]] && refuse "${install_root}"
 [[ -e ${environment_dir} || -L ${environment_dir} ]] && refuse "${environment_dir}"
 [[ -e ${data_root} || -L ${data_root} ]] && refuse "${data_root}"
@@ -44,7 +47,7 @@ systemctl is-active --quiet peerassist-review-api.service && refuse "active revi
 systemctl is-active --quiet peerassist-ui.service && refuse "active workspace unit"
 ss -H -ltn '( sport = :8766 or sport = :8767 )' | grep -q . && refuse "ports 8766/8767"
 
-created_identity=false
+created_identities=false
 cleanup() {
   set +e
   systemctl stop peerassist-ui.service peerassist-review-api.service >/dev/null 2>&1
@@ -52,25 +55,34 @@ cleanup() {
   systemctl daemon-reload >/dev/null 2>&1
   rm -rf -- "${install_root}"
   rm -rf -- "${environment_dir}" "${data_root}"
-  if [[ ${created_identity} == true ]]; then
-    userdel peerassist >/dev/null 2>&1
+  if [[ ${created_identities} == true ]]; then
+    userdel peerassist-ui >/dev/null 2>&1
+    userdel peerassist-api >/dev/null 2>&1
+    groupdel peerassist-ui >/dev/null 2>&1
+    groupdel peerassist-api >/dev/null 2>&1
     groupdel peerassist >/dev/null 2>&1
   fi
 }
 trap cleanup EXIT
 
-useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin peerassist
-created_identity=true
+groupadd --system peerassist
+useradd --system --user-group --groups peerassist --home-dir /nonexistent \
+  --shell /usr/sbin/nologin peerassist-api
+useradd --system --user-group --groups peerassist --home-dir /nonexistent \
+  --shell /usr/sbin/nologin peerassist-ui
+created_identities=true
 install -d -m 0755 "${install_root}"
 git -C "${repo_root}" ls-files -z | tar -C "${repo_root}" --null -T - -cf - | tar -xf - -C "${install_root}"
 cp -aL -- "${repo_root}/.venv" "${install_root}/.venv"
-chown -R peerassist:peerassist "${install_root}"
+chown -R root:peerassist "${install_root}"
+chmod -R a+rX "${install_root}"
 install -d -m 0750 -o root -g peerassist "${environment_dir}"
 install -m 0640 -o root -g peerassist \
   "${repo_root}/deploy/systemd/peerassist.env.example" "${environment_file}"
-install -d -m 0750 -o peerassist -g peerassist \
-  "${data_root}/data" "${data_root}/workspace/run/stages/peerassist"
-install -m 0640 -o peerassist -g peerassist \
+install -d -m 0750 -o peerassist-api -g peerassist-api "${data_root}/data"
+install -d -m 0750 -o peerassist-ui -g peerassist-ui \
+  "${data_root}/workspace/data" "${data_root}/workspace/run/stages/peerassist"
+install -m 0640 -o peerassist-ui -g peerassist-ui \
   "${repo_root}/tests/fixtures/contracts/public_test.pdf" \
   "${data_root}/workspace/run/paper.pdf"
 cp -- "${repo_root}/deploy/systemd/peerassist-review-api.service" "${review_unit}"
@@ -97,3 +109,7 @@ for _ in {1..100}; do
 done
 curl --fail --silent http://127.0.0.1:8766/ >/dev/null
 curl --fail --silent http://127.0.0.1:8766/api/health >/dev/null
+review_pid=$(systemctl show --property MainPID --value peerassist-review-api.service)
+workspace_pid=$(systemctl show --property MainPID --value peerassist-ui.service)
+! runuser -u peerassist-ui -- test -r "/proc/${review_pid}/root/var/lib/peerassist/data"
+! runuser -u peerassist-api -- test -r "/proc/${workspace_pid}/root/var/lib/peerassist/workspace"

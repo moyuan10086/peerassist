@@ -505,12 +505,12 @@ def test_decision_event_is_reconciled_after_an_interrupted_audit_append(
         "reviewer_id": "contract-reviewer",
         "timestamp": "2026-07-17T00:01:00Z",
     }
-    original_append = server.review_service.repository.append_event
+    original_append = server.review_service.repository.append_event_once
 
     def fail_append(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("simulated audit append interruption")
 
-    monkeypatch.setattr(server.review_service.repository, "append_event", fail_append)
+    monkeypatch.setattr(server.review_service.repository, "append_event_once", fail_append)
     with _running(server) as port:
         status, _, failed = _json_request(
             port, "POST", f"/api/jobs/{primary.id}/decisions", payload
@@ -521,7 +521,7 @@ def test_decision_event_is_reconciled_after_an_interrupted_audit_append(
         assert persisted.confirmation_revision == 1
         assert persisted.last_event_id == 0
 
-        monkeypatch.setattr(server.review_service.repository, "append_event", original_append)
+        monkeypatch.setattr(server.review_service.repository, "append_event_once", original_append)
         status, _, recovered = _json_request(port, "GET", f"/api/jobs/{primary.id}")
         assert status == 200
         assert recovered["job"]["confirmation_revision"] == 1

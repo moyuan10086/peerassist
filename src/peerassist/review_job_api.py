@@ -569,9 +569,11 @@ class ReviewJobService:
         action: str,
         confirmation_revision: int,
     ) -> None:
-        self.repository.append_event(
+        self.repository.append_event_once(
             state.id,
             "confirmation_decision_applied",
+            payload_key="confirmation_revision",
+            payload_value=confirmation_revision,
             stage=state.stage,
             status=state.status,
             attempt_id=state.attempt_id,

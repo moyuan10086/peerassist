@@ -72,14 +72,19 @@ PEERASSIST_REVIEW_API_URL=http://127.0.0.1:8767 \
   --port 8766
 ```
 
-生产环境示例固定安装到 `/opt/peerassist`，以无登录权限的 `peerassist` 用户运行，并将可写数据放在 `/var/lib/peerassist`。先创建环境文件；仓库中的 `peerassist.env.example` 不含密钥：
+生产环境示例固定安装到 `/opt/peerassist`，Review API 和工作区分别以无登录权限的 `peerassist-api`、`peerassist-ui` 身份运行，并将各自可写数据隔离在 `/var/lib/peerassist/data` 与 `/var/lib/peerassist/workspace`。`peerassist` 仅作为读取配置文件的共享组。先创建环境文件；仓库中的 `peerassist.env.example` 不含密钥：
 
 ```bash
-sudo useradd --system --user-group --home-dir /nonexistent \
-  --shell /usr/sbin/nologin peerassist
+sudo groupadd --system peerassist
+sudo useradd --system --user-group --groups peerassist \
+  --home-dir /nonexistent --shell /usr/sbin/nologin peerassist-api
+sudo useradd --system --user-group --groups peerassist \
+  --home-dir /nonexistent --shell /usr/sbin/nologin peerassist-ui
 sudo install -d -m 0755 /opt/peerassist
-sudo install -d -m 0750 -o peerassist -g peerassist \
-  /var/lib/peerassist/data /var/lib/peerassist/workspace/run
+sudo install -d -m 0750 -o peerassist-api -g peerassist-api \
+  /var/lib/peerassist/data
+sudo install -d -m 0750 -o peerassist-ui -g peerassist-ui \
+  /var/lib/peerassist/workspace/data /var/lib/peerassist/workspace/run
 # 将干净的已验证版本及其运行依赖安装到 /opt/peerassist。
 sudo install -d -m 0750 -o root -g peerassist /etc/peerassist
 sudo install -m 0640 -o root -g peerassist \
