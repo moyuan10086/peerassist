@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.check_docs import find_broken_links
+from scripts.check_docs import RepositoryScanError, find_broken_links
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -253,3 +253,28 @@ def test_intermediate_symlink_escape_is_not_read_and_explicit_cli_fails_closed(t
     assert result.stderr == "repository scan failed\n"
     assert "missing.md" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_invalid_utf8_markdown_fails_closed_for_api_default_and_explicit_cli(tmp_path: Path) -> None:
+    source = tmp_path / "bad.md"
+    source.write_bytes(b"\xff\xfe[link](missing.md)")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "bad.md"], cwd=tmp_path, check=True)
+
+    with pytest.raises(RepositoryScanError):
+        find_broken_links(tmp_path, [source])
+
+    for args in ([], ["bad.md"]):
+        result = subprocess.run(
+            [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_docs.py"), *args],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert result.stderr == "repository scan failed: unable to read Markdown input\n"
+        assert "missing.md" not in result.stderr
+        assert "Traceback" not in result.stderr

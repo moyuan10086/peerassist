@@ -102,6 +102,36 @@ def test_scan_files_rejects_shell_default_password_expansions(tmp_path: Path) ->
     ]
 
 
+def test_scan_files_detects_quoted_json_and_toml_password_assignments(tmp_path: Path) -> None:
+    sample = tmp_path / "config.txt"
+    sample.write_text(
+        '{"password": "RealSecret123!"}\n'
+        "'admin_password' = 'SecondSecret456!'\n",
+        encoding="utf-8",
+    )
+
+    assert [(item.line, item.rule) for item in scan_files(tmp_path, [sample])] == [
+        (1, "password-assignment"),
+        (2, "password-assignment"),
+    ]
+
+
+def test_scan_files_checks_every_password_assignment_on_a_line(tmp_path: Path) -> None:
+    sample = tmp_path / "config.env"
+    sample.write_text("password=${PASSWORD} admin_password=RealSecret123!\n", encoding="utf-8")
+
+    assert scan_files(tmp_path, [sample]) == [Finding(Path("config.env"), 1, "password-assignment")]
+
+
+def test_password_assignment_path_render_redacts_quoted_keys_and_values() -> None:
+    finding = Finding(Path('prefix-"password":"RealSecret123!".txt'), 4, "github-token")
+
+    rendered = finding.render()
+
+    assert rendered == 'prefix-"password":<redacted>.txt:4: github-token'
+    assert "RealSecret123!" not in rendered
+
+
 def test_scan_files_detects_aws_session_access_key(tmp_path: Path) -> None:
     sample = tmp_path / "config.txt"
     secret = _aws_session_key()

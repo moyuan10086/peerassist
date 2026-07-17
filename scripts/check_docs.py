@@ -20,6 +20,10 @@ _MARKDOWN = MarkdownIt("commonmark")
 class RepositoryScanError(Exception):
     """Raised when the requested repository file set cannot be scanned safely."""
 
+    def __init__(self, message: str = "repository scan failed") -> None:
+        super().__init__(message)
+        self.safe_message = message
+
 
 def _tracked_markdown(root: Path) -> list[Path]:
     result = subprocess.run(
@@ -107,8 +111,8 @@ def find_broken_links(root: Path, files: Iterable[Path]) -> list[tuple[Path, str
     for source in _safe_sources(root, files):
         try:
             text = source.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
+        except (OSError, UnicodeError) as exc:
+            raise RepositoryScanError("repository scan failed: unable to read Markdown input") from exc
         source_rel = _relative_path(root, source)
         for raw_target in _markdown_targets(text):
             split = urlsplit(raw_target)
@@ -139,7 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     except RepositoryScanError:
         print("repository scan failed", file=sys.stderr)
         return 2
-    findings = find_broken_links(root, files)
+    try:
+        findings = find_broken_links(root, files)
+    except RepositoryScanError as exc:
+        print(exc.safe_message, file=sys.stderr)
+        return 2
     for path, target in findings:
         print(f"{path.as_posix()}: {target}")
     return 1 if findings else 0

@@ -27,7 +27,13 @@ _RULES = (
     ("aws-access-key", re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")),
 )
 _PASSWORD_RE = re.compile(
-    r"(?i)\b(?:[A-Za-z0-9_]*password|password[A-Za-z0-9_-]*)\b\s*[:=]\s*(?P<value>[^\s#]+)"
+    r'''(?ix)
+    (?P<key_quote>["']?)
+    \b(?:[A-Za-z0-9_]*password|password[A-Za-z0-9_-]*)\b
+    (?P=key_quote)
+    \s*[:=]\s*
+    (?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\$\{[^}]*\}|[^\s#,}]+)
+    '''
 )
 _PLACEHOLDERS = {"", "example", "changeme", "change-me", "password", "secret", "test"}
 _ENV_REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -148,9 +154,9 @@ def scan_files(root: Path, files: Iterable[Path]) -> list[Finding]:
             for rule, pattern in _RULES:
                 if pattern.search(line):
                     findings.add(Finding(relative, line_number, rule))
-            password = _PASSWORD_RE.search(line)
-            if password and not _placeholder(password.group("value")):
-                findings.add(Finding(relative, line_number, "password-assignment"))
+            for password in _PASSWORD_RE.finditer(line):
+                if not _placeholder(password.group("value")):
+                    findings.add(Finding(relative, line_number, "password-assignment"))
     return sorted(findings)
 
 
