@@ -1,0 +1,75 @@
+{
+  "realm": "${M1_TEST_OIDC_REALM}",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "clients": [
+    {
+      "clientId": "${M1_TEST_OIDC_AUTOMATION_CLIENT_ID}",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET}",
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "${M1_TEST_OIDC_PKCE_CLIENT_ID}",
+      "enabled": true,
+      "publicClient": true,
+      "serviceAccountsEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://127.0.0.1/*"],
+      "webOrigins": ["http://127.0.0.1"],
+      "protocol": "openid-connect",
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "org-a-admin",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-a-owner",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-a-reviewer",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-a-viewer",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-b-admin",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-b-owner",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-b-reviewer",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "org-b-viewer",
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+services:
+  postgres:
+    image: postgres:16.9-bookworm
+    user: postgres
+    environment:
+      POSTGRES_USER: ${M1_TEST_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${M1_TEST_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${M1_TEST_POSTGRES_DB}
+    ports:
+      - "127.0.0.1:${M1_TEST_POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:mode=1777
+      - /var/run/postgresql:uid=999,gid=999,mode=0770
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -q -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.1
+    user: "1000:0"
+    entrypoint:
+      - /bin/bash
+      - /bootstrap/bootstrap.sh
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${M1_TEST_KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${M1_TEST_KEYCLOAK_ADMIN_PASSWORD}
+      KC_HEALTH_ENABLED: "true"
+      M1_TEST_OIDC_REALM: ${M1_TEST_OIDC_REALM}
+      M1_TEST_OIDC_AUTOMATION_CLIENT_ID: ${M1_TEST_OIDC_AUTOMATION_CLIENT_ID}
+      M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET: ${M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET}
+      M1_TEST_OIDC_PKCE_CLIENT_ID: ${M1_TEST_OIDC_PKCE_CLIENT_ID}
+      M1_TEST_OIDC_USER_PASSWORD: ${M1_TEST_OIDC_USER_PASSWORD}
+    ports:
+      - "127.0.0.1:${M1_TEST_KEYCLOAK_PORT}:8080"
+    volumes:
+      - ../keycloak/bootstrap.sh:/bootstrap/bootstrap.sh:ro
+      - ../keycloak/realm-template.json:/bootstrap/realm-template.json:ro
+    tmpfs:
+      - /tmp:uid=1000,gid=0,mode=0700
+      - /opt/keycloak/data:uid=1000,gid=0,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080;
+          printf 'GET /realms/%s/.well-known/openid-configuration HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n'
+          "$${M1_TEST_OIDC_REALM}" >&3;
+          read -r status <&3;
+          [[ "$${status}" == *" 200 "* ]]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+      start_period: 15s
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    user: "1000:1000"
+    command:
+      - server
+      - /data
+      - --address
+      - :9000
+    environment:
+      MINIO_ROOT_USER: ${M1_TEST_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${M1_TEST_MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:${M1_TEST_MINIO_PORT}:9000"
+    tmpfs:
+      - /data:uid=1000,gid=1000,mode=0700
+      - /tmp:uid=1000,gid=1000,mode=0700
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:9000/minio/health/ready
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  minio-bootstrap:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    user: "1000:1000"
+    entrypoint:
+      - /bin/sh
+      - /bootstrap/bootstrap.sh
+    environment:
+      HOME: /home/mc
+      M1_TEST_S3_ACCESS_KEY: ${M1_TEST_S3_ACCESS_KEY}
+      M1_TEST_S3_SECRET_KEY: ${M1_TEST_S3_SECRET_KEY}
+      M1_TEST_S3_BUCKET: ${M1_TEST_S3_BUCKET}
+    volumes:
+      - ../minio/bootstrap.sh:/bootstrap/bootstrap.sh:ro
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700
+      - /home/mc:uid=1000,gid=1000,mode=0700
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  postgres-data: {}
