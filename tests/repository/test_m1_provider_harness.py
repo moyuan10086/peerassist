@@ -5,6 +5,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,13 +42,90 @@ def _read_exports(path: Path) -> dict[str, str]:
     return exports
 
 
+def _write_fake_docker(tmp_path: Path) -> dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "project= env_file=\n"
+        "previous=\n"
+        "for argument in \"$@\"; do\n"
+        "  case \"$previous\" in\n"
+        "    --project-name) project=$argument ;;\n"
+        "    --env-file) env_file=$argument ;;\n"
+        "  esac\n"
+        "  previous=$argument\n"
+        "done\n"
+        "case \" $* \" in\n"
+        "  *' compose '*' down '*)\n"
+        "    if [ \"${FAKE_DOWN_FAIL_ONCE:-0}\" = 1 ] && "
+        "[ ! -e \"$FAKE_STATE/down-failed\" ]; then\n"
+        "      : > \"$FAKE_STATE/down-failed\"\n"
+        "      exit 7\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  *' compose '*' port '*)\n"
+        "    service=\n"
+        "    previous=\n"
+        "    for argument in \"$@\"; do\n"
+        "      if [ \"$previous\" = port ]; then service=$argument; break; fi\n"
+        "      previous=$argument\n"
+        "    done\n"
+        "    base=$((20000 + $(printf '%s' \"$project\" | cksum | cut -d' ' -f1) % 20000))\n"
+        "    case \"$service\" in\n"
+        "      postgres) offset=1 ;; keycloak) offset=2 ;; minio) offset=3 ;;\n"
+        "      callback-reservation) offset=4 ;; *) exit 9 ;;\n"
+        "    esac\n"
+        "    printf '127.0.0.1:%s\\n' $((base + offset))\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  *' compose '*' up '*' keycloak'*)\n"
+        "    grep -Eq '^export M1_TEST_API_CALLBACK_PORT=[1-9][0-9]{3,4}$' \"$env_file\"\n"
+        "    file_origin=$(sed -n 's/^export M1_TEST_PUBLIC_ORIGIN=//p' \"$env_file\")\n"
+        "    [ \"${M1_TEST_PUBLIC_ORIGIN:-}\" = \"$file_origin\" ]\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  *' compose '*' up '*) exit 0 ;;\n"
+        "  *' ps -aq --filter '*) kind=container ;;\n"
+        "  *' volume ls -q --filter '*) kind=volume ;;\n"
+        "  *' network ls -q --filter '*) kind=network ;;\n"
+        "  *) exit 10 ;;\n"
+        "esac\n"
+        "if [ \"${FAKE_QUERY_FAILURE:-}\" = \"$kind\" ]; then exit 8; fi\n"
+        "if [ \"${FAKE_RESIDUAL:-}\" = \"$kind\" ]; then printf '%s-id\\n' \"$kind\"; fi\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    state = tmp_path / "fake-state"
+    state.mkdir()
+    return os.environ | {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_STATE": str(state),
+    }
+
+
 def test_profile_pins_private_real_providers_with_health_checks() -> None:
     profile = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
     services = profile["services"]
 
-    assert {"postgres", "keycloak", "minio", "minio-bootstrap"} <= set(services)
+    assert {
+        "postgres",
+        "keycloak",
+        "minio",
+        "minio-bootstrap",
+        "callback-reservation",
+    } <= set(services)
     assert services["postgres"]["image"].startswith("postgres:16.")
-    for name in ("postgres", "keycloak", "minio", "minio-bootstrap"):
+    for name in (
+        "postgres",
+        "keycloak",
+        "minio",
+        "minio-bootstrap",
+        "callback-reservation",
+    ):
         service = services[name]
         assert not service["image"].endswith(":latest")
         assert service["security_opt"] == ["no-new-privileges:true"]
@@ -55,6 +133,10 @@ def test_profile_pins_private_real_providers_with_health_checks() -> None:
         assert service.get("ports", []) == [] or all(
             str(port).startswith("127.0.0.1:") for port in service["ports"]
         )
+    assert services["postgres"]["ports"] == ["127.0.0.1::5432"]
+    assert services["keycloak"]["ports"] == ["127.0.0.1::8080"]
+    assert services["minio"]["ports"] == ["127.0.0.1::9000"]
+    assert services["callback-reservation"]["ports"] == ["127.0.0.1::8080"]
     for name in ("postgres", "keycloak", "minio"):
         assert "healthcheck" in services[name]
     keycloak_probe = services["keycloak"]["healthcheck"]["test"][-1]
@@ -222,6 +304,103 @@ def test_down_is_idempotent_when_environment_is_absent(tmp_path: Path) -> None:
     assert second.returncode == 0
 
 
+def test_down_failure_preserves_descriptor_for_retry(tmp_path: Path) -> None:
+    env_file = tmp_path / "provider.env"
+    assert _run_helper("create", str(env_file)).returncode == 0
+    env = _write_fake_docker(tmp_path) | {"FAKE_DOWN_FAIL_ONCE": "1"}
+
+    failed = _run_helper("down", str(env_file), env=env)
+
+    assert failed.returncode == 7
+    assert env_file.exists()
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    retried = _run_helper("down", str(env_file), env=env)
+    assert retried.returncode == 0, retried.stderr
+    assert not env_file.exists()
+    assert failed.stdout == retried.stdout == ""
+
+
+@pytest.mark.parametrize("kind", ["container", "volume", "network"])
+@pytest.mark.parametrize("failure", ["query", "residual"])
+def test_down_preserves_descriptor_unless_all_project_resources_are_absent(
+    tmp_path: Path, kind: str, failure: str
+) -> None:
+    env_file = tmp_path / "provider.env"
+    assert _run_helper("create", str(env_file)).returncode == 0
+    setting = "FAKE_QUERY_FAILURE" if failure == "query" else "FAKE_RESIDUAL"
+    env = _write_fake_docker(tmp_path) | {setting: kind}
+
+    result = _run_helper("down", str(env_file), env=env)
+
+    assert result.returncode != 0
+    assert env_file.exists()
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert result.stdout == ""
+
+
+def test_up_resolves_compose_ports_and_updates_environment_atomically(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "provider.env"
+    assert _run_helper("create", str(env_file)).returncode == 0
+    before = _read_exports(env_file)
+    assert {
+        before["M1_TEST_POSTGRES_PORT"],
+        before["M1_TEST_KEYCLOAK_PORT"],
+        before["M1_TEST_MINIO_PORT"],
+        before["M1_TEST_API_CALLBACK_PORT"],
+    } == {"0"}
+    env = _write_fake_docker(tmp_path)
+
+    result = _run_helper("up", str(env_file), env=env)
+
+    assert result.returncode == 0, result.stderr
+    exports = _read_exports(env_file)
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert all(
+        re.fullmatch(r"[1-9][0-9]{3,4}", exports[name])
+        for name in (
+            "M1_TEST_POSTGRES_PORT",
+            "M1_TEST_KEYCLOAK_PORT",
+            "M1_TEST_MINIO_PORT",
+            "M1_TEST_API_CALLBACK_PORT",
+        )
+    )
+    assert exports["M1_TEST_DATABASE_URL"].endswith(
+        f"@127.0.0.1:{exports['M1_TEST_POSTGRES_PORT']}/peerassist"
+    )
+    assert exports["M1_TEST_OIDC_ISSUER"].startswith(
+        f"http://127.0.0.1:{exports['M1_TEST_KEYCLOAK_PORT']}/"
+    )
+    assert exports["M1_TEST_S3_ENDPOINT"] == (
+        f"http://127.0.0.1:{exports['M1_TEST_MINIO_PORT']}"
+    )
+    assert exports["M1_TEST_OIDC_REDIRECT_URI"] == (
+        f"http://127.0.0.1:{exports['M1_TEST_API_CALLBACK_PORT']}"
+        "/api/v1/auth/callback"
+    )
+
+
+def test_two_projects_receive_distinct_compose_ports(tmp_path: Path) -> None:
+    env = _write_fake_docker(tmp_path)
+    env_files = [tmp_path / "provider-a.env", tmp_path / "provider-b.env"]
+    for env_file in env_files:
+        assert _run_helper("create", str(env_file)).returncode == 0
+        result = _run_helper("up", str(env_file), env=env)
+        assert result.returncode == 0, result.stderr
+
+    first, second = (_read_exports(path) for path in env_files)
+    port_names = {
+        "M1_TEST_POSTGRES_PORT",
+        "M1_TEST_KEYCLOAK_PORT",
+        "M1_TEST_MINIO_PORT",
+        "M1_TEST_API_CALLBACK_PORT",
+    }
+    assert {first[name] for name in port_names}.isdisjoint(
+        {second[name] for name in port_names}
+    )
+
+
 def test_wait_fails_fast_when_a_provider_exits(tmp_path: Path) -> None:
     env_file = tmp_path / "provider.env"
     assert _run_helper("create", str(env_file)).returncode == 0
@@ -258,6 +437,7 @@ def test_wait_queries_stopped_provider_containers() -> None:
     helper = ENV_HELPER.read_text(encoding="utf-8")
 
     assert 'ps --all --quiet "$service"' in helper
+    assert "free_ports" not in helper
 
 
 @pytest.mark.skipif(
@@ -313,19 +493,28 @@ def test_real_provider_harness_smoke_and_cleanup(tmp_path: Path) -> None:
         rejected_body = rejected.value.read().decode("utf-8", errors="replace").lower()
         assert "redirect_uri" in rejected_body
     finally:
+        primary = sys.exc_info()[1]
         down = _run_helper("down", str(env_file))
-        assert down.returncode == 0, down.stderr
+        if down.returncode != 0:
+            message = f"provider harness cleanup failed: {down.stderr}"
+            if primary is None:
+                pytest.fail(message)
+            primary.add_note(message)
     assert not env_file.exists()
-    remaining = subprocess.run(
-        [
-            "docker",
-            "ps",
-            "-aq",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert remaining.stdout.strip() == ""
+    for resource_command in (
+        ["ps", "-aq"],
+        ["volume", "ls", "-q"],
+        ["network", "ls", "-q"],
+    ):
+        remaining = subprocess.run(
+            [
+                "docker",
+                *resource_command,
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert remaining.stdout.strip() == ""

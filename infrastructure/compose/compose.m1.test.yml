@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${M1_TEST_POSTGRES_PASSWORD}
       POSTGRES_DB: ${M1_TEST_POSTGRES_DB}
     ports:
-      - "127.0.0.1:${M1_TEST_POSTGRES_PORT}:5432"
+      - "127.0.0.1::5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     tmpfs:
@@ -45,7 +45,7 @@ services:
       M1_TEST_PUBLIC_ORIGIN: ${M1_TEST_PUBLIC_ORIGIN}
       M1_TEST_OIDC_REDIRECT_URI: ${M1_TEST_OIDC_REDIRECT_URI}
     ports:
-      - "127.0.0.1:${M1_TEST_KEYCLOAK_PORT}:8080"
+      - "127.0.0.1::8080"
     volumes:
       - ../keycloak/bootstrap.sh:/bootstrap/bootstrap.sh:ro
       - ../keycloak/realm-template.json:/bootstrap/realm-template.json:ro
@@ -84,7 +84,7 @@ services:
       MINIO_ROOT_USER: ${M1_TEST_S3_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${M1_TEST_MINIO_ROOT_PASSWORD}
     ports:
-      - "127.0.0.1:${M1_TEST_MINIO_PORT}:9000"
+      - "127.0.0.1::9000"
     tmpfs:
       - /data:uid=1000,gid=1000,mode=0700
       - /tmp:uid=1000,gid=1000,mode=0700
@@ -130,6 +130,22 @@ services:
       minio:
         condition: service_healthy
     restart: "no"
+
+  # Task 9 replaces this reservation with the API service and resolves the API's
+  # Compose-assigned port before bootstrapping Keycloak's exact redirect URI.
+  callback-reservation:
+    image: alpine:3.22.0
+    user: "65534:65534"
+    command:
+      - sleep
+      - infinity
+    ports:
+      - "127.0.0.1::8080"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   postgres-data: {}

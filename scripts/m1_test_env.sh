@@ -18,7 +18,7 @@ REQUIRED_NAMES=(
   M1_TEST_S3_ACCESS_KEY M1_TEST_S3_SECRET_KEY M1_TEST_MINIO_ROOT_PASSWORD
   M1_TEST_S3_BUCKET M1_TEST_S3_REGION
 )
-SERVICES=(postgres keycloak minio minio-bootstrap)
+SERVICES=(postgres keycloak minio minio-bootstrap callback-reservation)
 
 fail() {
   printf '%s\n' "$1" >&2
@@ -29,21 +29,64 @@ random_hex() {
   python3 -c 'import secrets; print(secrets.token_hex(int(__import__("sys").argv[1])))' "$1"
 }
 
-free_ports() {
-  python3 - <<'PY'
-import socket
+emit_env() {
+  printf 'export M1_TEST_ENV_FORMAT=%s\n' "$FORMAT"
+  printf 'export M1_TEST_CLEANUP_ID=%s\n' "$M1_TEST_CLEANUP_ID"
+  printf 'export M1_TEST_PROJECT_NAME=%s\n' "$M1_TEST_PROJECT_NAME"
+  printf 'export M1_TEST_POSTGRES_USER=%s\n' "$M1_TEST_POSTGRES_USER"
+  printf 'export %s=%s\n' M1_TEST_POSTGRES_PASSWORD "$M1_TEST_POSTGRES_PASSWORD"
+  printf 'export M1_TEST_POSTGRES_DB=%s\n' "$M1_TEST_POSTGRES_DB"
+  printf 'export M1_TEST_POSTGRES_PORT=%s\n' "$M1_TEST_POSTGRES_PORT"
+  printf 'export M1_TEST_DATABASE_URL=postgresql://%s:%s@127.0.0.1:%s/%s\n' \
+    "$M1_TEST_POSTGRES_USER" "$M1_TEST_POSTGRES_PASSWORD" \
+    "$M1_TEST_POSTGRES_PORT" "$M1_TEST_POSTGRES_DB"
+  printf 'export M1_TEST_KEYCLOAK_ADMIN=%s\n' "$M1_TEST_KEYCLOAK_ADMIN"
+  printf 'export %s=%s\n' M1_TEST_KEYCLOAK_ADMIN_PASSWORD \
+    "$M1_TEST_KEYCLOAK_ADMIN_PASSWORD"
+  printf 'export M1_TEST_OIDC_REALM=%s\n' "$M1_TEST_OIDC_REALM"
+  printf 'export M1_TEST_OIDC_AUTOMATION_CLIENT_ID=%s\n' \
+    "$M1_TEST_OIDC_AUTOMATION_CLIENT_ID"
+  printf 'export M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET=%s\n' \
+    "$M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET"
+  printf 'export M1_TEST_OIDC_PKCE_CLIENT_ID=%s\n' "$M1_TEST_OIDC_PKCE_CLIENT_ID"
+  printf 'export M1_TEST_OIDC_USERNAME=%s\n' "$M1_TEST_OIDC_USERNAME"
+  printf 'export %s=%s\n' M1_TEST_OIDC_USER_PASSWORD "$M1_TEST_OIDC_USER_PASSWORD"
+  printf 'export M1_TEST_KEYCLOAK_PORT=%s\n' "$M1_TEST_KEYCLOAK_PORT"
+  printf 'export M1_TEST_OIDC_ISSUER=http://127.0.0.1:%s/realms/%s\n' \
+    "$M1_TEST_KEYCLOAK_PORT" "$M1_TEST_OIDC_REALM"
+  printf 'export M1_TEST_API_CALLBACK_PORT=%s\n' "$M1_TEST_API_CALLBACK_PORT"
+  printf 'export M1_TEST_PUBLIC_ORIGIN=http://127.0.0.1:%s\n' \
+    "$M1_TEST_API_CALLBACK_PORT"
+  printf 'export M1_TEST_OIDC_REDIRECT_URI=http://127.0.0.1:%s/api/v1/auth/callback\n' \
+    "$M1_TEST_API_CALLBACK_PORT"
+  printf 'export M1_TEST_S3_ACCESS_KEY=%s\n' "$M1_TEST_S3_ACCESS_KEY"
+  printf 'export M1_TEST_S3_SECRET_KEY=%s\n' "$M1_TEST_S3_SECRET_KEY"
+  printf 'export %s=%s\n' M1_TEST_MINIO_ROOT_PASSWORD "$M1_TEST_MINIO_ROOT_PASSWORD"
+  printf 'export M1_TEST_S3_BUCKET=%s\n' "$M1_TEST_S3_BUCKET"
+  printf 'export M1_TEST_S3_REGION=%s\n' "$M1_TEST_S3_REGION"
+  printf 'export M1_TEST_MINIO_PORT=%s\n' "$M1_TEST_MINIO_PORT"
+  printf 'export M1_TEST_S3_ENDPOINT=http://127.0.0.1:%s\n' "$M1_TEST_MINIO_PORT"
+}
 
-sockets = []
-try:
-    for _ in range(4):
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        sockets.append(sock)
-    print(" ".join(str(sock.getsockname()[1]) for sock in sockets))
-finally:
-    for sock in sockets:
-        sock.close()
-PY
+persist_env() {
+  local env_file=$1 dir temp
+  dir=$(dirname -- "$env_file")
+  temp=$(mktemp -- "$dir/.m1-test-env.XXXXXXXX")
+  trap 'rm -f -- "$temp"' RETURN
+  chmod 0600 "$temp"
+  emit_env > "$temp"
+  mv -f -- "$temp" "$env_file"
+  trap - RETURN
+}
+
+refresh_endpoints() {
+  M1_TEST_DATABASE_URL="postgresql://$M1_TEST_POSTGRES_USER:$M1_TEST_POSTGRES_PASSWORD@127.0.0.1:$M1_TEST_POSTGRES_PORT/$M1_TEST_POSTGRES_DB"
+  M1_TEST_OIDC_ISSUER="http://127.0.0.1:$M1_TEST_KEYCLOAK_PORT/realms/$M1_TEST_OIDC_REALM"
+  M1_TEST_PUBLIC_ORIGIN="http://127.0.0.1:$M1_TEST_API_CALLBACK_PORT"
+  M1_TEST_OIDC_REDIRECT_URI="$M1_TEST_PUBLIC_ORIGIN/api/v1/auth/callback"
+  M1_TEST_S3_ENDPOINT="http://127.0.0.1:$M1_TEST_MINIO_PORT"
+  export M1_TEST_DATABASE_URL M1_TEST_OIDC_ISSUER M1_TEST_PUBLIC_ORIGIN
+  export M1_TEST_OIDC_REDIRECT_URI M1_TEST_S3_ENDPOINT
 }
 
 create_env() {
@@ -60,7 +103,6 @@ create_env() {
   project="peerassist-m1-$cleanup_id"
   local pg_credential kc_credential client_credential user_credential
   local s3_access s3_credential root_credential bucket
-  local postgres_port keycloak_port minio_port api_callback_port
   pg_credential=$(random_hex 24)
   kc_credential=$(random_hex 24)
   client_credential=$(random_hex 24)
@@ -69,40 +111,31 @@ create_env() {
   s3_credential=$(random_hex 24)
   root_credential=$s3_credential
   bucket="peerassist-m1-$cleanup_id"
-  read -r postgres_port keycloak_port minio_port api_callback_port < <(free_ports)
+  M1_TEST_ENV_FORMAT=$FORMAT
+  M1_TEST_CLEANUP_ID=$cleanup_id
+  M1_TEST_PROJECT_NAME=$project
+  M1_TEST_POSTGRES_USER=peerassist
+  printf -v M1_TEST_POSTGRES_PASSWORD '%s' "$pg_credential"
+  M1_TEST_POSTGRES_DB=peerassist
+  M1_TEST_POSTGRES_PORT=0
+  M1_TEST_KEYCLOAK_ADMIN=m1admin
+  printf -v M1_TEST_KEYCLOAK_ADMIN_PASSWORD '%s' "$kc_credential"
+  M1_TEST_OIDC_REALM=peerassist-m1
+  M1_TEST_OIDC_AUTOMATION_CLIENT_ID=peerassist-automation
+  M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET=$client_credential
+  M1_TEST_OIDC_PKCE_CLIENT_ID=peerassist-browser
+  M1_TEST_OIDC_USERNAME=org-a-admin
+  printf -v M1_TEST_OIDC_USER_PASSWORD '%s' "$user_credential"
+  M1_TEST_KEYCLOAK_PORT=0
+  M1_TEST_API_CALLBACK_PORT=0
+  M1_TEST_S3_ACCESS_KEY=$s3_access
+  M1_TEST_S3_SECRET_KEY=$s3_credential
+  printf -v M1_TEST_MINIO_ROOT_PASSWORD '%s' "$root_credential"
+  M1_TEST_S3_BUCKET=$bucket
+  M1_TEST_S3_REGION=us-east-1
+  M1_TEST_MINIO_PORT=0
 
-  {
-    printf 'export M1_TEST_ENV_FORMAT=%s\n' "$FORMAT"
-    printf 'export M1_TEST_CLEANUP_ID=%s\n' "$cleanup_id"
-    printf 'export M1_TEST_PROJECT_NAME=%s\n' "$project"
-    printf 'export M1_TEST_POSTGRES_USER=%s\n' peerassist
-    printf 'export %s=%s\n' M1_TEST_POSTGRES_PASSWORD "$pg_credential"
-    printf 'export M1_TEST_POSTGRES_DB=%s\n' peerassist
-    printf 'export M1_TEST_POSTGRES_PORT=%s\n' "$postgres_port"
-    printf 'export M1_TEST_DATABASE_URL=postgresql://peerassist:%s@127.0.0.1:%s/peerassist\n' \
-      "$pg_credential" "$postgres_port"
-    printf 'export M1_TEST_KEYCLOAK_ADMIN=%s\n' m1admin
-    printf 'export %s=%s\n' M1_TEST_KEYCLOAK_ADMIN_PASSWORD "$kc_credential"
-    printf 'export M1_TEST_OIDC_REALM=%s\n' peerassist-m1
-    printf 'export M1_TEST_OIDC_AUTOMATION_CLIENT_ID=%s\n' peerassist-automation
-    printf 'export M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET=%s\n' "$client_credential"
-    printf 'export M1_TEST_OIDC_PKCE_CLIENT_ID=%s\n' peerassist-browser
-    printf 'export M1_TEST_OIDC_USERNAME=%s\n' org-a-admin
-    printf 'export %s=%s\n' M1_TEST_OIDC_USER_PASSWORD "$user_credential"
-    printf 'export M1_TEST_KEYCLOAK_PORT=%s\n' "$keycloak_port"
-    printf 'export M1_TEST_OIDC_ISSUER=http://127.0.0.1:%s/realms/peerassist-m1\n' "$keycloak_port"
-    printf 'export M1_TEST_API_CALLBACK_PORT=%s\n' "$api_callback_port"
-    printf 'export M1_TEST_PUBLIC_ORIGIN=http://127.0.0.1:%s\n' "$api_callback_port"
-    printf 'export M1_TEST_OIDC_REDIRECT_URI=http://127.0.0.1:%s/api/v1/auth/callback\n' \
-      "$api_callback_port"
-    printf 'export M1_TEST_S3_ACCESS_KEY=%s\n' "$s3_access"
-    printf 'export M1_TEST_S3_SECRET_KEY=%s\n' "$s3_credential"
-    printf 'export %s=%s\n' M1_TEST_MINIO_ROOT_PASSWORD "$root_credential"
-    printf 'export M1_TEST_S3_BUCKET=%s\n' "$bucket"
-    printf 'export M1_TEST_S3_REGION=%s\n' us-east-1
-    printf 'export M1_TEST_MINIO_PORT=%s\n' "$minio_port"
-    printf 'export M1_TEST_S3_ENDPOINT=http://127.0.0.1:%s\n' "$minio_port"
-  } > "$temp"
+  emit_env > "$temp"
 
   # A same-directory hard link makes the fully written file visible atomically
   # and fails closed if another process wins the target-name race.
@@ -147,10 +180,10 @@ load_env() {
   [[ "$M1_TEST_CLEANUP_ID" =~ ^[0-9a-f]{24}$ ]] || fail "unsafe cleanup identifier"
   [[ "$M1_TEST_PROJECT_NAME" == "peerassist-m1-$M1_TEST_CLEANUP_ID" ]] || \
     fail "unsafe Compose project name"
-  [[ "$M1_TEST_POSTGRES_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe PostgreSQL port"
-  [[ "$M1_TEST_KEYCLOAK_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe Keycloak port"
-  [[ "$M1_TEST_MINIO_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe MinIO port"
-  [[ "$M1_TEST_API_CALLBACK_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe API callback port"
+  [[ "$M1_TEST_POSTGRES_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe PostgreSQL port"
+  [[ "$M1_TEST_KEYCLOAK_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe Keycloak port"
+  [[ "$M1_TEST_MINIO_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe MinIO port"
+  [[ "$M1_TEST_API_CALLBACK_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe API callback port"
   [[ "$M1_TEST_DATABASE_URL" == \
     "postgresql://$M1_TEST_POSTGRES_USER:$M1_TEST_POSTGRES_PASSWORD@127.0.0.1:$M1_TEST_POSTGRES_PORT/$M1_TEST_POSTGRES_DB" ]] || \
     fail "unsafe generated database URL"
@@ -192,7 +225,52 @@ up_env() {
   shift
   load_env "$env_file"
   validate_services "$@"
-  compose "$env_file" up --detach "$@"
+  local -a requested=("$@") initial=()
+  (( ${#requested[@]} > 0 )) || requested=("${SERVICES[@]}")
+  local service want_postgres=false want_keycloak=false want_minio=false
+  local want_bootstrap=false want_callback=false
+  for service in "${requested[@]}"; do
+    case "$service" in
+      postgres) want_postgres=true ;;
+      keycloak) want_keycloak=true; want_callback=true ;;
+      minio) want_minio=true ;;
+      minio-bootstrap) want_bootstrap=true; want_minio=true ;;
+      callback-reservation) want_callback=true ;;
+    esac
+  done
+  [[ "$want_postgres" == false ]] || initial+=(postgres)
+  [[ "$want_minio" == false ]] || initial+=(minio)
+  [[ "$want_callback" == false ]] || initial+=(callback-reservation)
+  (( ${#initial[@]} == 0 )) || compose "$env_file" up --detach "${initial[@]}"
+
+  [[ "$want_postgres" == false ]] || resolve_port "$env_file" postgres 5432 \
+    M1_TEST_POSTGRES_PORT
+  [[ "$want_minio" == false ]] || resolve_port "$env_file" minio 9000 \
+    M1_TEST_MINIO_PORT
+  [[ "$want_callback" == false ]] || resolve_port "$env_file" callback-reservation 8080 \
+    M1_TEST_API_CALLBACK_PORT
+  refresh_endpoints
+  persist_env "$env_file"
+
+  if [[ "$want_keycloak" == true ]]; then
+    compose "$env_file" up --detach keycloak
+    resolve_port "$env_file" keycloak 8080 M1_TEST_KEYCLOAK_PORT
+    refresh_endpoints
+    persist_env "$env_file"
+  fi
+  [[ "$want_bootstrap" == false ]] || compose "$env_file" up --detach minio-bootstrap
+}
+
+resolve_port() {
+  local env_file=$1 service=$2 container_port=$3 variable=$4 published port
+  published=$(compose "$env_file" port "$service" "$container_port") || \
+    fail "could not resolve Compose-assigned provider port"
+  [[ "$published" =~ ^127\.0\.0\.1:([1-9][0-9]{3,4})$ ]] || \
+    fail "unsafe Compose-assigned provider port"
+  port=${BASH_REMATCH[1]}
+  (( port <= 65535 )) || fail "unsafe Compose-assigned provider port"
+  printf -v "$variable" '%s' "$port"
+  export "$variable"
 }
 
 wait_env() {
@@ -217,7 +295,7 @@ wait_env() {
         '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}} {{.State.ExitCode}}' \
         "$cid")
       case "$service:$state" in
-        minio-bootstrap:"exited  0"|*:"running healthy 0") ;;
+        minio-bootstrap:"exited  0"|callback-reservation:"running  0"|*:"running healthy 0") ;;
         *:"exited "*|*:"dead "*) fail "M1 test provider failed before readiness" ;;
         *) all_ready=false ;;
       esac
@@ -229,12 +307,23 @@ wait_env() {
 }
 
 down_env() {
-  local env_file=$1 status=0
+  local env_file=$1 residual
   [[ -e "$env_file" || -L "$env_file" ]] || return 0
   load_env "$env_file"
-  compose "$env_file" down --volumes --remove-orphans || status=$?
+  compose "$env_file" down --volumes --remove-orphans || return $?
+  residual=$(docker ps -aq --filter \
+    "label=com.docker.compose.project=$M1_TEST_PROJECT_NAME") || \
+    fail "could not verify M1 test container cleanup"
+  [[ -z "$residual" ]] || fail "M1 test project containers remain after cleanup"
+  residual=$(docker volume ls -q --filter \
+    "label=com.docker.compose.project=$M1_TEST_PROJECT_NAME") || \
+    fail "could not verify M1 test volume cleanup"
+  [[ -z "$residual" ]] || fail "M1 test project volumes remain after cleanup"
+  residual=$(docker network ls -q --filter \
+    "label=com.docker.compose.project=$M1_TEST_PROJECT_NAME") || \
+    fail "could not verify M1 test network cleanup"
+  [[ -z "$residual" ]] || fail "M1 test project networks remain after cleanup"
   rm -f -- "$env_file"
-  return "$status"
 }
 
 usage() {
