@@ -3,10 +3,10 @@ from __future__ import annotations
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,15 +52,65 @@ class PlatformSettings(BaseSettings):
     internal_legacy_audience: str = Field(min_length=1)
     legacy_bind_host: str = "127.0.0.1"
 
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_secret_inputs(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        wrapped = dict(values)
+        for field_name in ("database_url", "s3_access_key_id", "s3_secret_access_key"):
+            value = wrapped.get(field_name)
+            if value is not None and not isinstance(value, SecretStr):
+                wrapped[field_name] = SecretStr(str(value))
+        key_ring = wrapped.get("session_key_ring")
+        if isinstance(key_ring, (list, tuple)):
+            wrapped["session_key_ring"] = [
+                value if isinstance(value, SecretStr) else SecretStr(str(value)) for value in key_ring
+            ]
+        return wrapped
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, value: SecretStr, info: ValidationInfo) -> SecretStr:
+        database_url = value.get_secret_value().lower()
+        if not database_url.startswith(("postgresql://", "postgresql+psycopg://")):
+            raise ValueError("platform database URL must use PostgreSQL with Psycopg")
+        if info.data.get("environment") == "production" and any(
+            default in database_url for default in ("postgres:postgres", "change-me")
+        ):
+            raise ValueError("production database credentials must not use defaults")
+        return value
+
     @field_validator("oidc_issuer", "s3_endpoint", "public_base_url")
     @classmethod
-    def validate_platform_url(cls, value: str, info: object) -> str:
-        return _http_url(value, field_name=getattr(info, "field_name", "URL"))
+    def validate_platform_url(cls, value: str, info: ValidationInfo) -> str:
+        normalized = _http_url(value, field_name=info.field_name)
+        if (
+            info.data.get("environment") == "production"
+            and info.field_name in {"oidc_issuer", "public_base_url"}
+            and urlsplit(normalized).scheme != "https"
+        ):
+            raise ValueError(f"production {info.field_name} must use HTTPS")
+        return normalized
+
+    @field_validator("s3_access_key_id", "s3_secret_access_key")
+    @classmethod
+    def validate_s3_credentials(cls, value: SecretStr | None, info: ValidationInfo) -> SecretStr | None:
+        if value is None or info.data.get("environment") != "production":
+            return value
+        if value.get_secret_value().lower() in {"minioadmin", "change-me"}:
+            raise ValueError("production object-store credentials must not use defaults")
+        return value
 
     @field_validator("allowed_origins")
     @classmethod
-    def validate_origins(cls, values: list[str]) -> list[str]:
-        return [value if value == "*" else _http_url(value, field_name="allowed origin") for value in values]
+    def validate_origins(cls, values: list[str], info: ValidationInfo) -> list[str]:
+        normalized = [
+            value if value == "*" else _http_url(value, field_name="allowed origin") for value in values
+        ]
+        if info.data.get("environment") == "production" and "*" in normalized:
+            raise ValueError("production allowed origins must not contain wildcards")
+        return normalized
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod
@@ -69,38 +119,31 @@ class PlatformSettings(BaseSettings):
             ip_network(value, strict=False)
         return values
 
-    @model_validator(mode="after")
-    def validate_production_boundary(self) -> PlatformSettings:
-        if self.environment != "production":
-            return self
-
-        if urlsplit(self.oidc_issuer).scheme != "https":
-            raise ValueError("production OIDC issuer must use HTTPS")
-        if urlsplit(self.public_base_url).scheme != "https":
-            raise ValueError("production public base URL must use HTTPS")
-        if "*" in self.allowed_origins:
-            raise ValueError("production allowed origins must not contain wildcards")
-        if not self.session_key_ring:
+    @field_validator("session_key_ring")
+    @classmethod
+    def validate_session_key_ring(
+        cls, values: list[SecretStr], info: ValidationInfo
+    ) -> list[SecretStr]:
+        if info.data.get("environment") != "production":
+            return values
+        if not values:
             raise ValueError("production session key ring must not be empty")
+        if any("change-me" in value.get_secret_value().lower() for value in values):
+            raise ValueError("production session keys must not use defaults")
+        return values
+
+    @field_validator("legacy_bind_host")
+    @classmethod
+    def validate_legacy_bind_host(cls, value: str, info: ValidationInfo) -> str:
+        if info.data.get("environment") != "production":
+            return value
         try:
-            legacy_address = ip_address(self.legacy_bind_host.strip("[]"))
+            legacy_address = ip_address(value.strip("[]"))
         except ValueError:
             legacy_address = None
-        if self.legacy_bind_host != "localhost" and not (legacy_address and legacy_address.is_loopback):
+        if value != "localhost" and not (legacy_address and legacy_address.is_loopback):
             raise ValueError("production legacy service must not bind publicly")
-
-        database_url = self.database_url.get_secret_value().lower()
-        if not database_url.startswith(("postgresql://", "postgresql+psycopg://")):
-            raise ValueError("platform database URL must use PostgreSQL with Psycopg")
-        forbidden_defaults = {"postgres:postgres", "minioadmin"}
-        credentials = [
-            database_url,
-            self.s3_access_key_id.get_secret_value().lower() if self.s3_access_key_id else "",
-            self.s3_secret_access_key.get_secret_value().lower() if self.s3_secret_access_key else "",
-        ]
-        if any(default in credential for default in forbidden_defaults for credential in credentials):
-            raise ValueError("production credentials must not use provider defaults")
-        return self
+        return value
 
 
 class Settings(BaseSettings):

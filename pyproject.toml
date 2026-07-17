@@ -53,6 +53,10 @@ platform = [
   "boto3>=1.35.0",
   "httpx>=0.27.0",
 ]
+platform-dev = [
+  "factreview[platform]",
+  "factreview[dev]",
+]
 
 # ── LLM providers ────────────────────────────────────────────────────────────
 llm = [

@@ -52,8 +52,12 @@ def test_platform_settings_are_separate_from_legacy_settings() -> None:
         ("legacy_bind_host", "::"),
         ("legacy_bind_host", "192.0.2.10"),
         ("database_url", "postgresql+psycopg://postgres:postgres@db/peerassist"),
+        ("database_url", "postgresql+psycopg://peerassist:change-me@db/peerassist"),
         ("s3_access_key_id", "minioadmin"),
         ("s3_secret_access_key", "minioadmin"),
+        ("s3_access_key_id", "change-me"),
+        ("s3_secret_access_key", "change-me"),
+        ("session_key_ring", ["local-key-id=change-me"]),
     ],
 )
 def test_production_platform_settings_reject_unsafe_defaults(override: str, value: object) -> None:
@@ -80,3 +84,32 @@ def test_platform_settings_redact_secrets() -> None:
     assert "generated-access-key" not in rendered
     assert "generated-session-secret" not in rendered
     assert "**********" in rendered
+
+
+def test_platform_validation_errors_never_retain_secret_inputs() -> None:
+    secrets = {
+        "database_url": "postgresql+psycopg://private-user:private-db-password@db/peerassist",
+        "s3_access_key_id": "private-s3-access-key",
+        "s3_secret_access_key": "private-s3-secret-key",
+        "session_key_ring": ["private-key-id=private-session-key"],
+    }
+
+    with pytest.raises(ValidationError) as captured:
+        valid_production_settings(public_base_url="http://peerassist.example.test", **secrets)
+
+    rendered = "\n".join(
+        [
+            str(captured.value),
+            repr(captured.value.errors()),
+            captured.value.json(),
+        ]
+    )
+    for secret in (
+        "private-user",
+        "private-db-password",
+        "private-s3-access-key",
+        "private-s3-secret-key",
+        "private-key-id",
+        "private-session-key",
+    ):
+        assert secret not in rendered

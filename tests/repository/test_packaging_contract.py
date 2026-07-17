@@ -22,6 +22,13 @@ def test_platform_extra_contains_runtime_dependencies() -> None:
     } <= {dependency.lower() for dependency in normalized}
 
 
+def test_platform_dev_extra_composes_runtime_and_test_tooling() -> None:
+    configuration = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = configuration["project"]["optional-dependencies"]["platform-dev"]
+
+    assert dependencies == ["factreview[platform]", "factreview[dev]"]
+
+
 def test_wheel_manifest_contains_runtime_modules_and_frontend() -> None:
     configuration = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     wheel = configuration["tool"]["hatch"]["build"]["targets"]["wheel"]
