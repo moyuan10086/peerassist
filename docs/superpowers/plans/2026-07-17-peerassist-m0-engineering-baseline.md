@@ -1000,6 +1000,9 @@ git commit -m "build: add secure two-service development profile"
 - Create: `tests/fixtures/contracts/finalized_report.v1.json`
 - Create: `tests/fixtures/contracts/legacy_http_contract.v1.json`
 - Create: `tests/contracts/test_legacy_http_contract.py`
+- Modify: `src/peerassist/confirmation_workflow.py`
+- Modify: `src/peerassist/job_runner.py`
+- Modify: `src/peerassist/review_job_api.py`
 - Modify: `docs/peerassist_operation_manual.md`
 
 - [ ] **Step 1: Write failing deployment tests**
@@ -1132,7 +1135,10 @@ git add -- deploy/systemd/peerassist-review-api.service \
   tests/fixtures/contracts/concern.v1.json \
   tests/fixtures/contracts/citation.v1.json \
   tests/fixtures/contracts/finalized_report.v1.json \
-  tests/fixtures/contracts/legacy_http_contract.v1.json
+  tests/fixtures/contracts/legacy_http_contract.v1.json \
+  src/peerassist/confirmation_workflow.py \
+  src/peerassist/job_runner.py \
+  src/peerassist/review_job_api.py
 # Run the staging gate with exactly the paths above.
 git commit -m "test: freeze secure legacy deployment contracts"
 ```
