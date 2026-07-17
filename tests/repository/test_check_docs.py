@@ -19,6 +19,8 @@ def test_find_broken_links_resolves_spaces_urls_queries_and_anchors(tmp_path: Pa
         "[encoded](Target%20File.md#target)\n"
         "[query](Target%20File.md?download=1#target)\n"
         '[title](Target%20File.md "A title")\n'
+        "[paren title](Target%20File.md (title))\n"
+        '[angle title](<Target File.md> "title")\n'
         "[local](#section)\n"
         "[web](https://example.invalid/docs)\n"
         "[mail](mailto:security@example.invalid)\n",
@@ -64,6 +66,19 @@ def test_shorter_fence_marker_does_not_close_longer_fence(tmp_path: Path) -> Non
     source.write_text(
         "````markdown\n"
         "```\n"
+        "[example](not-real.md)\n"
+        "````\n",
+        encoding="utf-8",
+    )
+
+    assert find_broken_links(tmp_path, [source]) == []
+
+
+def test_fence_marker_with_trailing_text_does_not_close_fence(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text(
+        "````markdown\n"
+        "````not-a-closing-fence\n"
         "[example](not-real.md)\n"
         "````\n",
         encoding="utf-8",
