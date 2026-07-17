@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Request
@@ -32,13 +33,33 @@ async def health() -> HealthView:
     response_model=ReadinessView,
 )
 async def readiness(request: Request) -> ReadinessView | JSONResponse:
-    statuses: dict[str, Literal["ready", "unavailable"]] = {}
-    for check in request.app.state.dependencies.readiness_checks:
+    dependencies = request.app.state.dependencies
+
+    async def run_check(check: object) -> bool:
         try:
-            available = await check.check()
-        except Exception:
-            available = False
-        statuses[check.name] = "ready" if available else "unavailable"
+            return bool(
+                await asyncio.wait_for(
+                    check.check(),
+                    timeout=dependencies.readiness_check_timeout_seconds,
+                )
+            )
+        except (TimeoutError, Exception):
+            return False
+
+    checks = dependencies.readiness_checks
+    tasks = [asyncio.create_task(run_check(check)) for check in checks]
+    done, pending = await asyncio.wait(
+        tasks,
+        timeout=dependencies.readiness_overall_timeout_seconds,
+    )
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    statuses: dict[str, Literal["ready", "unavailable"]] = {
+        check.name: "ready" if task in done and task.result() else "unavailable"
+        for check, task in zip(checks, tasks, strict=True)
+    }
     ready = all(value == "ready" for value in statuses.values())
     body = ReadinessView(
         status="ready" if ready else "unavailable",

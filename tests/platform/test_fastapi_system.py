@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import time
 import warnings
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import Request
+import pytest
+from fastapi import HTTPException, Request
 from starlette.exceptions import StarletteDeprecationWarning
 
 with warnings.catch_warnings():
@@ -44,6 +47,37 @@ def test_health_is_live_and_readiness_reports_safe_dependency_status() -> None:
     }
     assert "secret" not in ready.text
     assert "private" not in ready.text
+
+
+def test_readiness_checks_run_concurrently_and_cancel_hung_checks_at_the_bound() -> None:
+    from services.api.app import create_app
+    from services.api.composition import PlatformDependencies
+
+    first = _DelayedReadiness("database", 0.06)
+    second = _DelayedReadiness("identity", 0.06)
+    hung = _HungReadiness("object_store")
+    dependencies = PlatformDependencies.for_test(
+        readiness_checks=(first, second, hung),
+        readiness_check_timeout_seconds=0.10,
+        readiness_overall_timeout_seconds=0.12,
+    )
+
+    with TestClient(create_app(_settings(), dependencies)) as client:
+        started = time.monotonic()
+        response = client.get("/api/v1/ready")
+        elapsed = time.monotonic() - started
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "dependencies": {
+            "database": "ready",
+            "identity": "ready",
+            "object_store": "unavailable",
+        },
+    }
+    assert elapsed < 0.15
+    assert hung.cancelled is True
 
 
 def test_request_id_is_propagated_or_generated_without_reflecting_invalid_input() -> None:
@@ -113,6 +147,58 @@ def test_platform_and_unexpected_errors_have_safe_stable_envelopes() -> None:
     assert "traceback" not in combined.casefold()
 
 
+def test_http_exceptions_preserve_only_safe_standard_headers() -> None:
+    from services.api.app import create_app
+    from services.api.composition import PlatformDependencies
+
+    app = create_app(_settings(), PlatformDependencies.for_test())
+
+    def authentication_failure() -> None:
+        raise HTTPException(
+            401,
+            detail="raw private provider detail",
+            headers={"WWW-Authenticate": 'Bearer realm="peerassist"'},
+        )
+
+    def rate_limited() -> None:
+        raise HTTPException(429, headers={"Retry-After": "30"})
+
+    def unsafe_headers() -> None:
+        raise HTTPException(
+            401,
+            headers={
+                "WWW-Authenticate": "Bearer\r\nSet-Cookie: private=token",
+                "Set-Cookie": "session=private-token",
+                "Location": "https://attacker.example/private-token",
+                "X-Provider-Body": "private-token",
+            },
+        )
+
+    app.add_api_route("/api/v1/_test/authentication-failure", authentication_failure)
+    app.add_api_route("/api/v1/_test/rate-limited", rate_limited)
+    app.add_api_route("/api/v1/_test/unsafe-headers", unsafe_headers)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        authentication = client.get("/api/v1/_test/authentication-failure")
+        method_not_allowed = client.post("/api/v1/health")
+        limited = client.get("/api/v1/_test/rate-limited")
+        unsafe = client.get("/api/v1/_test/unsafe-headers")
+
+    assert authentication.status_code == 401
+    assert authentication.headers["WWW-Authenticate"] == 'Bearer realm="peerassist"'
+    assert authentication.json()["error"]["message"] == "The operation could not be completed."
+    assert "private provider detail" not in authentication.text
+    assert method_not_allowed.status_code == 405
+    assert method_not_allowed.headers["Allow"] == "GET"
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"] == "30"
+    assert "www-authenticate" not in unsafe.headers
+    assert "set-cookie" not in unsafe.headers
+    assert "location" not in unsafe.headers
+    assert "x-provider-body" not in unsafe.headers
+    assert "private-token" not in unsafe.text
+
+
 def test_unknown_route_and_auth_placeholders_use_the_stable_error_envelope() -> None:
     from services.api.app import create_app
     from services.api.composition import PlatformDependencies
@@ -161,6 +247,61 @@ def test_fixed_router_registry_and_lifespan_include_all_platform_components() ->
         assert "/api/v1/auth/login" in paths
 
     assert lifecycle.stopped is True
+
+
+def test_lifespan_attempts_every_reverse_shutdown_after_a_stop_failure() -> None:
+    from services.api.app import LifecycleError, create_app
+    from services.api.composition import PlatformDependencies
+
+    events: list[str] = []
+    resources = (
+        _TrackedLifecycle("first", events),
+        _TrackedLifecycle("second", events, stop_failure=RuntimeError("private stop token")),
+        _TrackedLifecycle("third", events),
+    )
+    app = create_app(
+        _settings(),
+        PlatformDependencies.for_test(lifecycle_resources=resources),
+    )
+
+    with pytest.raises(LifecycleError) as captured:
+        with TestClient(app):
+            pass
+
+    assert events == [
+        "start:first",
+        "start:second",
+        "start:third",
+        "stop:third",
+        "stop:second",
+        "stop:first",
+    ]
+    assert str(captured.value) == "Platform lifecycle cleanup failed."
+    assert "private" not in str(captured.value)
+
+
+def test_lifespan_cleans_started_resources_after_partial_startup_failure() -> None:
+    from services.api.app import LifecycleError, create_app
+    from services.api.composition import PlatformDependencies
+
+    events: list[str] = []
+    resources = (
+        _TrackedLifecycle("first", events),
+        _TrackedLifecycle("second", events, start_failure=RuntimeError("private startup token")),
+        _TrackedLifecycle("third", events),
+    )
+    app = create_app(
+        _settings(),
+        PlatformDependencies.for_test(lifecycle_resources=resources),
+    )
+
+    with pytest.raises(LifecycleError) as captured:
+        with TestClient(app):
+            pass
+
+    assert events == ["start:first", "start:second", "stop:first"]
+    assert str(captured.value) == "Platform lifecycle startup failed."
+    assert "private" not in str(captured.value)
 
 
 def test_untrusted_forwarded_and_browser_identity_headers_are_ignored() -> None:
@@ -233,6 +374,28 @@ class _Readiness:
         return self.available
 
 
+@dataclass(frozen=True)
+class _DelayedReadiness:
+    name: str
+    delay: float
+
+    async def check(self) -> bool:
+        await asyncio.sleep(self.delay)
+        return True
+
+
+class _HungReadiness:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.cancelled = False
+
+    async def check(self) -> bool:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled = True
+
+
 class _Lifecycle:
     started = False
     stopped = False
@@ -242,3 +405,28 @@ class _Lifecycle:
 
     async def stop(self) -> None:
         self.stopped = True
+
+
+class _TrackedLifecycle:
+    def __init__(
+        self,
+        name: str,
+        events: list[str],
+        *,
+        start_failure: Exception | None = None,
+        stop_failure: Exception | None = None,
+    ) -> None:
+        self.name = name
+        self.events = events
+        self.start_failure = start_failure
+        self.stop_failure = stop_failure
+
+    async def start(self) -> None:
+        self.events.append(f"start:{self.name}")
+        if self.start_failure is not None:
+            raise self.start_failure
+
+    async def stop(self) -> None:
+        self.events.append(f"stop:{self.name}")
+        if self.stop_failure is not None:
+            raise self.stop_failure

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from uuid import uuid4
 
@@ -28,6 +29,10 @@ _PLATFORM_STATUS = {
     "payload_too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
     "stale_version": HTTPStatus.CONFLICT,
 }
+_HTTP_METHOD = re.compile(r"[A-Z][A-Z0-9-]{0,31}")
+_AUTH_CHALLENGE = re.compile(
+    r'(?:Basic|Bearer)(?: realm="[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")?'
+)
 
 
 class NotConfiguredError(Exception):
@@ -64,9 +69,11 @@ def _error_response(
     request_id: str,
     retryable: bool,
     details: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
+        headers=headers,
         content={
             "error": {
                 "code": code,
@@ -128,7 +135,46 @@ async def _http_error(request: Request, error: Exception) -> JSONResponse:
         message=message,
         request_id=_request_id(request),
         retryable=False,
+        headers=_safe_standard_headers(error.headers),
     )
+
+
+def _safe_standard_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    if not headers:
+        return {}
+    result: dict[str, str] = {}
+    for name, value in headers.items():
+        normalized = name.casefold()
+        if not _safe_header_value(value):
+            continue
+        if normalized == "allow" and _safe_allow(value):
+            result["Allow"] = value
+        elif normalized == "retry-after" and _safe_retry_after(value):
+            result["Retry-After"] = value
+        elif normalized == "www-authenticate" and _AUTH_CHALLENGE.fullmatch(value):
+            result["WWW-Authenticate"] = value
+    return result
+
+
+def _safe_header_value(value: str) -> bool:
+    if not value or len(value) > 512 or any(character in value for character in "\r\n\0"):
+        return False
+    words = frozenset(word for word in re.split(r"[^a-z0-9]+", value.casefold()) if word)
+    return not words & _UNSAFE_REQUEST_WORDS
+
+
+def _safe_allow(value: str) -> bool:
+    methods = [method.strip() for method in value.split(",")]
+    return bool(methods) and all(_HTTP_METHOD.fullmatch(method) for method in methods)
+
+
+def _safe_retry_after(value: str) -> bool:
+    if value.isdecimal():
+        return len(value) <= 10
+    try:
+        return parsedate_to_datetime(value).tzinfo is not None
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 async def _unexpected_error(request: Request, error: Exception) -> JSONResponse:

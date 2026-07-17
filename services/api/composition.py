@@ -39,6 +39,8 @@ class PlatformDependencies:
     object_store: ObjectStore
     readiness_checks: tuple[ReadinessCheck, ...]
     lifecycle_resources: tuple[LifecycleResource, ...] = ()
+    readiness_check_timeout_seconds: float = 2.0
+    readiness_overall_timeout_seconds: float = 3.0
 
     def __post_init__(self) -> None:
         names = [check.name for check in self.readiness_checks]
@@ -46,6 +48,8 @@ class PlatformDependencies:
             raise ValueError("readiness dependency names must be public-safe identifiers")
         if len(names) != len(set(names)):
             raise ValueError("readiness dependency names must be unique")
+        if self.readiness_check_timeout_seconds <= 0 or self.readiness_overall_timeout_seconds <= 0:
+            raise ValueError("readiness timeouts must be positive")
 
     @classmethod
     def for_test(
@@ -53,6 +57,8 @@ class PlatformDependencies:
         *,
         readiness_checks: tuple[ReadinessCheck, ...] | None = None,
         lifecycle_resources: tuple[LifecycleResource, ...] = (),
+        readiness_check_timeout_seconds: float = 2.0,
+        readiness_overall_timeout_seconds: float = 3.0,
     ) -> PlatformDependencies:
         return _memory_dependencies(
             issuer="http://identity.test/realms/peerassist",
@@ -60,6 +66,8 @@ class PlatformDependencies:
             algorithms=frozenset({"RS256"}),
             readiness_checks=readiness_checks,
             lifecycle_resources=lifecycle_resources,
+            readiness_check_timeout_seconds=readiness_check_timeout_seconds,
+            readiness_overall_timeout_seconds=readiness_overall_timeout_seconds,
         )
 
 
@@ -82,6 +90,8 @@ def _memory_dependencies(
     algorithms: frozenset[str],
     readiness_checks: tuple[ReadinessCheck, ...] | None = None,
     lifecycle_resources: tuple[LifecycleResource, ...] = (),
+    readiness_check_timeout_seconds: float = 2.0,
+    readiness_overall_timeout_seconds: float = 3.0,
 ) -> PlatformDependencies:
     checks = readiness_checks or (
         _Ready("database"),
@@ -98,4 +108,6 @@ def _memory_dependencies(
         object_store=MemoryObjectStore(),
         readiness_checks=checks,
         lifecycle_resources=lifecycle_resources,
+        readiness_check_timeout_seconds=readiness_check_timeout_seconds,
+        readiness_overall_timeout_seconds=readiness_overall_timeout_seconds,
     )

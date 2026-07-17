@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from services.api.app import create_openapi_app
@@ -18,6 +20,35 @@ def canonical_openapi() -> bytes:
     return (json.dumps(schema, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def export_contract(content: bytes) -> None:
+    """Atomically replace the contract after durable sibling-tempfile publication."""
+
+    CONTRACT.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=CONTRACT.parent,
+            prefix=f".{CONTRACT.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, CONTRACT)
+        temporary_path = None
+        directory_fd = os.open(CONTRACT.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="fail when the committed contract differs")
@@ -28,8 +59,7 @@ def main() -> int:
             print("OpenAPI contract is out of date; run scripts/export_openapi.py")
             return 1
         return 0
-    CONTRACT.parent.mkdir(parents=True, exist_ok=True)
-    CONTRACT.write_bytes(expected)
+    export_contract(expected)
     return 0
 
 

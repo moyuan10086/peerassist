@@ -29,6 +29,20 @@ _FORWARDED_HEADERS = frozenset(
 )
 
 
+class LifecycleError(RuntimeError):
+    """Safe startup or shutdown failure with provider details suppressed."""
+
+
+async def _stop_resources(resources: list[object]) -> bool:
+    failed = False
+    for resource in reversed(resources):
+        try:
+            await resource.stop()
+        except Exception:
+            failed = True
+    return failed
+
+
 class PublicBoundaryMiddleware:
     """Assign request IDs and normalize only explicitly trusted proxy metadata."""
 
@@ -108,10 +122,14 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
             for resource in dependencies.lifecycle_resources:
                 await resource.start()
                 started.append(resource)
+        except Exception:
+            await _stop_resources(started)
+            raise LifecycleError("Platform lifecycle startup failed.") from None
+        try:
             yield
         finally:
-            for resource in reversed(started):
-                await resource.stop()
+            if await _stop_resources(started):
+                raise LifecycleError("Platform lifecycle cleanup failed.") from None
 
     app = FastAPI(
         title="PeerAssist Platform API",

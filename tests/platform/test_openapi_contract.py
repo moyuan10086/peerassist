@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = ROOT / "contracts" / "openapi" / "peerassist-v1.json"
@@ -54,3 +57,56 @@ def test_committed_openapi_is_canonical_and_export_check_is_clean() -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_atomic_export_replaces_the_existing_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.export_openapi as exporter
+
+    contract = tmp_path / "peerassist-v1.json"
+    contract.write_bytes(b"old-contract\n")
+    monkeypatch.setattr(exporter, "CONTRACT", contract)
+
+    exporter.export_contract(b"new-contract\n")
+
+    assert contract.read_bytes() == b"new-contract\n"
+    assert list(tmp_path.iterdir()) == [contract]
+
+
+def test_failed_atomic_replace_preserves_existing_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.export_openapi as exporter
+
+    contract = tmp_path / "peerassist-v1.json"
+    contract.write_bytes(b"existing-contract\n")
+    monkeypatch.setattr(exporter, "CONTRACT", contract)
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        del source, destination
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(OSError):
+        exporter.export_contract(b"new-contract\n")
+
+    assert contract.read_bytes() == b"existing-contract\n"
+    assert list(tmp_path.iterdir()) == [contract]
+
+
+def test_openapi_check_never_writes_the_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.export_openapi as exporter
+
+    monkeypatch.setattr(exporter, "canonical_openapi", lambda: exporter.CONTRACT.read_bytes())
+    monkeypatch.setattr(
+        exporter,
+        "export_contract",
+        lambda content: pytest.fail(f"check attempted write: {content!r}"),
+    )
+    monkeypatch.setattr(sys, "argv", ["export_openapi.py", "--check"])
+
+    assert exporter.main() == 0
