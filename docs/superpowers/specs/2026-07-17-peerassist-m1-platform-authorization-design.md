@@ -1,6 +1,6 @@
 # PeerAssist M1 Platform Authorization and Persistence Design
 
-**Status:** Approved direction, written-spec review in progress
+**Status:** Approved
 
 **Date:** 2026-07-17
 
