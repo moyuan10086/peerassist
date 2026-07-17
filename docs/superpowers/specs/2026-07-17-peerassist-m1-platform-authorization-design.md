@@ -159,7 +159,7 @@ All primary IDs are opaque UUIDs. Every project resource carries `organization_i
 | `users` | internal ID, status, display profile, created/updated timestamps |
 | `external_identities` | issuer + subject unique, user ID, verified claim snapshot, last seen |
 | `browser_sessions` | opaque session digest, user/identity, token-expiry metadata, CSRF secret, expiry/revocation; no raw token in browser-visible state |
-| `oidc_transactions` | one-time state/nonce/PKCE verifier digest, return path, expiry/consumption |
+| `oidc_transactions` | one-time state/nonce digests, encrypted PKCE verifier, key ID, return path, expiry/consumption |
 | `organizations` | ID, slug unique, name, status, version |
 | `organization_memberships` | organization/user unique, role, status, version, revoked timestamp |
 | `projects` | organization-scoped ID/name/status/version |
@@ -243,12 +243,27 @@ GET /api/v1/auth/login?return_to=/compat/paper
 → redirect only to an allowlisted relative return path
 ```
 
+The transaction row stores the original `code_verifier` encrypted under the active session-key
+ring, plus a key ID; its state and nonce are stored as keyed digests. Callback processing locks
+and atomically consumes the row, decrypts the verifier only for token exchange, verifies state and
+nonce, then deletes the encrypted verifier on success or terminal failure. Transactions expire in
+ten minutes and a janitor removes abandoned rows. Neither the verifier nor its ciphertext is sent
+to logs, audit events, URLs, or browser JavaScript.
+
 Session records store only the server-side material needed to refresh or revalidate identity;
 provider tokens are encrypted with a deployment key or retained by the provider adapter and are
 never returned to Vite. Sessions have absolute and idle expiry, rotate on login/refresh, and are
 revoked on logout, identity disablement, or provider rejection. Mutating cookie-authenticated
 requests require an Origin matching the configured public origin plus a session-bound CSRF token.
 Bearer clients do not use the cookie CSRF mechanism.
+
+Protected business routes accept either a validated OIDC bearer token or a valid FastAPI-owned
+browser session and resolve both to the same internal actor. `/api/v1/auth/login` and callback are
+the only unauthenticated browser entry routes; callback still requires a valid one-time transaction.
+Cookie authentication is accepted only for same-origin `/api/v1` and `/compat/*` requests and
+enforces Origin/CSRF on mutations. Automation never receives a browser session. Operator CLI
+commands authenticate through local operator credentials and are not HTTP routes. Internal legacy
+calls accept only the audience-bound service token and are unreachable on the public listener.
 
 The generic OIDC adapter is configured with exact issuer, expected audience, accepted algorithms,
 clock skew, discovery/JWKS timeouts, and optional required claims. It must:
@@ -620,6 +635,7 @@ of all legacy routes, coordinated PostgreSQL/object-store recovery watermarks, f
 exercises, release provenance, and production restore objectives. M1 records object digests and
 transactional manifests needed for later recovery, but does not claim coordinated backup RPO/RTO.
 
-These deferrals do not weaken M1 authentication or tenancy: all M1 APIs require real validated
-OIDC bearer identity, all authorization is server-side, and only internal/loopback compatibility
-access may bypass the future browser shell.
+These deferrals do not weaken M1 authentication or tenancy: every protected M1 API resolves an
+actor from a validated OIDC bearer token or a valid FastAPI-owned session derived from validated
+OIDC; all authorization is server-side. Operator CLI and internal legacy service tokens are
+separate, scope-limited trust boundaries and cannot be supplied as browser identity.
