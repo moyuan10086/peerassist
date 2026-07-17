@@ -80,6 +80,41 @@ def test_readiness_checks_run_concurrently_and_cancel_hung_checks_at_the_bound()
     assert hung.cancelled is True
 
 
+def test_readiness_cancellation_drain_is_bounded_and_lifespan_cleans_residual_tasks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from services.api.app import create_app
+    from services.api.composition import PlatformDependencies
+
+    resistant = _CancellationResistantReadiness("database")
+    ordinary = _HungReadiness("identity")
+    dependencies = PlatformDependencies.for_test(
+        readiness_checks=(resistant, ordinary),
+        readiness_check_timeout_seconds=1.0,
+        readiness_overall_timeout_seconds=0.03,
+        readiness_cancellation_timeout_seconds=0.02,
+    )
+    app = create_app(_settings(), dependencies)
+
+    with TestClient(app) as client:
+        started = time.monotonic()
+        response = client.get("/api/v1/ready")
+        elapsed = time.monotonic() - started
+
+        assert response.status_code == 503
+        assert response.json()["dependencies"] == {
+            "database": "unavailable",
+            "identity": "unavailable",
+        }
+        assert elapsed < 0.10
+        assert app.state.readiness_tasks
+
+    assert resistant.cancellations >= 2
+    assert ordinary.cancelled is True
+    assert not app.state.readiness_tasks
+    assert "Task exception was never retrieved" not in caplog.text
+
+
 def test_request_id_is_propagated_or_generated_without_reflecting_invalid_input() -> None:
     from services.api.app import create_app
     from services.api.composition import PlatformDependencies
@@ -394,6 +429,22 @@ class _HungReadiness:
             await asyncio.Event().wait()
         finally:
             self.cancelled = True
+
+
+class _CancellationResistantReadiness:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.cancellations = 0
+
+    async def check(self) -> bool:
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancellations += 1
+                if self.cancellations == 1:
+                    continue
+                raise
 
 
 class _Lifecycle:

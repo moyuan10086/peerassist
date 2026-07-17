@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from ipaddress import ip_address, ip_network
@@ -41,6 +42,22 @@ async def _stop_resources(resources: list[object]) -> bool:
         except Exception:
             failed = True
     return failed
+
+
+def _consume_readiness_task(tasks: set[asyncio.Task[bool]], task: asyncio.Task[bool]) -> None:
+    tasks.discard(task)
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
+async def _stop_readiness_tasks(app: FastAPI, timeout: float) -> None:
+    tasks = set(app.state.readiness_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
 
 
 class PublicBoundaryMiddleware:
@@ -128,6 +145,10 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
         try:
             yield
         finally:
+            await _stop_readiness_tasks(
+                app,
+                dependencies.readiness_cancellation_timeout_seconds,
+            )
             if await _stop_resources(started):
                 raise LifecycleError("Platform lifecycle cleanup failed.") from None
 
@@ -138,6 +159,11 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
     )
     app.state.settings = settings
     app.state.dependencies = dependencies
+    app.state.readiness_tasks = set()
+    app.state.consume_readiness_task = lambda task: _consume_readiness_task(
+        app.state.readiness_tasks,
+        task,
+    )
     install_exception_handlers(app)
     for router in platform_routers():
         app.include_router(router)

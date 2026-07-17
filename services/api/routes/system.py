@@ -34,30 +34,27 @@ async def health() -> HealthView:
 )
 async def readiness(request: Request) -> ReadinessView | JSONResponse:
     dependencies = request.app.state.dependencies
-
-    async def run_check(check: object) -> bool:
-        try:
-            return bool(
-                await asyncio.wait_for(
-                    check.check(),
-                    timeout=dependencies.readiness_check_timeout_seconds,
-                )
-            )
-        except (TimeoutError, Exception):
-            return False
-
     checks = dependencies.readiness_checks
-    tasks = [asyncio.create_task(run_check(check)) for check in checks]
+    tasks = [asyncio.create_task(check.check()) for check in checks]
+    for task in tasks:
+        request.app.state.readiness_tasks.add(task)
+        task.add_done_callback(request.app.state.consume_readiness_task)
     done, pending = await asyncio.wait(
         tasks,
-        timeout=dependencies.readiness_overall_timeout_seconds,
+        timeout=min(
+            dependencies.readiness_check_timeout_seconds,
+            dependencies.readiness_overall_timeout_seconds,
+        ),
     )
     for task in pending:
         task.cancel()
     if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.wait(
+            pending,
+            timeout=dependencies.readiness_cancellation_timeout_seconds,
+        )
     statuses: dict[str, Literal["ready", "unavailable"]] = {
-        check.name: "ready" if task in done and task.result() else "unavailable"
+        check.name: "ready" if task in done and _available(task) else "unavailable"
         for check, task in zip(checks, tasks, strict=True)
     }
     ready = all(value == "ready" for value in statuses.values())
@@ -68,3 +65,10 @@ async def readiness(request: Request) -> ReadinessView | JSONResponse:
     if ready:
         return body
     return JSONResponse(status_code=503, content=body.model_dump())
+
+
+def _available(task: asyncio.Task[bool]) -> bool:
+    try:
+        return bool(task.result())
+    except BaseException:
+        return False
