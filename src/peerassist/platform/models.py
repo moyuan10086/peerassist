@@ -2,14 +2,113 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
+from types import MappingProxyType
+from typing import TypeAlias
 from uuid import UUID
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+class FrozenJsonArray(tuple["FrozenJsonValue", ...]):
+    """Tuple-compatible marker that distinguishes frozen JSON from caller tuples."""
+
+
+FrozenJsonValue: TypeAlias = (
+    None | bool | int | float | str | FrozenJsonArray | Mapping[str, "FrozenJsonValue"]
+)
+
+_FORBIDDEN_PUBLIC_JSON_KEYS = frozenset(
+    {
+        "access_token",
+        "authorization",
+        "cookie",
+        "csrf_secret",
+        "encrypted_pkce_verifier",
+        "manuscript_content",
+        "object_key",
+        "pkce_verifier",
+        "presigned_url",
+        "provider_response",
+        "raw_token",
+        "refresh_token",
+    }
+)
+_FORBIDDEN_PUBLIC_JSON_KEY_SUFFIXES = ("_access_token", "_refresh_token", "_raw_token")
+
+
+def freeze_json(value: JsonValue | FrozenJsonValue) -> FrozenJsonValue:
+    """Take a recursive immutable snapshot of JSON-compatible data."""
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return value
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("JSON strings must be valid Unicode") from error
+        return value
+    if isinstance(value, FrozenJsonArray):
+        return FrozenJsonArray(freeze_json(item) for item in value)
+    if isinstance(value, list):
+        return FrozenJsonArray(freeze_json(item) for item in value)
+    if isinstance(value, tuple):
+        raise TypeError("ordinary tuples are ambiguous JSON values")
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("JSON object keys must be strings")
+        return MappingProxyType({key: freeze_json(item) for key, item in value.items()})
+    raise TypeError("value must contain only JSON-compatible data")
+
+
+def mutable_json(value: JsonValue | FrozenJsonValue) -> JsonValue:
+    """Return detached JSON-native data for serialization and adapters."""
+    if isinstance(value, Mapping):
+        return {key: mutable_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [mutable_json(item) for item in value]
+    if isinstance(value, FrozenJsonArray):
+        return [mutable_json(item) for item in value]
+    if isinstance(value, tuple):
+        raise TypeError("ordinary tuples are ambiguous JSON values")
+    return value
+
+
+def freeze_public_json(value: JsonValue | FrozenJsonValue) -> FrozenJsonValue:
+    """Freeze public data after rejecting secret fields and private paths."""
+    _validate_public_json(value)
+    return freeze_json(value)
+
+
+def _validate_public_json(value: JsonValue | FrozenJsonValue) -> None:
+    if isinstance(value, str):
+        if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() or value.startswith("file:"):
+            raise ValueError("safe public JSON must not contain absolute private paths")
+        return
+    if isinstance(value, (list, FrozenJsonArray)):
+        for item in value:
+            _validate_public_json(item)
+        return
+    if isinstance(value, tuple):
+        raise TypeError("ordinary tuples are ambiguous JSON values")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("safe public JSON keys must be strings")
+            normalized_key = key.casefold()
+            if normalized_key in _FORBIDDEN_PUBLIC_JSON_KEYS or normalized_key.endswith(
+                _FORBIDDEN_PUBLIC_JSON_KEY_SUFFIXES
+            ):
+                raise ValueError("safe public JSON must not contain secret or provider-private fields")
+            _validate_public_json(item)
 
 
 def _uuid(value: UUID, name: str) -> None:
@@ -216,6 +315,7 @@ class ExternalIdentity:
         _utc(self.last_seen_at, "last_seen_at")
         _utc(self.created_at, "created_at")
         _utc(self.disabled_at, "disabled_at")
+        object.__setattr__(self, "verified_claims", freeze_public_json(self.verified_claims))
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +565,7 @@ class ReviewEvent:
         _nonempty(self.event_type, "event_type")
         _positive(self.schema_version, "schema_version")
         _utc(self.created_at, "created_at")
+        object.__setattr__(self, "payload", freeze_public_json(self.payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,6 +595,7 @@ class CommandRecord:
             raise ValueError("response_status and completed_at must be recorded together")
         if self.response_status is not None and not 100 <= self.response_status <= 599:
             raise ValueError("response_status must be a valid HTTP status")
+        object.__setattr__(self, "response_body", freeze_public_json(self.response_body))
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +663,7 @@ class OutboxEvent:
             _nonempty(getattr(self, name), name)
         _utc(self.created_at, "created_at")
         _utc(self.published_at, "published_at")
+        object.__setattr__(self, "payload", freeze_public_json(self.payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,6 +782,7 @@ class AuditEvent:
         for name in ("resource_type", "outcome", "request_id"):
             _nonempty(getattr(self, name), name)
         _utc(self.created_at, "created_at")
+        object.__setattr__(self, "safe_metadata", freeze_public_json(self.safe_metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -692,6 +796,7 @@ class AuthenticatedIdentity:
         _nonempty(self.issuer, "issuer")
         _nonempty(self.subject, "subject")
         _utc(self.expires_at, "expires_at")
+        object.__setattr__(self, "claims", freeze_public_json(self.claims))
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,6 +806,7 @@ class StageInputManifest:
 
     def __post_init__(self) -> None:
         _nonnegative(self.revision, "revision")
+        object.__setattr__(self, "objects", tuple(self.objects))
 
 
 @dataclass(frozen=True, slots=True)
@@ -715,6 +821,7 @@ class StageOutputSpec:
             if PurePosixPath(name).is_absolute() or PureWindowsPath(name).is_absolute() or ".." in PurePosixPath(name).parts:
                 raise ValueError("logical_names must contain declared relative outputs")
         _positive(self.maximum_size_bytes, "maximum_size_bytes")
+        object.__setattr__(self, "logical_names", tuple(self.logical_names))
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,6 +829,9 @@ class IdempotencyResult:
     decision: IdempotencyDecision
     response_status: int | None = None
     response_body: JsonValue = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "response_body", freeze_public_json(self.response_body))
 
 
 def public_model_field_names() -> frozenset[str]:

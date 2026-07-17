@@ -8,7 +8,14 @@ import math
 from typing import Any
 
 from .errors import IdempotencyConflict, InvalidCanonicalPayload
-from .models import CommandRecord, IdempotencyDecision, IdempotencyResult, JsonValue
+from .models import (
+    CommandRecord,
+    FrozenJsonValue,
+    IdempotencyDecision,
+    IdempotencyResult,
+    JsonValue,
+    mutable_json,
+)
 
 
 def _validate_json(value: Any) -> None:
@@ -33,10 +40,11 @@ def _validate_json(value: Any) -> None:
     raise InvalidCanonicalPayload()
 
 
-def canonical_json_bytes(payload: JsonValue) -> bytes:
+def canonical_json_bytes(payload: JsonValue | FrozenJsonValue) -> bytes:
     """Serialize JSON while preserving every value and sorting object keys only."""
-    _validate_json(payload)
     try:
+        payload = mutable_json(payload)
+        _validate_json(payload)
         rendered = json.dumps(
             payload,
             allow_nan=False,
@@ -49,7 +57,7 @@ def canonical_json_bytes(payload: JsonValue) -> bytes:
         raise InvalidCanonicalPayload() from error
 
 
-def canonical_json_digest(payload: JsonValue) -> str:
+def canonical_json_digest(payload: JsonValue | FrozenJsonValue) -> str:
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
