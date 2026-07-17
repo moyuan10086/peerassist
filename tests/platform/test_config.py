@@ -97,6 +97,34 @@ def test_platform_database_url_requires_psycopg_host_and_database(database_url: 
 
 
 @pytest.mark.parametrize(
+    ("database_url", "decoded_secret"),
+    [
+        ("postgresql+psycopg://change%2Dme:private-password@db/peerassist", "change-me"),
+        ("postgresql+psycopg://peerassist:change%2dme@db/peerassist", "change-me"),
+        ("postgresql+psycopg://POSTGRES:POST%47RES@db/peerassist", "POSTGRES"),
+    ],
+)
+def test_production_database_credentials_reject_percent_encoded_defaults(
+    database_url: str, decoded_secret: str
+) -> None:
+    with pytest.raises(ValidationError) as captured:
+        valid_production_settings(database_url=database_url)
+
+    rendered = f"{captured.value}\n{captured.value.errors()!r}\n{captured.value.json()}"
+    assert database_url not in rendered
+    assert decoded_secret not in rendered
+    assert "private-password" not in rendered
+
+
+def test_production_database_credentials_allow_encoded_special_characters() -> None:
+    database_url = "postgresql+psycopg://review%40user:strong%2Fpassword%3A2026@db/peerassist"
+
+    settings = valid_production_settings(database_url=database_url)
+
+    assert settings.database_url.get_secret_value() == database_url
+
+
+@pytest.mark.parametrize(
     "session_key_ring",
     [
         [""],

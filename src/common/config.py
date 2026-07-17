@@ -7,7 +7,7 @@ from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -115,10 +115,13 @@ class PlatformSettings(BaseSettings):
             raise ValueError("platform database URL must include a hostname")
         if not parsed.path.lstrip("/"):
             raise ValueError("platform database URL must include a database name")
-        if info.data.get("environment") == "production" and any(
-            default in database_url.lower() for default in ("postgres:postgres", "change-me")
-        ):
-            raise ValueError("production database credentials must not use defaults")
+        if info.data.get("environment") == "production":
+            username = unquote(parsed.username or "").casefold()
+            password = unquote(parsed.password or "").casefold()
+            if username in {"change-me", "changeme"} or password in {"change-me", "changeme"}:
+                raise ValueError("production database credentials must not use placeholders")
+            if username == "postgres" and password == "postgres":
+                raise ValueError("production database credentials must not use provider defaults")
         return value
 
     @field_validator("oidc_algorithms")
