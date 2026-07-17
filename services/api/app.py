@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from ipaddress import ip_address, ip_network
@@ -13,6 +14,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from common.config import PlatformSettings
 
 from .composition import PlatformDependencies, build_dependencies
+from .dependencies import IsolatedReadinessProbe
 from .errors import install_exception_handlers, new_request_id
 from .routes import platform_routers
 
@@ -34,30 +36,43 @@ class LifecycleError(RuntimeError):
     """Safe startup or shutdown failure with provider details suppressed."""
 
 
-async def _stop_resources(resources: list[object]) -> bool:
+async def _stop_resources(
+    resources: list[object],
+    *,
+    per_resource_timeout: float,
+    overall_timeout: float,
+) -> bool:
     failed = False
+    deadline = asyncio.get_running_loop().time() + overall_timeout
     for resource in reversed(resources):
-        try:
-            await resource.stop()
-        except Exception:
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        if not await _isolated_stop(resource, min(per_resource_timeout, remaining)):
             failed = True
     return failed
 
 
-def _consume_readiness_task(tasks: set[asyncio.Task[bool]], task: asyncio.Task[bool]) -> None:
-    tasks.discard(task)
-    try:
-        task.exception()
-    except BaseException:
-        pass
+async def _isolated_stop(resource: object, timeout: float) -> bool:
+    completed = threading.Event()
+    succeeded = False
 
+    def execute() -> None:
+        nonlocal succeeded
+        try:
+            asyncio.run(resource.stop())
+            succeeded = True
+        except BaseException:
+            succeeded = False
+        finally:
+            completed.set()
 
-async def _stop_readiness_tasks(app: FastAPI, timeout: float) -> None:
-    tasks = set(app.state.readiness_tasks)
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.wait(tasks, timeout=timeout)
+    threading.Thread(target=execute, name="lifecycle-stop", daemon=True).start()
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not completed.is_set():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.005, remaining))
+    return succeeded
 
 
 class PublicBoundaryMiddleware:
@@ -140,16 +155,20 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
                 await resource.start()
                 started.append(resource)
         except Exception:
-            await _stop_resources(started)
+            await _stop_resources(
+                started,
+                per_resource_timeout=dependencies.lifecycle_stop_timeout_seconds,
+                overall_timeout=dependencies.lifecycle_cleanup_timeout_seconds,
+            )
             raise LifecycleError("Platform lifecycle startup failed.") from None
         try:
             yield
         finally:
-            await _stop_readiness_tasks(
-                app,
-                dependencies.readiness_cancellation_timeout_seconds,
-            )
-            if await _stop_resources(started):
+            if await _stop_resources(
+                started,
+                per_resource_timeout=dependencies.lifecycle_stop_timeout_seconds,
+                overall_timeout=dependencies.lifecycle_cleanup_timeout_seconds,
+            ):
                 raise LifecycleError("Platform lifecycle cleanup failed.") from None
 
     app = FastAPI(
@@ -159,10 +178,8 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
     )
     app.state.settings = settings
     app.state.dependencies = dependencies
-    app.state.readiness_tasks = set()
-    app.state.consume_readiness_task = lambda task: _consume_readiness_task(
-        app.state.readiness_tasks,
-        task,
+    app.state.readiness_probe_slots = tuple(
+        IsolatedReadinessProbe(check) for check in dependencies.readiness_checks
     )
     install_exception_handlers(app)
     for router in platform_routers():

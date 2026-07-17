@@ -41,7 +41,8 @@ class PlatformDependencies:
     lifecycle_resources: tuple[LifecycleResource, ...] = ()
     readiness_check_timeout_seconds: float = 2.0
     readiness_overall_timeout_seconds: float = 3.0
-    readiness_cancellation_timeout_seconds: float = 0.1
+    lifecycle_stop_timeout_seconds: float = 2.0
+    lifecycle_cleanup_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
         names = [check.name for check in self.readiness_checks]
@@ -52,7 +53,8 @@ class PlatformDependencies:
         if (
             self.readiness_check_timeout_seconds <= 0
             or self.readiness_overall_timeout_seconds <= 0
-            or self.readiness_cancellation_timeout_seconds <= 0
+            or self.lifecycle_stop_timeout_seconds <= 0
+            or self.lifecycle_cleanup_timeout_seconds <= 0
         ):
             raise ValueError("readiness timeouts must be positive")
 
@@ -64,7 +66,8 @@ class PlatformDependencies:
         lifecycle_resources: tuple[LifecycleResource, ...] = (),
         readiness_check_timeout_seconds: float = 2.0,
         readiness_overall_timeout_seconds: float = 3.0,
-        readiness_cancellation_timeout_seconds: float = 0.1,
+        lifecycle_stop_timeout_seconds: float = 2.0,
+        lifecycle_cleanup_timeout_seconds: float = 10.0,
     ) -> PlatformDependencies:
         return _memory_dependencies(
             issuer="http://identity.test/realms/peerassist",
@@ -74,7 +77,8 @@ class PlatformDependencies:
             lifecycle_resources=lifecycle_resources,
             readiness_check_timeout_seconds=readiness_check_timeout_seconds,
             readiness_overall_timeout_seconds=readiness_overall_timeout_seconds,
-            readiness_cancellation_timeout_seconds=readiness_cancellation_timeout_seconds,
+            lifecycle_stop_timeout_seconds=lifecycle_stop_timeout_seconds,
+            lifecycle_cleanup_timeout_seconds=lifecycle_cleanup_timeout_seconds,
         )
 
 
@@ -99,7 +103,8 @@ def _memory_dependencies(
     lifecycle_resources: tuple[LifecycleResource, ...] = (),
     readiness_check_timeout_seconds: float = 2.0,
     readiness_overall_timeout_seconds: float = 3.0,
-    readiness_cancellation_timeout_seconds: float = 0.1,
+    lifecycle_stop_timeout_seconds: float = 2.0,
+    lifecycle_cleanup_timeout_seconds: float = 10.0,
 ) -> PlatformDependencies:
     checks = readiness_checks or (
         _Ready("database"),
@@ -118,5 +123,6 @@ def _memory_dependencies(
         lifecycle_resources=lifecycle_resources,
         readiness_check_timeout_seconds=readiness_check_timeout_seconds,
         readiness_overall_timeout_seconds=readiness_overall_timeout_seconds,
-        readiness_cancellation_timeout_seconds=readiness_cancellation_timeout_seconds,
+        lifecycle_stop_timeout_seconds=lifecycle_stop_timeout_seconds,
+        lifecycle_cleanup_timeout_seconds=lifecycle_cleanup_timeout_seconds,
     )

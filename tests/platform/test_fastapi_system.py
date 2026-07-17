@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import warnings
 from dataclasses import dataclass
@@ -77,41 +78,40 @@ def test_readiness_checks_run_concurrently_and_cancel_hung_checks_at_the_bound()
         },
     }
     assert elapsed < 0.15
-    assert hung.cancelled is True
+    assert hung.cancelled is False
+    assert any(thread.name == "readiness-object_store" for thread in threading.enumerate())
 
 
-def test_readiness_cancellation_drain_is_bounded_and_lifespan_cleans_residual_tasks(
+def test_readiness_isolates_unstoppable_probe_and_reuses_one_inflight_thread(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     from services.api.app import create_app
     from services.api.composition import PlatformDependencies
 
-    resistant = _CancellationResistantReadiness("database")
-    ordinary = _HungReadiness("identity")
+    resistant = _UnstoppableReadiness("database")
     dependencies = PlatformDependencies.for_test(
-        readiness_checks=(resistant, ordinary),
-        readiness_check_timeout_seconds=1.0,
+        readiness_checks=(resistant,),
+        readiness_check_timeout_seconds=0.03,
         readiness_overall_timeout_seconds=0.03,
-        readiness_cancellation_timeout_seconds=0.02,
     )
     app = create_app(_settings(), dependencies)
+    assert len(app.state.readiness_probe_slots) == 1
 
+    started = time.monotonic()
     with TestClient(app) as client:
-        started = time.monotonic()
-        response = client.get("/api/v1/ready")
-        elapsed = time.monotonic() - started
+        responses = [client.get("/api/v1/ready") for _ in range(3)]
+    elapsed = time.monotonic() - started
 
-        assert response.status_code == 503
-        assert response.json()["dependencies"] == {
-            "database": "unavailable",
-            "identity": "unavailable",
-        }
-        assert elapsed < 0.10
-        assert app.state.readiness_tasks
-
-    assert resistant.cancellations >= 2
-    assert ordinary.cancelled is True
-    assert not app.state.readiness_tasks
+    assert all(response.status_code == 503 for response in responses)
+    assert all(
+        response.json()["dependencies"] == {"database": "unavailable"}
+        for response in responses
+    )
+    assert elapsed < 0.15
+    assert resistant.calls == 1
+    assert len(
+        [thread for thread in threading.enumerate() if thread.name == "readiness-database"]
+    ) == 1
     assert "Task exception was never retrieved" not in caplog.text
 
 
@@ -339,6 +339,71 @@ def test_lifespan_cleans_started_resources_after_partial_startup_failure() -> No
     assert "private" not in str(captured.value)
 
 
+def test_lifespan_bounds_uncooperative_stop_and_continues_reverse_cleanup() -> None:
+    from services.api.app import LifecycleError, create_app
+    from services.api.composition import PlatformDependencies
+
+    events: list[str] = []
+    resources = (
+        _TrackedLifecycle("first", events),
+        _UnstoppableLifecycle("second", events),
+        _TrackedLifecycle("third", events),
+    )
+    app = create_app(
+        _settings(),
+        PlatformDependencies.for_test(
+            lifecycle_resources=resources,
+            lifecycle_stop_timeout_seconds=0.02,
+            lifecycle_cleanup_timeout_seconds=0.08,
+        ),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(LifecycleError):
+        with TestClient(app):
+            pass
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15
+    assert events == [
+        "start:first",
+        "start:second",
+        "start:third",
+        "stop:third",
+        "stop:second",
+        "stop:first",
+    ]
+
+
+def test_partial_startup_cleanup_bounds_uncooperative_started_resource() -> None:
+    from services.api.app import LifecycleError, create_app
+    from services.api.composition import PlatformDependencies
+
+    events: list[str] = []
+    resources = (
+        _UnstoppableLifecycle("first", events),
+        _TrackedLifecycle("second", events, start_failure=RuntimeError("private startup token")),
+    )
+    app = create_app(
+        _settings(),
+        PlatformDependencies.for_test(
+            lifecycle_resources=resources,
+            lifecycle_stop_timeout_seconds=0.02,
+            lifecycle_cleanup_timeout_seconds=0.04,
+        ),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(LifecycleError) as captured:
+        with TestClient(app):
+            pass
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.10
+    assert events == ["start:first", "start:second", "stop:first"]
+    assert str(captured.value) == "Platform lifecycle startup failed."
+
+
 def test_untrusted_forwarded_and_browser_identity_headers_are_ignored() -> None:
     from services.api.app import create_app
     from services.api.composition import PlatformDependencies
@@ -431,20 +496,18 @@ class _HungReadiness:
             self.cancelled = True
 
 
-class _CancellationResistantReadiness:
+class _UnstoppableReadiness:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.cancellations = 0
+        self.calls = 0
 
     async def check(self) -> bool:
+        self.calls += 1
         while True:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                self.cancellations += 1
-                if self.cancellations == 1:
-                    continue
-                raise
+                continue
 
 
 class _Lifecycle:
@@ -481,3 +544,13 @@ class _TrackedLifecycle:
         self.events.append(f"stop:{self.name}")
         if self.stop_failure is not None:
             raise self.stop_failure
+
+
+class _UnstoppableLifecycle(_TrackedLifecycle):
+    async def stop(self) -> None:
+        self.events.append(f"stop:{self.name}")
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                continue
