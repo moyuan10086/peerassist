@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from peerassist.platform.errors import IdempotencyConflict, StaleVersion
+from peerassist.platform.errors import IdempotencyConflict, NotFound, StaleVersion
 from peerassist.platform.idempotency import canonical_json_digest
 from peerassist.platform.models import (
     Actor,
@@ -16,9 +16,13 @@ from peerassist.platform.models import (
     CommandRecord,
     ExternalIdentity,
     OidcTransaction,
+    Paper,
+    PaperVersion,
     Project,
+    ProjectMembership,
     ReviewEvent,
     ReviewJob,
+    Role,
     TenantScope,
     User,
 )
@@ -49,6 +53,38 @@ def job(scope: TenantScope, now, *, version: int = 1) -> ReviewJob:
         now,
         now,
     )
+
+
+def paper(scope: TenantScope, now) -> tuple[Paper, PaperVersion]:
+    assert scope.project_id is not None
+    paper_id = uuid4()
+    version_id = uuid4()
+    digest = "a" * 64
+    aggregate = Paper(
+        paper_id,
+        scope.organization_id,
+        scope.project_id,
+        digest,
+        version_id,
+        "active",
+        1,
+        now,
+        now,
+    )
+    version = PaperVersion(
+        version_id,
+        scope.organization_id,
+        scope.project_id,
+        paper_id,
+        "object-1",
+        "paper.pdf",
+        "application/pdf",
+        3,
+        digest,
+        uuid4(),
+        now,
+    )
+    return aggregate, version
 
 
 def test_commit_persists_and_rollback_discards_all_transactional_state(uow_factory, clock) -> None:
@@ -100,6 +136,41 @@ def test_tenant_predicates_hide_cross_tenant_rows_and_lists(uow_factory, clock) 
         assert uow.projects.get(visible_scope) == aggregate
 
 
+def test_project_resources_require_exact_organization_and_project_scope(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    other_project = TenantScope(scope.organization_id, uuid4())
+    other_organization = TenantScope(uuid4(), scope.project_id)
+    organization_only = TenantScope(scope.organization_id)
+    aggregate = project(scope, clock())
+    manuscript, manuscript_version = paper(scope, clock())
+    review = job(scope, clock())
+    event = ReviewEvent(
+        uuid4(), scope.organization_id, scope.project_id, review.id, 1, "queued", 1, {}, clock()
+    )
+    with uow_factory(principal) as uow:
+        uow.projects.add(scope, aggregate)
+        uow.papers.add(scope, manuscript, manuscript_version)
+        uow.review_jobs.add(scope, review)
+        uow.review_jobs.append_event(scope, event)
+        uow.commit()
+
+    for hidden_scope in (organization_only, other_project, other_organization):
+        with uow_factory(principal) as uow:
+            assert uow.projects.get(hidden_scope) is None
+            assert tuple(uow.projects.list(hidden_scope)) == ()
+            assert uow.papers.get(hidden_scope, manuscript.id) is None
+            assert tuple(uow.papers.list(hidden_scope)) == ()
+            assert uow.papers.find_by_content_digest(hidden_scope, manuscript.content_sha256) is None
+            assert uow.review_jobs.get(hidden_scope, review.id) is None
+            assert tuple(uow.review_jobs.list(hidden_scope)) == ()
+            assert uow.review_jobs.list_events(hidden_scope, review.id) == ()
+
+    with uow_factory(principal) as uow:
+        with pytest.raises(NotFound):
+            uow.review_jobs.add(organization_only, replace(review, id=uuid4()))
+
+
 def test_optimistic_save_is_compare_and_swap(uow_factory, clock) -> None:
     principal = actor()
     scope = TenantScope(uuid4(), uuid4())
@@ -115,6 +186,76 @@ def test_optimistic_save_is_compare_and_swap(uow_factory, clock) -> None:
         uow.commit()
     with uow_factory(principal) as uow:
         assert uow.projects.get(scope) == updated
+
+
+@pytest.mark.parametrize("replacement_version", [1, 3, 9])
+def test_optimistic_save_requires_exactly_one_version_increment(
+    uow_factory, clock, replacement_version
+) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    original_project = project(scope, clock())
+    original_job = job(scope, clock())
+    membership = ProjectMembership(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        uuid4(),
+        Role.REVIEWER,
+        "active",
+        1,
+        clock(),
+        clock(),
+    )
+    with uow_factory(principal) as uow:
+        uow.projects.add(scope, original_project)
+        uow.review_jobs.add(scope, original_job)
+        uow.projects.save_membership(scope, membership, expected_version=None)
+        uow.commit()
+
+    with uow_factory(principal) as uow:
+        with pytest.raises(StaleVersion):
+            uow.projects.save(
+                scope, replace(original_project, version=replacement_version), expected_version=1
+            )
+        with pytest.raises(StaleVersion):
+            uow.review_jobs.save(
+                scope, replace(original_job, version=replacement_version), expected_version=1
+            )
+        with pytest.raises(StaleVersion):
+            uow.projects.save_membership(
+                scope, replace(membership, version=replacement_version), expected_version=1
+            )
+
+
+def test_creates_require_initial_version_and_paper_revision_progresses_one_step(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    manuscript, initial_version = paper(scope, clock())
+    with uow_factory(principal) as uow:
+        with pytest.raises(StaleVersion):
+            uow.projects.add(scope, project(scope, clock(), version=2))
+        with pytest.raises(StaleVersion):
+            uow.review_jobs.add(scope, job(scope, clock(), version=2))
+        uow.papers.add(scope, manuscript, initial_version)
+        with pytest.raises(StaleVersion):
+            uow.papers.add_version(
+                scope, replace(initial_version, id=uuid4(), revision=3), expected_paper_version=1
+            )
+
+
+def test_optimistic_save_rejects_a_lower_replacement_version(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    original = project(scope, clock())
+    version_two = replace(original, version=2)
+    with uow_factory(principal) as uow:
+        uow.projects.add(scope, original)
+        uow.projects.save(scope, version_two, expected_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        with pytest.raises(StaleVersion):
+            uow.projects.save(scope, original, expected_version=2)
 
 
 def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clock) -> None:
@@ -153,6 +294,97 @@ def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clo
         changed = replace(completed, id=uuid4(), payload_digest=canonical_json_digest({"name": "Beta"}))
         with pytest.raises(IdempotencyConflict):
             uow.commands.reserve_or_replay(scope, changed)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"id": uuid4()},
+        {"actor_id": uuid4()},
+        {"operation": "project.delete"},
+        {"idempotency_key": "changed-key"},
+        {"payload_digest": "f" * 64},
+        {"created_at": "changed"},
+    ],
+)
+def test_command_completion_cannot_replace_reserved_identity(uow_factory, clock, replacement) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    record = CommandRecord(
+        uuid4(),
+        scope.organization_id,
+        principal.actor_id,
+        "project.create",
+        "same-key",
+        "a" * 64,
+        clock(),
+        project_id=scope.project_id,
+    )
+    completed = replace(record, response_status=201, response_body={}, completed_at=clock())
+    if replacement.get("created_at") == "changed":
+        replacement = {"created_at": clock() + timedelta(seconds=1)}
+    with uow_factory(principal) as uow:
+        uow.commands.reserve(scope, record)
+        with pytest.raises(IdempotencyConflict):
+            uow.commands.complete(scope, replace(completed, **replacement))
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) == record
+        uow.commands.complete(scope, completed)
+        uow.rollback()
+    with uow_factory(principal) as uow:
+        assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) == record
+
+
+def test_command_completion_requires_exact_scope_and_rollbacks_remain_invisible(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    record = CommandRecord(
+        uuid4(),
+        scope.organization_id,
+        principal.actor_id,
+        "project.create",
+        "same-key",
+        "a" * 64,
+        clock(),
+        project_id=scope.project_id,
+    )
+    completed = replace(record, response_status=201, response_body={}, completed_at=clock())
+    with uow_factory(principal) as uow:
+        uow.commands.reserve(scope, record)
+        uow.rollback()
+    with uow_factory(principal) as uow:
+        assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) is None
+        uow.commands.reserve(scope, record)
+        with pytest.raises(NotFound):
+            uow.commands.complete(TenantScope(scope.organization_id, uuid4()), completed)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) == record
+
+
+def test_command_reservation_cannot_replace_reserved_identity(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    record = CommandRecord(
+        uuid4(),
+        scope.organization_id,
+        principal.actor_id,
+        "project.create",
+        "same-key",
+        "a" * 64,
+        clock(),
+        project_id=scope.project_id,
+    )
+    with uow_factory(principal) as uow:
+        uow.commands.reserve(scope, record)
+        with pytest.raises(IdempotencyConflict):
+            uow.commands.reserve(scope, replace(record, id=uuid4()))
+        with pytest.raises(IdempotencyConflict):
+            uow.commands.reserve_or_replay(scope, replace(record, id=uuid4()))
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) == record
 
 
 def test_aggregate_events_are_strictly_ordered_and_unique(uow_factory, clock) -> None:

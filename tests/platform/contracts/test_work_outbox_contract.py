@@ -6,11 +6,14 @@ from uuid import uuid4
 
 import pytest
 
+from peerassist.platform.errors import NotFound
 from peerassist.platform.models import (
     Action,
     Actor,
     ActorKind,
+    Artifact,
     AuditEvent,
+    ObjectDescriptor,
     OutboxEvent,
     TenantScope,
     WorkItem,
@@ -161,3 +164,97 @@ def test_audit_is_append_only_and_tenant_scoped(uow_factory, clock) -> None:
         assert not hasattr(uow.audit, "delete")
         with pytest.raises(ValueError, match="append-only"):
             uow.audit.append(scope, event)
+
+
+def test_project_work_outbox_artifacts_and_audit_reject_organization_only_scope(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    organization_only = TenantScope(scope.organization_id)
+    other_project = TenantScope(scope.organization_id, uuid4())
+    other_organization = TenantScope(uuid4(), scope.project_id)
+    item = work(scope, clock())
+    event = outbox(scope, clock())
+    artifact = Artifact(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        item.job_id,
+        "report",
+        ObjectDescriptor("object-1", 3, "a" * 64, "application/pdf"),
+        "ready",
+        clock(),
+    )
+    audit = AuditEvent(
+        uuid4(),
+        principal.actor_id,
+        scope.organization_id,
+        Action.REVIEW_JOB_CREATE,
+        "review_job",
+        item.job_id,
+        "allowed",
+        "request-2",
+        clock(),
+        project_id=scope.project_id,
+    )
+    with uow_factory(principal) as uow:
+        uow.work_items.enqueue(scope, item)
+        uow.outbox.append(scope, event)
+        uow.artifacts.add(scope, artifact)
+        uow.audit.append(scope, audit)
+        uow.commit()
+
+    for hidden_scope in (organization_only, other_project, other_organization):
+        with uow_factory(principal) as uow:
+            assert uow.work_items.get(hidden_scope, item.id) is None
+            assert uow.work_items.claim(hidden_scope, "worker", 30) is None
+            assert uow.outbox.claim_batch(hidden_scope, 10) == ()
+            assert uow.artifacts.get(hidden_scope, artifact.id) is None
+            assert tuple(uow.artifacts.list_for_job(hidden_scope, item.job_id)) == ()
+            assert tuple(uow.audit.list(hidden_scope)) == ()
+
+    with uow_factory(principal) as uow:
+        for operation in (
+            lambda: uow.work_items.enqueue(organization_only, replace(item, id=uuid4())),
+            lambda: uow.outbox.append(organization_only, replace(event, id=uuid4())),
+            lambda: uow.artifacts.add(organization_only, replace(artifact, id=uuid4())),
+            lambda: uow.audit.append(organization_only, replace(audit, id=uuid4())),
+        ):
+            with pytest.raises(NotFound):
+                operation()
+
+
+def test_organization_scoped_outbox_and_audit_are_visible_only_to_exact_org_scope(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4())
+    event = OutboxEvent(
+        uuid4(),
+        scope.organization_id,
+        "organization",
+        scope.organization_id,
+        1,
+        "organization.created",
+        1,
+        {},
+        clock(),
+    )
+    audit = AuditEvent(
+        uuid4(),
+        principal.actor_id,
+        scope.organization_id,
+        Action.ORGANIZATION_MANAGE_MEMBERS,
+        "organization",
+        scope.organization_id,
+        "allowed",
+        "request-org",
+        clock(),
+    )
+    with uow_factory(principal) as uow:
+        uow.outbox.append(scope, event)
+        uow.audit.append(scope, audit)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.outbox.claim_batch(scope, 10) == (replace(event, publication_attempts=1),)
+        assert tuple(uow.audit.list(scope)) == (audit,)
+        project_scope = TenantScope(scope.organization_id, uuid4())
+        assert uow.outbox.claim_batch(project_scope, 10) == ()
+        assert tuple(uow.audit.list(project_scope)) == ()

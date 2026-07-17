@@ -63,17 +63,28 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _scope_matches(scope: TenantScope, organization_id: UUID, project_id: UUID | None) -> bool:
-    return scope.organization_id == organization_id and (
-        scope.project_id is None or scope.project_id == project_id
+def _organization_scope_matches(scope: TenantScope, organization_id: UUID) -> bool:
+    return scope.organization_id == organization_id
+
+
+def _project_scope_matches(scope: TenantScope, organization_id: UUID, project_id: UUID | None) -> bool:
+    return (
+        scope.project_id is not None
+        and project_id is not None
+        and scope.organization_id == organization_id
+        and scope.project_id == project_id
     )
 
 
-def _require_scope(scope: TenantScope, value: _TenantOwned) -> None:
+def _record_scope_matches(scope: TenantScope, organization_id: UUID, project_id: UUID | None) -> bool:
+    return scope.organization_id == organization_id and scope.project_id == project_id
+
+
+def _require_project_scope(scope: TenantScope, value: _TenantOwned) -> None:
     project_id = getattr(value, "project_id", None)
     if isinstance(value, Project):
         project_id = value.id
-    if not _scope_matches(
+    if not _project_scope_matches(
         scope,
         value.organization_id,
         project_id,
@@ -140,7 +151,9 @@ class _Organizations:
         return self._state.organizations.get(scope.organization_id)
 
     def add(self, scope: TenantScope, organization: Organization) -> None:
-        _require_scope(scope, organization)
+        if not _organization_scope_matches(scope, organization.id):
+            raise NotFound()
+        _require_initial_version(organization)
         self._state.organizations[organization.id] = organization
 
     def get_membership(self, scope: TenantScope, user_id: UUID) -> OrganizationMembership | None:
@@ -152,18 +165,39 @@ class _Organizations:
         membership: OrganizationMembership,
         expected_version: int | None,
     ) -> None:
-        _require_scope(scope, membership)
+        if not _organization_scope_matches(scope, membership.organization_id):
+            raise NotFound()
         key = (membership.organization_id, membership.user_id)
         current = self._state.organization_memberships.get(key)
-        _check_version(current, expected_version)
+        _check_replacement_version(current, membership, expected_version)
         self._state.organization_memberships[key] = membership
 
 
-def _check_version(current: object | None, expected_version: int | None) -> None:
+def _check_current_version(current: object | None, expected_version: int | None) -> None:
     current_version = getattr(current, "version", None)
     if current_version != expected_version:
         raise StaleVersion(
             details={"expected_version": expected_version, "current_version": current_version},
+        )
+
+
+def _require_initial_version(value: object) -> None:
+    if getattr(value, "version", None) != 1:
+        raise StaleVersion(details={"expected_version": 1, "current_version": None})
+
+
+def _check_replacement_version(
+    current: object | None, replacement: object, expected_version: int | None
+) -> None:
+    _check_current_version(current, expected_version)
+    replacement_version = getattr(replacement, "version", None)
+    required_version = 1 if expected_version is None else expected_version + 1
+    if replacement_version != required_version:
+        raise StaleVersion(
+            details={
+                "expected_version": required_version,
+                "current_version": replacement_version,
+            }
         )
 
 
@@ -177,7 +211,7 @@ class _Projects:
         project = self._state.projects.get(scope.project_id)
         return (
             project
-            if project is not None and _scope_matches(scope, project.organization_id, project.id)
+            if project is not None and _project_scope_matches(scope, project.organization_id, project.id)
             else None
         )
 
@@ -185,17 +219,18 @@ class _Projects:
         return tuple(
             item
             for item in self._state.projects.values()
-            if _scope_matches(scope, item.organization_id, item.id)
+            if _project_scope_matches(scope, item.organization_id, item.id)
         )
 
     def add(self, scope: TenantScope, project: Project) -> None:
-        _require_scope(scope, project)
+        _require_project_scope(scope, project)
+        _require_initial_version(project)
         self._state.projects[project.id] = project
 
     def save(self, scope: TenantScope, project: Project, expected_version: int) -> None:
-        _require_scope(scope, project)
+        _require_project_scope(scope, project)
         current = self.get(scope)
-        _check_version(current, expected_version)
+        _check_replacement_version(current, project, expected_version)
         self._state.projects[project.id] = project
 
     def get_membership(self, scope: TenantScope, user_id: UUID) -> ProjectMembership | None:
@@ -204,7 +239,7 @@ class _Projects:
         item = self._state.project_memberships.get((scope.project_id, user_id))
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
@@ -214,9 +249,9 @@ class _Projects:
         membership: ProjectMembership,
         expected_version: int | None,
     ) -> None:
-        _require_scope(scope, membership)
+        _require_project_scope(scope, membership)
         key = (membership.project_id, membership.user_id)
-        _check_version(self._state.project_memberships.get(key), expected_version)
+        _check_replacement_version(self._state.project_memberships.get(key), membership, expected_version)
         self._state.project_memberships[key] = membership
 
 
@@ -228,7 +263,7 @@ class _Papers:
         item = self._state.papers.get(paper_id)
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
@@ -239,21 +274,31 @@ class _Papers:
         return tuple(
             item
             for item in self._state.papers.values()
-            if _scope_matches(scope, item.organization_id, item.project_id)
+            if _project_scope_matches(scope, item.organization_id, item.project_id)
         )
 
     def add(self, scope: TenantScope, paper: Paper, version: PaperVersion) -> None:
-        _require_scope(scope, paper)
-        _require_scope(scope, version)
+        _require_project_scope(scope, paper)
+        _require_project_scope(scope, version)
+        _require_initial_version(paper)
+        if version.revision != 1:
+            raise StaleVersion(details={"expected_version": 1, "current_version": version.revision})
         if version.paper_id != paper.id or version.id != paper.current_version_id:
             raise ValueError("paper and initial version do not match")
         self._state.papers[paper.id] = paper
         self._state.paper_versions[version.id] = version
 
     def add_version(self, scope: TenantScope, version: PaperVersion, expected_paper_version: int) -> None:
-        _require_scope(scope, version)
+        _require_project_scope(scope, version)
         paper = self.get(scope, version.paper_id)
-        _check_version(paper, expected_paper_version)
+        _check_current_version(paper, expected_paper_version)
+        if version.revision != expected_paper_version + 1:
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_paper_version + 1,
+                    "current_version": version.revision,
+                }
+            )
         self._state.paper_versions[version.id] = version
 
 
@@ -265,7 +310,7 @@ class _ReviewJobs:
         item = self._state.review_jobs.get(job_id)
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
@@ -273,20 +318,21 @@ class _ReviewJobs:
         return tuple(
             item
             for item in self._state.review_jobs.values()
-            if _scope_matches(scope, item.organization_id, item.project_id)
+            if _project_scope_matches(scope, item.organization_id, item.project_id)
         )
 
     def add(self, scope: TenantScope, job: ReviewJob) -> None:
-        _require_scope(scope, job)
+        _require_project_scope(scope, job)
+        _require_initial_version(job)
         self._state.review_jobs[job.id] = job
 
     def save(self, scope: TenantScope, job: ReviewJob, expected_version: int) -> None:
-        _require_scope(scope, job)
-        _check_version(self.get(scope, job.id), expected_version)
+        _require_project_scope(scope, job)
+        _check_replacement_version(self.get(scope, job.id), job, expected_version)
         self._state.review_jobs[job.id] = job
 
     def append_event(self, scope: TenantScope, event: ReviewEvent) -> None:
-        _require_scope(scope, event)
+        _require_project_scope(scope, event)
         events = self._state.review_events.setdefault(event.job_id, [])
         expected = len(events) + 1
         if event.aggregate_sequence != expected:
@@ -297,7 +343,7 @@ class _ReviewJobs:
         return tuple(
             event
             for event in self._state.review_events.get(job_id, [])
-            if _scope_matches(scope, event.organization_id, event.project_id)
+            if _project_scope_matches(scope, event.organization_id, event.project_id)
         )
 
 
@@ -309,7 +355,7 @@ class _Artifacts:
         item = self._state.artifacts.get(artifact_id)
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
@@ -317,11 +363,11 @@ class _Artifacts:
         return tuple(
             item
             for item in self._state.artifacts.values()
-            if item.job_id == job_id and _scope_matches(scope, item.organization_id, item.project_id)
+            if item.job_id == job_id and _project_scope_matches(scope, item.organization_id, item.project_id)
         )
 
     def add(self, scope: TenantScope, artifact: Artifact) -> None:
-        _require_scope(scope, artifact)
+        _require_project_scope(scope, artifact)
         self._state.artifacts[artifact.id] = artifact
 
 
@@ -339,34 +385,52 @@ class _Commands:
         item = self._state.commands.get(self._key(scope, actor_id, operation, idempotency_key))
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _record_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
     def reserve(self, scope: TenantScope, command: CommandRecord) -> None:
-        _require_scope(scope, command)
+        if not _record_scope_matches(scope, command.organization_id, command.project_id):
+            raise NotFound()
         key = self._key(scope, command.actor_id, command.operation, command.idempotency_key)
         existing = self._state.commands.get(key)
-        if existing is not None and existing.payload_digest != command.payload_digest:
-            raise IdempotencyConflict()
-        if existing is None:
-            self._state.commands[key] = command
+        identity = self._identity(command)
+        if existing is not None:
+            if self._identity(existing) != identity:
+                raise IdempotencyConflict()
+            return
+        self._state.commands[key] = command
 
     def reserve_or_replay(self, scope: TenantScope, command: CommandRecord) -> CommandRecord:
         existing = self.get(scope, command.actor_id, command.operation, command.idempotency_key)
         if existing is None:
             self.reserve(scope, command)
             return command
-        if existing.payload_digest != command.payload_digest:
+        if self._identity(existing) != self._identity(command):
             raise IdempotencyConflict()
         return existing
 
     def complete(self, scope: TenantScope, command: CommandRecord) -> None:
+        if not _record_scope_matches(scope, command.organization_id, command.project_id):
+            raise NotFound()
         key = self._key(scope, command.actor_id, command.operation, command.idempotency_key)
         existing = self._state.commands.get(key)
-        if existing is None or existing.id != command.id or existing.payload_digest != command.payload_digest:
+        if existing is None or self._identity(existing) != self._identity(command):
             raise IdempotencyConflict()
         self._state.commands[key] = command
+
+    @staticmethod
+    def _identity(command: CommandRecord) -> tuple[object, ...]:
+        return (
+            command.id,
+            command.organization_id,
+            command.project_id,
+            command.actor_id,
+            command.operation,
+            command.idempotency_key,
+            command.payload_digest,
+            command.created_at,
+        )
 
 
 class _WorkItems:
@@ -375,7 +439,7 @@ class _WorkItems:
         self._clock = clock
 
     def enqueue(self, scope: TenantScope, item: WorkItem) -> None:
-        _require_scope(scope, item)
+        _require_project_scope(scope, item)
         dedupe = (item.job_id, item.attempt_id, item.stage, item.input_revision)
         if any(
             (current.job_id, current.attempt_id, current.stage, current.input_revision) == dedupe
@@ -388,7 +452,7 @@ class _WorkItems:
         item = self._state.work_items.get(item_id)
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
@@ -399,7 +463,7 @@ class _WorkItems:
             key=lambda value: (value.available_at, value.created_at, value.id.int),
         ):
             if (
-                not _scope_matches(scope, item.organization_id, item.project_id)
+                not _project_scope_matches(scope, item.organization_id, item.project_id)
                 or item.dead_lettered_at is not None
             ):
                 continue
@@ -465,7 +529,8 @@ class _Outbox:
         self._clock = clock
 
     def append(self, scope: TenantScope, event: OutboxEvent) -> None:
-        _require_scope(scope, event)
+        if not _record_scope_matches(scope, event.organization_id, event.project_id):
+            raise NotFound()
         if event.id in self._state.outbox:
             raise ValueError("outbox event already exists")
         self._state.outbox[event.id] = event
@@ -475,7 +540,8 @@ class _Outbox:
             (
                 item
                 for item in self._state.outbox.values()
-                if item.published_at is None and _scope_matches(scope, item.organization_id, item.project_id)
+                if item.published_at is None
+                and _record_scope_matches(scope, item.organization_id, item.project_id)
             ),
             key=lambda item: (item.created_at, item.aggregate_id.int, item.aggregate_sequence, item.id.int),
         )[:limit]
@@ -487,7 +553,7 @@ class _Outbox:
 
     def mark_published(self, scope: TenantScope, event_id: UUID) -> None:
         item = self._state.outbox.get(event_id)
-        if item is None or not _scope_matches(scope, item.organization_id, item.project_id):
+        if item is None or not _record_scope_matches(scope, item.organization_id, item.project_id):
             raise NotFound()
         if item.published_at is None:
             self._state.outbox[event_id] = replace(item, published_at=self._clock())
@@ -498,7 +564,8 @@ class _Audit:
         self._state = state
 
     def append(self, scope: TenantScope, event: AuditEvent) -> None:
-        _require_scope(scope, event)
+        if not _record_scope_matches(scope, event.organization_id, event.project_id):
+            raise NotFound()
         if any(existing.id == event.id for existing in self._state.audits):
             raise ValueError("audit records are append-only and event IDs are unique")
         self._state.audits.append(event)
@@ -507,7 +574,7 @@ class _Audit:
         return tuple(
             item
             for item in self._state.audits
-            if _scope_matches(scope, item.organization_id, item.project_id)
+            if _record_scope_matches(scope, item.organization_id, item.project_id)
         )
 
 
@@ -519,12 +586,12 @@ class _LegacyRegistrations:
         item = self._state.legacy_registrations.get(registration_id)
         return (
             item
-            if item is not None and _scope_matches(scope, item.organization_id, item.project_id)
+            if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
 
     def add(self, scope: TenantScope, registration: LegacyRegistration) -> None:
-        _require_scope(scope, registration)
+        _require_project_scope(scope, registration)
         self._state.legacy_registrations[registration.id] = registration
 
 
