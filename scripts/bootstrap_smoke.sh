@@ -33,6 +33,7 @@ fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 export COMPOSE_PROJECT_NAME="peerassist-smoke-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-0}"
+export PEERASSIST_WORKSPACE_BIND_PORT=0
 response_headers="$(mktemp)"
 response_body="$(mktemp)"
 expected_body="$(mktemp)"
@@ -53,12 +54,13 @@ source .venv/bin/activate
 python scripts/verify_repository.py all
 
 docker compose -f infrastructure/compose/compose.yml up -d --build
+workspace_address="$(docker compose -f "$COMPOSE_FILE" port workspace 8766)"
 healthy=0
 for _ in $(seq 1 60); do
   running_services="$(docker compose -f "$COMPOSE_FILE" ps --status running --services)"
   if grep -Fxq "review-api" <<<"$running_services" \
     && grep -Fxq "workspace" <<<"$running_services" \
-    && curl --fail --silent http://127.0.0.1:8766/api/health >/dev/null; then
+    && curl --fail --silent "http://$workspace_address/api/health" >/dev/null; then
     healthy=1
     break
   fi
@@ -70,7 +72,7 @@ curl --silent --show-error --fail \
   --range 0-1023 \
   --dump-header "$response_headers" \
   --output "$response_body" \
-  http://127.0.0.1:8766/paper.pdf
+  "http://$workspace_address/paper.pdf"
 grep -Eq '^HTTP/[^ ]+ 206([[:space:]]|$)' "$response_headers"
 grep -Eqi '^Content-Range: bytes 0-1023/' "$response_headers"
 test "$(wc -c < "$response_body")" -eq 1024

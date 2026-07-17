@@ -25,7 +25,9 @@ def test_compose_exposes_only_workspace_on_loopback() -> None:
 
     assert set(services) == {"review-api", "workspace"}
     assert "ports" not in services["review-api"]
-    assert services["workspace"]["ports"] == ["127.0.0.1:8766:8766"]
+    assert services["workspace"]["ports"] == [
+        "127.0.0.1:${PEERASSIST_WORKSPACE_BIND_PORT:-8766}:8766"
+    ]
     assert services["workspace"]["environment"]["PEERASSIST_REVIEW_API_URL"] == (
         "http://review-api:8767"
     )
