@@ -1,0 +1,101 @@
+"""Settings-driven provider construction for the API boundary."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from common.config import PlatformSettings
+from peerassist.platform.adapters.memory import (
+    FakeIdentityProvider,
+    MemoryObjectStore,
+    MemoryUnitOfWorkFactory,
+)
+from peerassist.platform.ports import IdentityProvider, ObjectStore, UnitOfWorkFactory
+
+from .dependencies import LifecycleResource, ReadinessCheck
+
+_SAFE_DEPENDENCY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+class CompositionError(RuntimeError):
+    """Raised when the selected environment cannot be composed safely."""
+
+
+@dataclass(frozen=True)
+class _Ready:
+    name: str
+
+    async def check(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class PlatformDependencies:
+    """Provider-neutral dependencies owned by one FastAPI application."""
+
+    uow_factory: UnitOfWorkFactory
+    identity_provider: IdentityProvider
+    object_store: ObjectStore
+    readiness_checks: tuple[ReadinessCheck, ...]
+    lifecycle_resources: tuple[LifecycleResource, ...] = ()
+
+    def __post_init__(self) -> None:
+        names = [check.name for check in self.readiness_checks]
+        if any(_SAFE_DEPENDENCY_NAME.fullmatch(name) is None for name in names):
+            raise ValueError("readiness dependency names must be public-safe identifiers")
+        if len(names) != len(set(names)):
+            raise ValueError("readiness dependency names must be unique")
+
+    @classmethod
+    def for_test(
+        cls,
+        *,
+        readiness_checks: tuple[ReadinessCheck, ...] | None = None,
+        lifecycle_resources: tuple[LifecycleResource, ...] = (),
+    ) -> PlatformDependencies:
+        return _memory_dependencies(
+            issuer="http://identity.test/realms/peerassist",
+            audience="peerassist-api",
+            algorithms=frozenset({"RS256"}),
+            readiness_checks=readiness_checks,
+            lifecycle_resources=lifecycle_resources,
+        )
+
+
+def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
+    """Build explicitly selected adapters, failing closed in production."""
+
+    if settings.environment == "production":
+        raise CompositionError("Production platform providers are not implemented.")
+    return _memory_dependencies(
+        issuer=settings.oidc_issuer,
+        audience=settings.oidc_audience,
+        algorithms=frozenset(settings.oidc_algorithms),
+    )
+
+
+def _memory_dependencies(
+    *,
+    issuer: str,
+    audience: str,
+    algorithms: frozenset[str],
+    readiness_checks: tuple[ReadinessCheck, ...] | None = None,
+    lifecycle_resources: tuple[LifecycleResource, ...] = (),
+) -> PlatformDependencies:
+    checks = readiness_checks or (
+        _Ready("database"),
+        _Ready("identity"),
+        _Ready("object_store"),
+    )
+    return PlatformDependencies(
+        uow_factory=MemoryUnitOfWorkFactory(),
+        identity_provider=FakeIdentityProvider(
+            issuer=issuer,
+            audience=audience,
+            accepted_algorithms=algorithms,
+        ),
+        object_store=MemoryObjectStore(),
+        readiness_checks=checks,
+        lifecycle_resources=lifecycle_resources,
+    )

@@ -1,1 +1,1 @@
-"""FastAPI composition root package."""
+"""FastAPI composition root for the PeerAssist platform boundary."""
