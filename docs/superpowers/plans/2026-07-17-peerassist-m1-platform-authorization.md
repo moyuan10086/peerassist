@@ -38,6 +38,8 @@ bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
 source "$M1_ENV_FILE"
 trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
 bash scripts/m1_test_env.sh up "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
 bash scripts/m1_test_env.sh wait "$M1_ENV_FILE"
 ```
 
@@ -352,6 +354,7 @@ git commit -m "feat: add FastAPI platform boundary"
 - Create: `infrastructure/minio/bootstrap.sh`
 - Create: `scripts/m1_test_env.sh`
 - Create: `tests/repository/test_m1_provider_harness.py`
+- Modify: `docs/superpowers/plans/2026-07-17-peerassist-m1-platform-authorization.md`
 
 - [ ] **Step 1: Write failing harness contracts**
 
@@ -368,11 +371,14 @@ PYTHONPATH=src:. .venv/bin/pytest -q tests/repository/test_m1_provider_harness.p
 
 - [ ] **Step 3: Implement the bounded integration harness**
 
-`scripts/m1_test_env.sh create` writes generated credentials to a caller-supplied mode-0600 file;
-`source <file>` exports every concrete provider variable; `up|wait|down` acts only on a generated
-Compose project name, and `down` removes its volumes and env file. Keycloak imports a realm/client
-template and MinIO creates a private immutable-artifact bucket. No service publishes a public host
-port; loopback ephemeral ports may be used only for the test process.
+`scripts/m1_test_env.sh create` safely replaces a caller-owned, mode-0600, empty regular `mktemp`
+target with generated credentials and unresolved loopback endpoints marked
+`M1_TEST_ENDPOINTS_READY=0`. `up` resolves Compose-assigned ports, atomically refreshes the file with
+`M1_TEST_ENDPOINTS_READY=1`, and every consumer re-sources the file and calls `require-ready` before
+`wait` or pytest. `up|wait|down` acts only on a generated Compose project name, and `down` removes
+its volumes and env file. Keycloak imports a realm/client template and MinIO creates a private
+immutable-artifact bucket. No service publishes a public host port; loopback ephemeral ports may be
+used only for the test process.
 
 - [ ] **Step 4: Prove provider readiness and cleanup**
 
@@ -380,18 +386,24 @@ port; loopback ephemeral ports may be used only for the test process.
 M1_ENV_FILE="$(mktemp)"
 bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
 source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
 bash scripts/m1_test_env.sh up "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
 bash scripts/m1_test_env.sh wait "$M1_ENV_FILE"
-test -n "$M1_TEST_DATABASE_URL" && test -n "$M1_TEST_OIDC_ISSUER" && \
+test "$M1_TEST_ENDPOINTS_READY" = 1 && test -n "$M1_TEST_DATABASE_URL" && \
+  test -n "$M1_TEST_OIDC_ISSUER" && \
   test -n "$M1_TEST_S3_ENDPOINT"
 bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add -- infrastructure/compose/compose.m1.test.yml infrastructure/keycloak \
-  infrastructure/minio scripts/m1_test_env.sh tests/repository/test_m1_provider_harness.py
+  infrastructure/minio scripts/m1_test_env.sh tests/repository/test_m1_provider_harness.py \
+  docs/superpowers/plans/2026-07-17-peerassist-m1-platform-authorization.md
 git commit -m "test: add ephemeral M1 provider harness"
 ```
 
@@ -435,6 +447,8 @@ M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
 source "$M1_ENV_FILE"
 trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
 bash scripts/m1_test_env.sh up "$M1_ENV_FILE" postgres
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
 bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" postgres
 PEERASSIST_TEST_DATABASE_URL="$M1_TEST_DATABASE_URL" \
   PYTHONPATH=src .venv/bin/pytest -q -m requires_docker \
@@ -470,10 +484,19 @@ Parametrize repository/work/outbox contracts with a transaction-clean PostgreSQL
 16-thread/process idempotency tests and competing `SKIP LOCKED` claims.
 
 ```bash
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" postgres
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" postgres
 PEERASSIST_TEST_DATABASE_URL="$M1_TEST_DATABASE_URL" PYTHONPATH=src \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/integration/test_postgres_repository_contract.py \
   tests/platform/integration/test_postgres_concurrency.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 Expected: FAIL before adapter implementation.
@@ -490,8 +513,17 @@ domain errors without SQL text leakage. Complete the PostgreSQL UoW/repository p
 
 ```bash
 PYTHONPATH=src .venv/bin/pytest -q tests/platform/contracts --adapter=memory
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" postgres
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" postgres
 PEERASSIST_TEST_DATABASE_URL="$M1_TEST_DATABASE_URL" PYTHONPATH=src \
   .venv/bin/pytest -q -m requires_docker tests/platform/integration/test_postgres_*.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 4: Commit**
@@ -603,11 +635,20 @@ the configured discovery/JWKS adapter and fail closed on missing identity settin
 ```bash
 PYTHONPATH=src .venv/bin/pytest -q tests/platform/test_oidc_adapter.py \
   tests/platform/contracts/test_identity_contract.py --adapter=fake
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" keycloak
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" keycloak callback-reservation
 PEERASSIST_TEST_OIDC_ISSUER="$M1_TEST_OIDC_ISSUER" PYTHONPATH=src \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/contracts/test_identity_contract.py --adapter=keycloak \
   tests/platform/integration/test_keycloak_identity_contract.py \
   tests/platform/test_composition.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 5: Commit**
@@ -659,9 +700,18 @@ public actor dependencies.
 
 ```bash
 PYTHONPATH=src:. .venv/bin/pytest -q tests/platform/test_auth_*.py
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" keycloak
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" keycloak callback-reservation
 PEERASSIST_TEST_OIDC_ISSUER="$M1_TEST_OIDC_ISSUER" PYTHONPATH=src:. \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/integration/test_keycloak_browser_session.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 PYTHONPATH=src:. .venv/bin/python scripts/export_openapi.py
 PYTHONPATH=src:. .venv/bin/pytest -q tests/platform/test_openapi_contract.py
 PYTHONPATH=src:. .venv/bin/python scripts/export_openapi.py --check
@@ -708,9 +758,18 @@ methods require the same scope. Ensure lists never leak counts/IDs and audit fil
 
 ```bash
 PYTHONPATH=src:. .venv/bin/pytest -q tests/platform/test_tenant_isolation.py
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" postgres
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" postgres
 PEERASSIST_TEST_DATABASE_URL="$M1_TEST_DATABASE_URL" PYTHONPATH=src:. \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/integration/test_postgres_tenant_isolation.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 5: Commit**
@@ -767,11 +826,20 @@ leave an adapter as memory/not-configured, and readiness must expose a safe unav
 ```bash
 PYTHONPATH=src:. .venv/bin/pytest -q tests/platform/test_paper_*.py \
   tests/platform/contracts/test_object_store_contract.py --adapter=memory
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" minio-bootstrap
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" minio minio-bootstrap
 PEERASSIST_TEST_S3_ENDPOINT="$M1_TEST_S3_ENDPOINT" PYTHONPATH=src:. \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/contracts/test_object_store_contract.py --adapter=minio \
   tests/platform/integration/test_minio_object_contract.py \
   tests/platform/test_composition.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 5: Export OpenAPI and commit**
@@ -824,9 +892,18 @@ operation appears in the exported contract.
 
 ```bash
 PYTHONPATH=src:. .venv/bin/pytest -q tests/platform/test_review_*.py
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" postgres
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" postgres
 PEERASSIST_TEST_DATABASE_URL="$M1_TEST_DATABASE_URL" PYTHONPATH=src:. \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/integration/test_postgres_review_commands.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 5: Export OpenAPI and commit**
@@ -882,10 +959,19 @@ it must not construct a local file repository as a second writer.
 PYTHONPATH=src:. .venv/bin/pytest -q \
   tests/platform/test_workspace_materializer.py tests/platform/test_stage_publisher.py \
   tests/peerassist/test_review_job_runner.py
+M1_ENV_FILE="$(mktemp)"; bash scripts/m1_test_env.sh create "$M1_ENV_FILE"
+source "$M1_ENV_FILE"
+trap 'bash scripts/m1_test_env.sh down "$M1_ENV_FILE"' EXIT
+bash scripts/m1_test_env.sh up "$M1_ENV_FILE" postgres minio-bootstrap
+source "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"
+bash scripts/m1_test_env.sh wait "$M1_ENV_FILE" postgres minio minio-bootstrap
 PEERASSIST_TEST_DATABASE_URL="$M1_TEST_DATABASE_URL" \
 PEERASSIST_TEST_S3_ENDPOINT="$M1_TEST_S3_ENDPOINT" PYTHONPATH=src:. \
   .venv/bin/pytest -q -m requires_docker \
   tests/platform/integration/test_worker_recovery.py
+bash scripts/m1_test_env.sh down "$M1_ENV_FILE"
+trap - EXIT
 ```
 
 - [ ] **Step 5: Commit**

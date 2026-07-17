@@ -6,6 +6,7 @@ COMPOSE_FILE="$ROOT/infrastructure/compose/compose.m1.test.yml"
 FORMAT=peerassist-m1-test-v1
 REQUIRED_NAMES=(
   M1_TEST_ENV_FORMAT M1_TEST_CLEANUP_ID M1_TEST_PROJECT_NAME
+  M1_TEST_ENDPOINTS_READY
   M1_TEST_DATABASE_URL M1_TEST_OIDC_ISSUER M1_TEST_PUBLIC_ORIGIN
   M1_TEST_OIDC_REDIRECT_URI M1_TEST_S3_ENDPOINT
   M1_TEST_POSTGRES_USER M1_TEST_POSTGRES_PASSWORD M1_TEST_POSTGRES_DB
@@ -33,6 +34,7 @@ emit_env() {
   printf 'export M1_TEST_ENV_FORMAT=%s\n' "$FORMAT"
   printf 'export M1_TEST_CLEANUP_ID=%s\n' "$M1_TEST_CLEANUP_ID"
   printf 'export M1_TEST_PROJECT_NAME=%s\n' "$M1_TEST_PROJECT_NAME"
+  printf 'export M1_TEST_ENDPOINTS_READY=%s\n' "$M1_TEST_ENDPOINTS_READY"
   printf 'export M1_TEST_POSTGRES_USER=%s\n' "$M1_TEST_POSTGRES_USER"
   printf 'export %s=%s\n' M1_TEST_POSTGRES_PASSWORD "$M1_TEST_POSTGRES_PASSWORD"
   printf 'export M1_TEST_POSTGRES_DB=%s\n' "$M1_TEST_POSTGRES_DB"
@@ -90,8 +92,13 @@ refresh_endpoints() {
 }
 
 create_env() {
-  local env_file=$1 dir base temp cleanup_id project
-  [[ ! -e "$env_file" && ! -L "$env_file" ]] || fail "environment target already exists"
+  local env_file=$1 dir base temp cleanup_id project replace=false
+  if [[ -L "$env_file" ]]; then
+    fail "environment target must not be a symlink"
+  elif [[ -e "$env_file" ]]; then
+    validate_empty_target "$env_file"
+    replace=true
+  fi
   dir=$(dirname -- "$env_file")
   base=$(basename -- "$env_file")
   [[ -d "$dir" && ! -L "$dir" ]] || fail "environment parent must be an existing real directory"
@@ -114,6 +121,7 @@ create_env() {
   M1_TEST_ENV_FORMAT=$FORMAT
   M1_TEST_CLEANUP_ID=$cleanup_id
   M1_TEST_PROJECT_NAME=$project
+  M1_TEST_ENDPOINTS_READY=0
   M1_TEST_POSTGRES_USER=peerassist
   printf -v M1_TEST_POSTGRES_PASSWORD '%s' "$pg_credential"
   M1_TEST_POSTGRES_DB=peerassist
@@ -137,11 +145,30 @@ create_env() {
 
   emit_env > "$temp"
 
-  # A same-directory hard link makes the fully written file visible atomically
-  # and fails closed if another process wins the target-name race.
-  ln -- "$temp" "$dir/$base" || fail "environment target already exists"
+  if [[ "$replace" == true ]]; then
+    validate_empty_target "$env_file"
+    mv -f -- "$temp" "$dir/$base"
+  else
+    # A same-directory hard link makes the fully written file visible atomically
+    # and fails closed if another process wins the target-name race.
+    ln -- "$temp" "$dir/$base" || fail "environment target already exists"
+  fi
   rm -f -- "$temp"
   trap - RETURN
+}
+
+validate_empty_target() {
+  local target=$1 mode owner links size
+  [[ -f "$target" && ! -L "$target" ]] || \
+    fail "environment target must be a regular non-symlink file"
+  mode=$(stat -c '%a' -- "$target")
+  owner=$(stat -c '%u' -- "$target")
+  links=$(stat -c '%h' -- "$target")
+  size=$(stat -c '%s' -- "$target")
+  [[ "$mode" == 600 ]] || fail "existing environment target must have mode 0600"
+  [[ "$owner" == "$(id -u)" ]] || fail "existing environment target must be owned by the caller"
+  [[ "$links" == 1 ]] || fail "existing environment target must not have hard links"
+  [[ "$size" == 0 ]] || fail "existing environment target must be empty"
 }
 
 allowed_name() {
@@ -180,6 +207,7 @@ load_env() {
   [[ "$M1_TEST_CLEANUP_ID" =~ ^[0-9a-f]{24}$ ]] || fail "unsafe cleanup identifier"
   [[ "$M1_TEST_PROJECT_NAME" == "peerassist-m1-$M1_TEST_CLEANUP_ID" ]] || \
     fail "unsafe Compose project name"
+  [[ "$M1_TEST_ENDPOINTS_READY" =~ ^[01]$ ]] || fail "unsafe endpoint readiness"
   [[ "$M1_TEST_POSTGRES_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe PostgreSQL port"
   [[ "$M1_TEST_KEYCLOAK_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe Keycloak port"
   [[ "$M1_TEST_MINIO_PORT" =~ ^(0|[1-9][0-9]{3,4})$ ]] || fail "unsafe MinIO port"
@@ -259,6 +287,9 @@ up_env() {
     persist_env "$env_file"
   fi
   [[ "$want_bootstrap" == false ]] || compose "$env_file" up --detach minio-bootstrap
+  M1_TEST_ENDPOINTS_READY=1
+  export M1_TEST_ENDPOINTS_READY
+  persist_env "$env_file"
 }
 
 resolve_port() {
@@ -277,6 +308,7 @@ wait_env() {
   local env_file=$1
   shift
   load_env "$env_file"
+  require_ready
   if (( $# == 0 )); then
     set -- "${SERVICES[@]}"
   else
@@ -306,6 +338,16 @@ wait_env() {
   fail "timed out waiting for M1 test providers"
 }
 
+require_ready() {
+  [[ "$M1_TEST_ENDPOINTS_READY" == 1 ]] || \
+    fail "M1 test provider endpoints are not ready; run up and re-source the environment"
+}
+
+require_ready_env() {
+  load_env "$1"
+  require_ready
+}
+
 down_env() {
   local env_file=$1 residual
   [[ -e "$env_file" || -L "$env_file" ]] || return 0
@@ -327,7 +369,7 @@ down_env() {
 }
 
 usage() {
-  printf 'usage: %s {create|up|wait|down} <environment-file> [services...]\n' \
+  printf 'usage: %s {create|up|require-ready|wait|down} <environment-file> [services...]\n' \
     "${0##*/}" >&2
   exit 2
 }
@@ -339,6 +381,7 @@ shift 2
 case "$command" in
   create) (( $# == 0 )) || usage; create_env "$env_file" ;;
   up) up_env "$env_file" "$@" ;;
+  require-ready) (( $# == 0 )) || usage; require_ready_env "$env_file" ;;
   wait) wait_env "$env_file" "$@" ;;
   down) (( $# == 0 )) || usage; down_env "$env_file" ;;
   *) usage ;;

@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "infrastructure/compose/compose.m1.test.yml"
 ENV_HELPER = ROOT / "scripts/m1_test_env.sh"
 REALM_TEMPLATE = ROOT / "infrastructure/keycloak/realm-template.json"
+IMPLEMENTATION_PLAN = (
+    ROOT / "docs/superpowers/plans/2026-07-17-peerassist-m1-platform-authorization.md"
+)
 
 
 def _run_helper(
@@ -143,6 +146,16 @@ def test_profile_pins_private_real_providers_with_health_checks() -> None:
     assert "Host: 127.0.0.1" in keycloak_probe
 
 
+def test_callback_reservation_lifecycle_matches_session_and_compose_tasks() -> None:
+    compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
+
+    assert "Task 10" in compose_text
+    assert "TestClient" in compose_text
+    assert "Task 16" in compose_text
+    assert "API service replaces" in compose_text
+    assert "Task 9 replaces" not in compose_text
+
+
 def test_profile_uses_generated_values_and_bootstraps_provider_data() -> None:
     compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
     realm_text = REALM_TEMPLATE.read_text(encoding="utf-8")
@@ -186,6 +199,7 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
     exports = _read_exports(env_file)
     required = {
         "M1_TEST_PROJECT_NAME",
+        "M1_TEST_ENDPOINTS_READY",
         "M1_TEST_DATABASE_URL",
         "M1_TEST_OIDC_ISSUER",
         "M1_TEST_PUBLIC_ORIGIN",
@@ -212,6 +226,7 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
         "M1_TEST_API_CALLBACK_PORT",
     }
     assert required <= exports.keys()
+    assert exports["M1_TEST_ENDPOINTS_READY"] == "0"
     assert re.fullmatch(r"peerassist-m1-[0-9a-f]{24}", exports["M1_TEST_PROJECT_NAME"])
     assert exports["M1_TEST_DATABASE_URL"].startswith("postgresql://")
     assert exports["M1_TEST_OIDC_ISSUER"].startswith("http://127.0.0.1:")
@@ -222,6 +237,9 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
         f"{exports['M1_TEST_PUBLIC_ORIGIN']}/api/v1/auth/callback"
     )
     assert exports["M1_TEST_S3_ENDPOINT"].startswith("http://127.0.0.1:")
+    assert exports["M1_TEST_DATABASE_URL"].endswith(":0/peerassist")
+    assert exports["M1_TEST_OIDC_ISSUER"].startswith("http://127.0.0.1:0/")
+    assert exports["M1_TEST_S3_ENDPOINT"] == "http://127.0.0.1:0"
     assert all(re.fullmatch(r"[A-Za-z0-9_./:@-]+", value) for value in exports.values())
 
     sourced = subprocess.run(
@@ -240,6 +258,25 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
     assert sourced.returncode == 0, sourced.stderr
 
 
+def test_create_atomically_replaces_a_safe_mktemp_target(tmp_path: Path) -> None:
+    created = subprocess.run(
+        ["mktemp", str(tmp_path / "provider.XXXXXXXX")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    env_file = Path(created.stdout.strip())
+    original_inode = env_file.stat().st_ino
+
+    result = _run_helper("create", str(env_file))
+
+    assert result.returncode == 0, result.stderr
+    assert env_file.stat().st_ino != original_inode
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert env_file.stat().st_nlink == 1
+    assert _read_exports(env_file)["M1_TEST_ENDPOINTS_READY"] == "0"
+
+
 def test_create_is_atomic_and_refuses_existing_or_symlink_targets(tmp_path: Path) -> None:
     env_file = tmp_path / "provider.env"
     env_file.write_text("do-not-overwrite\n", encoding="utf-8")
@@ -256,6 +293,45 @@ def test_create_is_atomic_and_refuses_existing_or_symlink_targets(tmp_path: Path
     assert linked.returncode != 0
     assert target.read_text(encoding="utf-8") == "do-not-overwrite\n"
     assert list(tmp_path.glob(".m1-test-env.*")) == []
+
+
+@pytest.mark.parametrize("unsafe", ["mode", "hardlink"])
+def test_create_does_not_replace_unsafe_empty_targets(
+    tmp_path: Path, unsafe: str
+) -> None:
+    env_file = tmp_path / "provider.env"
+    env_file.touch(mode=0o600)
+    linked: Path | None = None
+    if unsafe == "mode":
+        env_file.chmod(0o644)
+    else:
+        linked = tmp_path / "provider.link"
+        os.link(env_file, linked)
+    original_inode = env_file.stat().st_ino
+
+    result = _run_helper("create", str(env_file))
+
+    assert result.returncode != 0
+    assert env_file.stat().st_ino == original_inode
+    assert env_file.stat().st_size == 0
+    if linked is not None:
+        assert linked.stat().st_ino == original_inode
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires ownership change permission")
+def test_create_does_not_replace_an_empty_target_owned_by_another_user(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "provider.env"
+    env_file.touch(mode=0o600)
+    os.chown(env_file, 65534, -1)
+    original_inode = env_file.stat().st_ino
+
+    result = _run_helper("create", str(env_file))
+
+    assert result.returncode != 0
+    assert env_file.stat().st_ino == original_inode
+    assert env_file.stat().st_size == 0
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o400, 0o660])
@@ -356,6 +432,7 @@ def test_up_resolves_compose_ports_and_updates_environment_atomically(
 
     assert result.returncode == 0, result.stderr
     exports = _read_exports(env_file)
+    assert exports["M1_TEST_ENDPOINTS_READY"] == "1"
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     assert all(
         re.fullmatch(r"[1-9][0-9]{3,4}", exports[name])
@@ -381,6 +458,77 @@ def test_up_resolves_compose_ports_and_updates_environment_atomically(
     )
 
 
+def test_parent_shell_must_resource_environment_after_up(tmp_path: Path) -> None:
+    env_file = tmp_path / "provider.env"
+    assert _run_helper("create", str(env_file)).returncode == 0
+    env = _write_fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -eu; source "$1"; stale=$M1_TEST_DATABASE_URL; '
+            'test "$M1_TEST_ENDPOINTS_READY" = 0; "$2" up "$1"; '
+            'test "$M1_TEST_ENDPOINTS_READY" = 0; '
+            'test "$M1_TEST_DATABASE_URL" = "$stale"; source "$1"; '
+            'test "$M1_TEST_ENDPOINTS_READY" = 1; '
+            'test "$M1_TEST_POSTGRES_PORT" != 0; "$2" require-ready "$1"; '
+            '"$2" down "$1"',
+            "bash",
+            str(env_file),
+            str(ENV_HELPER),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not env_file.exists()
+
+
+@pytest.mark.parametrize("command", ["wait", "require-ready"])
+def test_consumer_commands_reject_unresolved_endpoints(
+    tmp_path: Path, command: str
+) -> None:
+    env_file = tmp_path / "provider.env"
+    assert _run_helper("create", str(env_file)).returncode == 0
+    env = _write_fake_docker(tmp_path)
+
+    result = _run_helper(command, str(env_file), env=env)
+
+    assert result.returncode != 0
+    assert "not ready" in result.stderr.lower()
+
+
+def test_real_provider_preludes_resource_resolved_endpoints() -> None:
+    plan = IMPLEMENTATION_PLAN.read_text(encoding="utf-8")
+    provider_blocks = [
+        block
+        for index, block in enumerate(plan.split("```bash"))
+        if index and "$M1_TEST_" in block.split("```", 1)[0]
+    ]
+
+    assert provider_blocks
+    for block in provider_blocks:
+        commands = block.split("```", 1)[0]
+        create = commands.index('bash scripts/m1_test_env.sh create "$M1_ENV_FILE"')
+        first_source = commands.index('source "$M1_ENV_FILE"', create)
+        up = commands.index('bash scripts/m1_test_env.sh up "$M1_ENV_FILE"', first_source)
+        second_source = commands.index('source "$M1_ENV_FILE"', up)
+        ready = commands.index(
+            'bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"',
+            second_source,
+        )
+        wait = commands.index(
+            'bash scripts/m1_test_env.sh wait "$M1_ENV_FILE"', ready
+        )
+        consumer = commands.index("$M1_TEST_", wait)
+        assert create < first_source < up < second_source < ready < wait < consumer
+
+
 def test_two_projects_receive_distinct_compose_ports(tmp_path: Path) -> None:
     env = _write_fake_docker(tmp_path)
     env_files = [tmp_path / "provider-a.env", tmp_path / "provider-b.env"]
@@ -404,8 +552,9 @@ def test_two_projects_receive_distinct_compose_ports(tmp_path: Path) -> None:
 def test_wait_fails_fast_when_a_provider_exits(tmp_path: Path) -> None:
     env_file = tmp_path / "provider.env"
     assert _run_helper("create", str(env_file)).returncode == 0
+    env = _write_fake_docker(tmp_path)
+    assert _run_helper("up", str(env_file), "postgres", env=env).returncode == 0
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
     docker = bin_dir / "docker"
     docker.write_text(
         "#!/bin/sh\n"
@@ -417,7 +566,6 @@ def test_wait_fails_fast_when_a_provider_exits(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    env = os.environ | {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
 
     result = subprocess.run(
         [str(ENV_HELPER), "wait", str(env_file), "postgres"],

@@ -131,8 +131,10 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # Task 9 replaces this reservation with the API service and resolves the API's
-  # Compose-assigned port before bootstrapping Keycloak's exact redirect URI.
+  # Task 10 browser-session tests use this exact reserved origin as TestClient
+  # redirect metadata; they do not replace this container. In Task 16, the
+  # production-like Compose API service replaces the reservation and its
+  # Compose-assigned port is resolved before Keycloak bootstrap.
   callback-reservation:
     image: alpine:3.22.0
     user: "65534:65534"
