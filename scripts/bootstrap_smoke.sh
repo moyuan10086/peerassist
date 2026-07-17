@@ -8,6 +8,10 @@ if [[ "${PEERASSIST_BOOTSTRAP_INNER:-}" != "1" ]]; then
   source_root="$(git rev-parse --show-toplevel)"
   commit="$(git -C "$source_root" rev-parse HEAD)"
   temp_root="$(mktemp -d)"
+  test -z "$(git -C "$source_root" status --porcelain)"
+  lfs_pointer="$(git -C "$source_root" show "$commit:$PDF_PATH")"
+  expected_oid="$(printf '%s\n' "$lfs_pointer" | sed -n 's/^oid sha256:\([0-9a-f]\{64\}\)$/\1/p')"
+  [[ "$expected_oid" =~ ^[0-9a-f]{64}$ ]]
 
   cleanup() {
     rm -rf "$temp_root"
@@ -20,6 +24,7 @@ if [[ "${PEERASSIST_BOOTSTRAP_INNER:-}" != "1" ]]; then
     git lfs version >/dev/null
     git lfs fetch origin "$commit" --include=demos/Text/bert/paper.pdf
     git lfs checkout demos/Text/bert/paper.pdf
+    test "$(sha256sum "$PDF_PATH" | awk '{print $1}')" = "$expected_oid"
   )
   PEERASSIST_BOOTSTRAP_INNER=1 bash "$temp_root/repo/scripts/bootstrap_smoke.sh"
   exit 0
@@ -50,7 +55,10 @@ python scripts/verify_repository.py all
 docker compose -f infrastructure/compose/compose.yml up -d --build
 healthy=0
 for _ in $(seq 1 60); do
-  if docker compose -f "$COMPOSE_FILE" ps --format json | grep -q '"Health":"healthy"'; then
+  running_services="$(docker compose -f "$COMPOSE_FILE" ps --status running --services)"
+  if grep -Fxq "review-api" <<<"$running_services" \
+    && grep -Fxq "workspace" <<<"$running_services" \
+    && curl --fail --silent http://127.0.0.1:8766/api/health >/dev/null; then
     healthy=1
     break
   fi

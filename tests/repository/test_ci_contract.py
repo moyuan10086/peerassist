@@ -76,11 +76,17 @@ def test_bootstrap_smoke_contract_is_isolated_bounded_and_does_not_dump_environm
     for marker in (
         "set -Eeuo pipefail",
         "mktemp -d",
+        'git -C "$source_root" status --porcelain',
+        'git -C "$source_root" show "$commit:$PDF_PATH"',
+        "oid sha256:",
+        "expected_oid",
+        "[0-9a-f]{64}",
         "GIT_LFS_SKIP_SMUDGE=1",
         "git clone --local --no-hardlinks",
         "git lfs fetch origin",
         "--include=demos/Text/bert/paper.pdf",
         "git lfs checkout demos/Text/bert/paper.pdf",
+        'sha256sum "$PDF_PATH"',
         "PEERASSIST_BOOTSTRAP_INNER=1",
         "git status --porcelain",
         "head -c 4 demos/Text/bert/paper.pdf",
@@ -90,6 +96,10 @@ def test_bootstrap_smoke_contract_is_isolated_bounded_and_does_not_dump_environm
         "python scripts/verify_repository.py all",
         "docker compose -f infrastructure/compose/compose.yml",
         "COMPOSE_PROJECT_NAME",
+        "ps --status running --services",
+        "review-api",
+        "workspace",
+        "http://127.0.0.1:8766/api/health",
         "down -v",
         "Content-Range",
         "206",
@@ -99,6 +109,8 @@ def test_bootstrap_smoke_contract_is_isolated_bounded_and_does_not_dump_environm
     ):
         assert marker in source
     assert "curl -I" not in source
+    assert "--object-id" not in source
+    assert 'grep -q \'"Health":"healthy"\'' not in source
     assert "printenv" not in source
     assert "env |" not in source
 
