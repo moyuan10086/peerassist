@@ -40,6 +40,7 @@ class Finding:
         path = self.path.as_posix()
         for _, pattern in _RULES:
             path = pattern.sub("<redacted>", path)
+        path = _PASSWORD_RE.sub(lambda match: f"{match.group(0)[: match.start('value') - match.start()]}<redacted>", path)
         return f"{path}:{self.line}: {self.rule}"
 
 
@@ -59,7 +60,7 @@ def _default_files(root: Path) -> list[Path]:
 def _relative(root: Path, path: Path) -> Path | None:
     try:
         return path.resolve().relative_to(root.resolve())
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return None
 
 
@@ -86,11 +87,23 @@ def _placeholder(value: str) -> bool:
     )
 
 
+def _safe_files(root: Path, files: Iterable[Path]) -> list[Path]:
+    paths: set[Path] = set()
+    for item in files:
+        try:
+            path = Path(item).resolve()
+            path.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        paths.add(path)
+    return sorted(paths, key=lambda item: item.as_posix())
+
+
 def scan_files(root: Path, files: Iterable[Path]) -> list[Finding]:
     """Return stable, deduplicated findings without retaining matched values."""
     root = root.resolve()
     findings: set[Finding] = set()
-    for path in sorted({Path(item).resolve() for item in files}, key=lambda item: item.as_posix()):
+    for path in _safe_files(root, files):
         relative = _relative(root, path)
         if relative is None or _excluded(relative):
             continue

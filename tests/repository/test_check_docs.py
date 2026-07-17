@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from scripts.check_docs import find_broken_links
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -121,4 +122,28 @@ def test_overlong_local_destination_is_reported_without_filesystem_exception(tmp
 
     assert result.returncode == 1
     assert result.stdout == f"README.md: {raw_target}\n"
+    assert result.stderr == ""
+
+
+def test_symlink_loop_is_skipped_by_api_and_default_cli(tmp_path: Path) -> None:
+    loop = tmp_path / "loop.md"
+    try:
+        loop.symlink_to("loop.md")
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are not supported on this platform")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "loop.md"], cwd=tmp_path, check=True)
+
+    assert find_broken_links(tmp_path, [loop]) == []
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_docs.py")],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
     assert result.stderr == ""

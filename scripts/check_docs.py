@@ -153,11 +153,23 @@ def _relative_path(root: Path, path: Path) -> Path:
         return Path(path.name)
 
 
+def _safe_sources(root: Path, files: Iterable[Path]) -> list[Path]:
+    sources: set[Path] = set()
+    for item in files:
+        try:
+            source = Path(item).resolve()
+            source.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        sources.add(source)
+    return sorted(sources, key=lambda path: path.as_posix())
+
+
 def find_broken_links(root: Path, files: Iterable[Path]) -> list[tuple[Path, str]]:
     """Return stable ``(source, target)`` pairs for broken local Markdown links."""
     root = root.resolve()
     broken: set[tuple[str, str]] = set()
-    for source in sorted({Path(path).resolve() for path in files}, key=lambda path: path.as_posix()):
+    for source in _safe_sources(root, files):
         try:
             text = source.read_text(encoding="utf-8")
         except (OSError, UnicodeError):

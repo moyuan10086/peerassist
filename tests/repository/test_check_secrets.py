@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from scripts.check_secrets import Finding, scan_files
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -199,4 +200,62 @@ def test_secret_shaped_filename_is_redacted_only_when_rendered(tmp_path: Path) -
     assert result.returncode == 1
     assert result.stdout == "captured-<redacted>.txt:1: github-token\n"
     assert secret not in result.stdout
+    assert result.stderr == ""
+
+
+def test_password_assignment_filename_is_redacted_without_changing_path(tmp_path: Path) -> None:
+    password = "very-private-password"
+    sample = tmp_path / f"password={password}.txt"
+    sample.write_text(_github_token(), encoding="utf-8")
+
+    finding = scan_files(tmp_path, [sample])[0]
+
+    assert finding.path == Path(sample.name)
+    assert finding.render() == "password=<redacted>:1: github-token"
+    assert password not in finding.render()
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py"), str(sample)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "password=<redacted>:1: github-token\n"
+    assert password not in result.stdout
+    assert result.stderr == ""
+
+
+def test_password_word_without_assignment_is_not_redacted(tmp_path: Path) -> None:
+    sample = tmp_path / "password-policy.md"
+    sample.write_text(_github_token(), encoding="utf-8")
+
+    finding = scan_files(tmp_path, [sample])[0]
+
+    assert finding.render() == "password-policy.md:1: github-token"
+
+
+def test_symlink_loop_is_skipped_by_api_and_default_cli(tmp_path: Path) -> None:
+    loop = tmp_path / "loop.txt"
+    try:
+        loop.symlink_to("loop.txt")
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are not supported on this platform")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "loop.txt"], cwd=tmp_path, check=True)
+
+    assert scan_files(tmp_path, [loop]) == []
+
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "check_secrets.py")],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
     assert result.stderr == ""
