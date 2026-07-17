@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlsplit
 
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\((?P<target>[^)]+)\)")
+_LINK_TITLE_RE = re.compile(r'''\s+(?:"[^"]*"|'[^']*'|\([^)]*\))\s*$''')
 _IGNORED_SCHEMES = {"http", "https", "mailto"}
 
 
@@ -28,14 +29,14 @@ def _tracked_markdown(root: Path) -> list[Path]:
 
 
 def _markdown_targets(source: str) -> Iterable[str]:
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     for line in source.splitlines():
         match = _FENCE_RE.match(line)
         if match:
             marker = match.group(1)
             if fence is None:
-                fence = marker[0]
-            elif marker[0] == fence:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1]:
                 fence = None
             continue
         if fence is not None:
@@ -44,6 +45,8 @@ def _markdown_targets(source: str) -> Iterable[str]:
             target = link.group("target").strip()
             if target.startswith("<") and target.endswith(">"):
                 target = target[1:-1].strip()
+            else:
+                target = _LINK_TITLE_RE.sub("", target).strip()
             if target:
                 yield target
 

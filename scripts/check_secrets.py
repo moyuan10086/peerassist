@@ -19,7 +19,7 @@ _POLICY_IMPLEMENTATION_PATHS = {
     Path("tests/repository/test_check_secrets.py"),
 }
 _RULES = (
-    ("github-token", re.compile(r"(?:ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})")),
+    ("github-token", re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})")),
     ("openai-api-key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
     ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----")),
     ("aws-access-key", re.compile(r"AKIA[A-Z0-9]{16}")),

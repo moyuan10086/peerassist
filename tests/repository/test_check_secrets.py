@@ -13,6 +13,10 @@ def _github_token() -> str:
     return "gh" + "p_" + "A" * 36
 
 
+def _github_token_variants() -> tuple[str, ...]:
+    return tuple("gh" + prefix + "_" + "A" * 36 for prefix in ("o", "u", "s", "r"))
+
+
 def _openai_token() -> str:
     return "s" + "k-" + "B" * 40
 
@@ -49,6 +53,18 @@ def test_scan_files_detects_supported_rules_without_exposing_values(tmp_path: Pa
     rendered = "\n".join(item.render() for item in findings)
     assert all(secret not in rendered for secret in secrets)
     assert all(repr(item) not in rendered for item in findings)
+
+
+def test_scan_files_detects_all_official_github_token_prefixes_without_exposing_values(tmp_path: Path) -> None:
+    sample = tmp_path / "tokens.txt"
+    secrets = _github_token_variants()
+    sample.write_text("\n".join(secrets), encoding="utf-8")
+
+    findings = scan_files(tmp_path, [sample])
+
+    assert findings == [Finding(Path("tokens.txt"), line, "github-token") for line in range(1, 5)]
+    rendered = "\n".join(item.render() for item in findings)
+    assert all(secret not in rendered for secret in secrets)
 
 
 def test_scan_files_allows_documented_password_placeholders(tmp_path: Path) -> None:
