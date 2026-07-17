@@ -6,9 +6,11 @@ COMPOSE_FILE="$ROOT/infrastructure/compose/compose.m1.test.yml"
 FORMAT=peerassist-m1-test-v1
 REQUIRED_NAMES=(
   M1_TEST_ENV_FORMAT M1_TEST_CLEANUP_ID M1_TEST_PROJECT_NAME
-  M1_TEST_DATABASE_URL M1_TEST_OIDC_ISSUER M1_TEST_S3_ENDPOINT
+  M1_TEST_DATABASE_URL M1_TEST_OIDC_ISSUER M1_TEST_PUBLIC_ORIGIN
+  M1_TEST_OIDC_REDIRECT_URI M1_TEST_S3_ENDPOINT
   M1_TEST_POSTGRES_USER M1_TEST_POSTGRES_PASSWORD M1_TEST_POSTGRES_DB
   M1_TEST_POSTGRES_PORT M1_TEST_KEYCLOAK_PORT M1_TEST_MINIO_PORT
+  M1_TEST_API_CALLBACK_PORT
   M1_TEST_KEYCLOAK_ADMIN M1_TEST_KEYCLOAK_ADMIN_PASSWORD
   M1_TEST_OIDC_REALM M1_TEST_OIDC_AUTOMATION_CLIENT_ID
   M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET M1_TEST_OIDC_PKCE_CLIENT_ID
@@ -33,7 +35,7 @@ import socket
 
 sockets = []
 try:
-    for _ in range(3):
+    for _ in range(4):
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         sockets.append(sock)
@@ -57,7 +59,8 @@ create_env() {
   cleanup_id=$(random_hex 12)
   project="peerassist-m1-$cleanup_id"
   local pg_credential kc_credential client_credential user_credential
-  local s3_access s3_credential root_credential bucket postgres_port keycloak_port minio_port
+  local s3_access s3_credential root_credential bucket
+  local postgres_port keycloak_port minio_port api_callback_port
   pg_credential=$(random_hex 24)
   kc_credential=$(random_hex 24)
   client_credential=$(random_hex 24)
@@ -66,7 +69,7 @@ create_env() {
   s3_credential=$(random_hex 24)
   root_credential=$s3_credential
   bucket="peerassist-m1-$cleanup_id"
-  read -r postgres_port keycloak_port minio_port < <(free_ports)
+  read -r postgres_port keycloak_port minio_port api_callback_port < <(free_ports)
 
   {
     printf 'export M1_TEST_ENV_FORMAT=%s\n' "$FORMAT"
@@ -88,6 +91,10 @@ create_env() {
     printf 'export %s=%s\n' M1_TEST_OIDC_USER_PASSWORD "$user_credential"
     printf 'export M1_TEST_KEYCLOAK_PORT=%s\n' "$keycloak_port"
     printf 'export M1_TEST_OIDC_ISSUER=http://127.0.0.1:%s/realms/peerassist-m1\n' "$keycloak_port"
+    printf 'export M1_TEST_API_CALLBACK_PORT=%s\n' "$api_callback_port"
+    printf 'export M1_TEST_PUBLIC_ORIGIN=http://127.0.0.1:%s\n' "$api_callback_port"
+    printf 'export M1_TEST_OIDC_REDIRECT_URI=http://127.0.0.1:%s/api/v1/auth/callback\n' \
+      "$api_callback_port"
     printf 'export M1_TEST_S3_ACCESS_KEY=%s\n' "$s3_access"
     printf 'export M1_TEST_S3_SECRET_KEY=%s\n' "$s3_credential"
     printf 'export %s=%s\n' M1_TEST_MINIO_ROOT_PASSWORD "$root_credential"
@@ -143,12 +150,18 @@ load_env() {
   [[ "$M1_TEST_POSTGRES_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe PostgreSQL port"
   [[ "$M1_TEST_KEYCLOAK_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe Keycloak port"
   [[ "$M1_TEST_MINIO_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe MinIO port"
+  [[ "$M1_TEST_API_CALLBACK_PORT" =~ ^[0-9]{4,5}$ ]] || fail "unsafe API callback port"
   [[ "$M1_TEST_DATABASE_URL" == \
     "postgresql://$M1_TEST_POSTGRES_USER:$M1_TEST_POSTGRES_PASSWORD@127.0.0.1:$M1_TEST_POSTGRES_PORT/$M1_TEST_POSTGRES_DB" ]] || \
     fail "unsafe generated database URL"
   [[ "$M1_TEST_OIDC_ISSUER" == \
     "http://127.0.0.1:$M1_TEST_KEYCLOAK_PORT/realms/$M1_TEST_OIDC_REALM" ]] || \
     fail "unsafe generated OIDC issuer"
+  [[ "$M1_TEST_PUBLIC_ORIGIN" == "http://127.0.0.1:$M1_TEST_API_CALLBACK_PORT" ]] || \
+    fail "unsafe generated public origin"
+  [[ "$M1_TEST_OIDC_REDIRECT_URI" == \
+    "$M1_TEST_PUBLIC_ORIGIN/api/v1/auth/callback" ]] || \
+    fail "unsafe generated OIDC redirect URI"
   [[ "$M1_TEST_S3_ENDPOINT" == "http://127.0.0.1:$M1_TEST_MINIO_PORT" ]] || \
     fail "unsafe generated S3 endpoint"
   [[ ${#M1_TEST_POSTGRES_PASSWORD} -ge 32 ]] || fail "unsafe generated PostgreSQL credential"

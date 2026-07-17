@@ -22,8 +22,8 @@
       "serviceAccountsEnabled": false,
       "directAccessGrantsEnabled": false,
       "standardFlowEnabled": true,
-      "redirectUris": ["http://127.0.0.1/*"],
-      "webOrigins": ["http://127.0.0.1"],
+      "redirectUris": ["${M1_TEST_OIDC_REDIRECT_URI}"],
+      "webOrigins": ["${M1_TEST_PUBLIC_ORIGIN}"],
       "protocol": "openid-connect",
       "attributes": {
         "pkce.code.challenge.method": "S256"

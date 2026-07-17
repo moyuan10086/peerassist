@@ -5,6 +5,9 @@ import re
 import shutil
 import stat
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -77,6 +80,9 @@ def test_profile_uses_generated_values_and_bootstraps_provider_data() -> None:
     assert "pkce.code.challenge.method" in realm_text
     assert "serviceAccountsEnabled" in realm_text
     assert "${M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET}" in realm_text
+    assert '"redirectUris": ["${M1_TEST_OIDC_REDIRECT_URI}"]' in realm_text
+    assert '"webOrigins": ["${M1_TEST_PUBLIC_ORIGIN}"]' in realm_text
+    assert '"http://127.0.0.1/*"' not in realm_text
     assert "minioadmin" not in (compose_text + realm_text).lower()
 
 
@@ -100,6 +106,8 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
         "M1_TEST_PROJECT_NAME",
         "M1_TEST_DATABASE_URL",
         "M1_TEST_OIDC_ISSUER",
+        "M1_TEST_PUBLIC_ORIGIN",
+        "M1_TEST_OIDC_REDIRECT_URI",
         "M1_TEST_S3_ENDPOINT",
         "M1_TEST_POSTGRES_USER",
         "M1_TEST_POSTGRES_PASSWORD",
@@ -119,11 +127,18 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
         "M1_TEST_POSTGRES_PORT",
         "M1_TEST_KEYCLOAK_PORT",
         "M1_TEST_MINIO_PORT",
+        "M1_TEST_API_CALLBACK_PORT",
     }
     assert required <= exports.keys()
     assert re.fullmatch(r"peerassist-m1-[0-9a-f]{24}", exports["M1_TEST_PROJECT_NAME"])
     assert exports["M1_TEST_DATABASE_URL"].startswith("postgresql://")
     assert exports["M1_TEST_OIDC_ISSUER"].startswith("http://127.0.0.1:")
+    assert exports["M1_TEST_PUBLIC_ORIGIN"] == (
+        f"http://127.0.0.1:{exports['M1_TEST_API_CALLBACK_PORT']}"
+    )
+    assert exports["M1_TEST_OIDC_REDIRECT_URI"] == (
+        f"{exports['M1_TEST_PUBLIC_ORIGIN']}/api/v1/auth/callback"
+    )
     assert exports["M1_TEST_S3_ENDPOINT"].startswith("http://127.0.0.1:")
     assert all(re.fullmatch(r"[A-Za-z0-9_./:@-]+", value) for value in exports.values())
 
@@ -264,6 +279,39 @@ def test_real_provider_harness_smoke_and_cleanup(tmp_path: Path) -> None:
         assert up.returncode == 0, up.stderr
         ready = _run_helper("wait", str(env_file))
         assert ready.returncode == 0, ready.stderr
+        exports = _read_exports(env_file)
+        authorize_url = f"{exports['M1_TEST_OIDC_ISSUER']}/protocol/openid-connect/auth"
+        common = {
+            "client_id": exports["M1_TEST_OIDC_PKCE_CLIENT_ID"],
+            "response_type": "code",
+            "scope": "openid",
+            "state": "m1-smoke-state",
+            "nonce": "m1-smoke-nonce",
+            "code_challenge": "A" * 43,
+            "code_challenge_method": "S256",
+        }
+        valid_response = urllib.request.urlopen(
+            f"{authorize_url}?{urllib.parse.urlencode(common | {'redirect_uri': exports['M1_TEST_OIDC_REDIRECT_URI']})}",
+            timeout=10,
+        )
+        valid_body = valid_response.read().decode("utf-8", errors="replace").lower()
+        assert valid_response.status == 200
+        assert "invalid_redirect_uri" not in valid_body
+        assert "invalid parameter: redirect_uri" not in valid_body
+        assert "login" in valid_body or "authenticate" in valid_body
+
+        invalid_redirect = (
+            f"http://127.0.0.1:{int(exports['M1_TEST_API_CALLBACK_PORT']) + 1}"
+            "/api/v1/auth/callback"
+        )
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            urllib.request.urlopen(
+                f"{authorize_url}?{urllib.parse.urlencode(common | {'redirect_uri': invalid_redirect})}",
+                timeout=10,
+            )
+        assert rejected.value.code == 400
+        rejected_body = rejected.value.read().decode("utf-8", errors="replace").lower()
+        assert "redirect_uri" in rejected_body
     finally:
         down = _run_helper("down", str(env_file))
         assert down.returncode == 0, down.stderr

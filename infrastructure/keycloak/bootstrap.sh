@@ -19,6 +19,17 @@ do
   require_safe "$name"
 done
 
+if [[ ! "${M1_TEST_PUBLIC_ORIGIN-}" =~ ^http://127\.0\.0\.1:[0-9]{4,5}$ ]]; then
+  printf 'invalid generated Keycloak input: M1_TEST_PUBLIC_ORIGIN\n' >&2
+  exit 2
+fi
+if [[ "${M1_TEST_OIDC_REDIRECT_URI-}" != \
+  "$M1_TEST_PUBLIC_ORIGIN/api/v1/auth/callback" ]]; then
+  printf 'invalid generated Keycloak input: M1_TEST_OIDC_REDIRECT_URI\n' >&2
+  exit 2
+fi
+
+umask 077
 install -d -m 0700 /opt/keycloak/data/import
 realm=$(</bootstrap/realm-template.json)
 for name in \
@@ -26,7 +37,9 @@ for name in \
   M1_TEST_OIDC_AUTOMATION_CLIENT_ID \
   M1_TEST_OIDC_AUTOMATION_CLIENT_SECRET \
   M1_TEST_OIDC_PKCE_CLIENT_ID \
-  M1_TEST_OIDC_USER_PASSWORD
+  M1_TEST_OIDC_USER_PASSWORD \
+  M1_TEST_PUBLIC_ORIGIN \
+  M1_TEST_OIDC_REDIRECT_URI
 do
   placeholder="\${${name}}"
   realm=${realm//"$placeholder"/${!name}}
