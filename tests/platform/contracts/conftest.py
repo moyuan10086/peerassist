@@ -89,7 +89,11 @@ def object_store_factory(request: pytest.FixtureRequest, clock: MutableClock):
 @pytest.fixture
 def identity_provider_factory(request: pytest.FixtureRequest, clock: MutableClock):
     adapter = request.config.getoption("--adapter")
-    if adapter not in {"memory", "fake"}:
+    if adapter == "fake":
+        from tests.platform.fixtures.oidc_server import FixtureIdentityProvider
+
+        return lambda **kwargs: FixtureIdentityProvider(clock=clock, **kwargs)
+    if adapter != "memory":
         pytest.skip(f"identity adapter {adapter!r} is not implemented in Task 3")
     return lambda **kwargs: FakeIdentityProvider(clock=clock, **kwargs)
 

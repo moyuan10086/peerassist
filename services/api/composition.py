@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from common.config import PlatformSettings
+from peerassist.platform.adapters import oidc
 from peerassist.platform.adapters.memory import (
     FakeIdentityProvider,
     MemoryObjectStore,
@@ -111,25 +112,37 @@ def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
     """Build explicitly selected adapters, failing closed in production."""
 
     if settings.environment == "production":
+        if (
+            not settings.oidc_issuer
+            or not settings.oidc_audience.strip()
+            or not settings.oidc_algorithms
+        ):
+            raise CompositionError("OIDC identity provider is unavailable.")
         try:
             uow_factory = PostgresUnitOfWorkFactory.from_url(
                 settings.database_url.get_secret_value()
             )
         except Exception:
             raise CompositionError("PostgreSQL provider is unavailable.") from None
+        try:
+            identity_provider = oidc.OidcIdentityProvider(
+                issuer=settings.oidc_issuer,
+                audience=settings.oidc_audience,
+                accepted_algorithms=frozenset(settings.oidc_algorithms),
+                require_https=True,
+            )
+        except Exception:
+            raise CompositionError("OIDC identity provider is unavailable.") from None
         return PlatformDependencies(
             uow_factory=uow_factory,
-            identity_provider=cast(
-                IdentityProvider,
-                _UnavailableProvider("Identity"),
-            ),
+            identity_provider=identity_provider,
             object_store=cast(ObjectStore, _UnavailableProvider("Object store")),
             readiness_checks=(
                 PostgresSchemaReadiness(uow_factory.engine),
-                _Unavailable("identity"),
+                identity_provider,
                 _Unavailable("object_store"),
             ),
-            lifecycle_resources=(uow_factory,),
+            lifecycle_resources=(uow_factory, identity_provider),
         )
     return _memory_dependencies(
         issuer=settings.oidc_issuer,
