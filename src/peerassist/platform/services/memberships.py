@@ -244,7 +244,7 @@ class MembershipService:
 
     def list_project_memberships(self, actor: Actor, project_id: UUID) -> tuple[ProjectMembership, ...]:
         with self._uow_factory(actor) as uow:
-            project = self._visible_project(uow, actor, project_id)
+            project = self._require_project_manager(uow, actor, project_id)
             return tuple(uow.projects.list_memberships(project.scope))
 
     def create_project(self, actor: Actor, request: CreateProject) -> Project:

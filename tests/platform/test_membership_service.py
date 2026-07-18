@@ -177,6 +177,12 @@ def test_cross_tenant_is_not_found_visible_denial_is_forbidden_and_audit_filters
         uow.commit()
 
     with pytest.raises(Forbidden):
+        service.list_project_memberships(member, project.id)
+    with pytest.raises(NotFound):
+        service.list_project_memberships(outsider, project.id)
+    assert service.list_project_memberships(admin, project.id) == (viewer,)
+
+    with pytest.raises(Forbidden):
         service.grant_project_membership(
             member,
             GrantProjectMembership(
