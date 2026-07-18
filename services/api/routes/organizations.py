@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from peerassist.platform.errors import AuthenticationRequired
 from peerassist.platform.models import (
@@ -77,7 +77,14 @@ class OrganizationMembershipView(BaseModel):
 
 
 class CreateProjectBody(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def reject_blank_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("name must not be blank")
+        return value
 
 
 class GrantOrganizationMembershipBody(BaseModel):

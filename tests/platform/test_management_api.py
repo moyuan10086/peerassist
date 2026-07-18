@@ -57,6 +57,16 @@ def test_management_routes_are_thin_safe_and_exclude_operator_operations() -> No
     app.dependency_overrides[require_management_actor] = lambda: admin
     with TestClient(app) as client:
         organizations = client.get("/api/v1/organizations")
+        blank_project = client.post(
+            f"/api/v1/organizations/{organization.id}/projects",
+            headers={"Idempotency-Key": "api-blank-project"},
+            json={"name": " "},
+        )
+        oversized_project = client.post(
+            f"/api/v1/organizations/{organization.id}/projects",
+            headers={"Idempotency-Key": "api-oversized-project"},
+            json={"name": "x" * 256},
+        )
         project = client.post(
             f"/api/v1/organizations/{organization.id}/projects",
             headers={"Idempotency-Key": "api-create-project"},
@@ -94,6 +104,8 @@ def test_management_routes_are_thin_safe_and_exclude_operator_operations() -> No
         }
 
     assert organizations.status_code == 200
+    assert blank_project.status_code == 422
+    assert oversized_project.status_code == 422
     assert organizations.json()[0]["id"] == str(organization.id)
     assert project.status_code == 201
     assert granted.status_code == 201

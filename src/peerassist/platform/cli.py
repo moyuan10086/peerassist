@@ -29,6 +29,9 @@ class _UsageError(Exception):
     pass
 
 
+_MAX_OPERATOR_SECRET_LENGTH = 4096
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         del message
@@ -67,12 +70,16 @@ def _authenticate_operator(
     environ: Mapping[str, str],
     stdin: IO[str],
 ) -> Actor:
-    password = (
-        stdin.readline().rstrip("\r\n") if password_stdin else environ.get("PEERASSIST_OPERATOR_PASSWORD", "")
+    password = stdin.readline(_MAX_OPERATOR_SECRET_LENGTH + 1).rstrip("\r\n") if password_stdin else environ.get(
+        "PEERASSIST_OPERATOR_PASSWORD", ""
     )
-    if not password:
-        raise _UsageError
     credential = environ.get("PEERASSIST_OPERATOR_PASSWORD_CREDENTIAL", "")
+    if (
+        not password
+        or len(password) > _MAX_OPERATOR_SECRET_LENGTH
+        or len(credential) > _MAX_OPERATOR_SECRET_LENGTH
+    ):
+        raise _UsageError
     try:
         scheme, iterations_text, salt_hex, expected_hex = credential.split("$", 3)
         iterations = int(iterations_text)

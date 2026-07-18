@@ -277,6 +277,35 @@ def test_cli_never_exposes_protected_inputs_or_persists_them_in_audit() -> None:
     }
     assert "wrong-password-do-not-print" not in wrong_stderr.getvalue()
 
+    oversized_stdout = io.StringIO()
+    oversized_stderr = io.StringIO()
+    oversized_status = run_cli(
+        [
+            "bootstrap-organization",
+            "--issuer",
+            identity.issuer,
+            "--subject",
+            identity.subject,
+            "--slug",
+            "oversized-password-org",
+            "--name",
+            "Oversized Password Organization",
+            "--idempotency-key",
+            "oversized-password-bootstrap",
+        ],
+        uow_factory=factory,
+        clock=clock,
+        environ={**protected, "PEERASSIST_OPERATOR_PASSWORD": "x" * 4097},
+        stdin=io.StringIO(),
+        stdout=oversized_stdout,
+        stderr=oversized_stderr,
+    )
+    assert oversized_status == 2
+    assert oversized_stdout.getvalue() == ""
+    assert __import__("json").loads(oversized_stderr.getvalue()) == {
+        "error": {"code": "invalid_operator_input"}
+    }
+
     failed_stdout = io.StringIO()
     failed_stderr = io.StringIO()
     failed = run_cli(
