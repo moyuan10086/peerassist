@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -275,6 +276,91 @@ def test_create_atomically_replaces_a_safe_mktemp_target(tmp_path: Path) -> None
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     assert env_file.stat().st_nlink == 1
     assert _read_exports(env_file)["M1_TEST_ENDPOINTS_READY"] == "0"
+
+
+def test_create_accepts_a_safe_mktemp_target_in_the_sticky_system_tmp() -> None:
+    descriptor, raw_path = tempfile.mkstemp(prefix="peerassist-m1-", dir="/tmp")
+    os.close(descriptor)
+    env_file = Path(raw_path)
+    try:
+        original_inode = env_file.stat().st_ino
+
+        result = _run_helper("create", str(env_file))
+
+        assert result.returncode == 0, result.stderr
+        assert env_file.stat().st_ino != original_inode
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    finally:
+        env_file.unlink(missing_ok=True)
+
+
+def test_create_rejects_a_target_in_an_unsafe_shared_directory(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o777)
+    shared.chmod(0o777)
+    env_file = shared / "provider.env"
+
+    result = _run_helper("create", str(env_file))
+
+    assert result.returncode != 0
+    assert not env_file.exists()
+    assert list(shared.glob(".m1-test-env.*")) == []
+
+
+def test_create_rejects_a_parent_reached_through_a_symlinked_ancestor(
+    tmp_path: Path,
+) -> None:
+    physical_parent = tmp_path / "physical" / "environment"
+    physical_parent.mkdir(parents=True)
+    ambiguous_ancestor = tmp_path / "alias"
+    ambiguous_ancestor.symlink_to(physical_parent.parent, target_is_directory=True)
+    env_file = ambiguous_ancestor / physical_parent.name / "provider.env"
+
+    result = _run_helper("create", str(env_file))
+
+    assert result.returncode != 0
+    assert not (physical_parent / env_file.name).exists()
+    assert list(physical_parent.glob(".m1-test-env.*")) == []
+
+
+def test_create_detects_replacement_of_the_validated_empty_target(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "provider.env"
+    env_file.touch(mode=0o600)
+    original_inode = env_file.stat().st_ino
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_python = bin_dir / "python3"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "if [ ! -e \"$M1_REPLACED_MARKER\" ]; then\n"
+        "  replacement=\"$M1_REPLACEMENT_TARGET.replacement\"\n"
+        "  : > \"$replacement\"\n"
+        "  chmod 0600 \"$replacement\"\n"
+        "  rm -f -- \"$M1_REPLACEMENT_TARGET\"\n"
+        "  mv -- \"$replacement\" \"$M1_REPLACEMENT_TARGET\"\n"
+        "  : > \"$M1_REPLACED_MARKER\"\n"
+        "fi\n"
+        "exec /usr/bin/python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    marker = tmp_path / "replaced"
+    env = os.environ | {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "M1_REPLACEMENT_TARGET": str(env_file),
+        "M1_REPLACED_MARKER": str(marker),
+    }
+
+    result = _run_helper("create", str(env_file), env=env)
+
+    assert result.returncode != 0
+    assert marker.exists()
+    assert env_file.stat().st_ino != original_inode
+    assert env_file.stat().st_size == 0
+    assert list(tmp_path.glob(".m1-test-env.*")) == []
 
 
 def test_create_is_atomic_and_refuses_existing_or_symlink_targets(tmp_path: Path) -> None:

@@ -92,18 +92,22 @@ refresh_endpoints() {
 }
 
 create_env() {
-  local env_file=$1 dir base temp cleanup_id project replace=false
+  local env_file=$1 requested_dir dir base temp cleanup_id project
+  local parent_snapshot target_snapshot replace=false
+  requested_dir=$(dirname -- "$env_file")
+  base=$(basename -- "$env_file")
+  validate_safe_parent "$requested_dir"
+  dir=$VALIDATED_PARENT_PATH
+  parent_snapshot=$VALIDATED_PARENT_SNAPSHOT
   if [[ -L "$env_file" ]]; then
     fail "environment target must not be a symlink"
   elif [[ -e "$env_file" ]]; then
     validate_empty_target "$env_file"
+    target_snapshot=$VALIDATED_TARGET_SNAPSHOT
     replace=true
   fi
-  dir=$(dirname -- "$env_file")
-  base=$(basename -- "$env_file")
-  [[ -d "$dir" && ! -L "$dir" ]] || fail "environment parent must be an existing real directory"
   temp=$(mktemp -- "$dir/.m1-test-env.XXXXXXXX")
-  trap 'rm -f -- "$temp"' RETURN
+  trap 'rm -f -- "$temp"' EXIT
   chmod 0600 "$temp"
 
   cleanup_id=$(random_hex 12)
@@ -146,29 +150,77 @@ create_env() {
   emit_env > "$temp"
 
   if [[ "$replace" == true ]]; then
-    validate_empty_target "$env_file"
+    revalidate_parent "$requested_dir" "$dir" "$parent_snapshot"
+    validate_empty_target "$dir/$base"
+    [[ "$VALIDATED_TARGET_SNAPSHOT" == "$target_snapshot" ]] || \
+      fail "existing environment target changed during creation"
+    revalidate_parent "$requested_dir" "$dir" "$parent_snapshot"
+    validate_empty_target "$dir/$base"
+    [[ "$VALIDATED_TARGET_SNAPSHOT" == "$target_snapshot" ]] || \
+      fail "existing environment target changed during creation"
     mv -f -- "$temp" "$dir/$base"
   else
+    revalidate_parent "$requested_dir" "$dir" "$parent_snapshot"
     # A same-directory hard link makes the fully written file visible atomically
     # and fails closed if another process wins the target-name race.
     ln -- "$temp" "$dir/$base" || fail "environment target already exists"
   fi
   rm -f -- "$temp"
-  trap - RETURN
+  trap - EXIT
+}
+
+validate_safe_parent() {
+  local requested=$1 physical lexical snapshot mode owner permissions uid
+  [[ -d "$requested" ]] || fail "environment parent must be an existing real directory"
+  physical=$(realpath -e -- "$requested") || \
+    fail "environment parent must be an existing real directory"
+  lexical=$(realpath -e -s -- "$requested") || \
+    fail "environment parent must be an existing real directory"
+  [[ "$physical" == "$lexical" ]] || \
+    fail "environment parent path must not contain symlinks"
+  snapshot=$(stat -c '%d:%i:%a:%u' -- "$physical") || \
+    fail "could not inspect environment parent"
+  IFS=: read -r _ _ mode owner <<< "$snapshot"
+  permissions=$((8#$mode))
+  uid=$(id -u)
+  if [[ "$owner" == 0 ]] && (( (permissions & 01000) != 0 )); then
+    :
+  elif [[ "$owner" == "$uid" ]]; then
+    (( (permissions & 0022) == 0 )) || \
+      fail "environment parent must not be writable by group or others"
+  else
+    fail "environment parent must be caller-owned or a root-owned sticky directory"
+  fi
+  VALIDATED_PARENT_PATH=$physical
+  VALIDATED_PARENT_SNAPSHOT=$snapshot
+}
+
+revalidate_parent() {
+  local requested=$1 expected_path=$2 expected_snapshot=$3
+  local physical lexical snapshot
+  physical=$(realpath -e -- "$requested") || fail "environment parent changed during creation"
+  lexical=$(realpath -e -s -- "$requested") || fail "environment parent changed during creation"
+  [[ "$physical" == "$expected_path" && "$lexical" == "$expected_path" ]] || \
+    fail "environment parent changed during creation"
+  snapshot=$(stat -c '%d:%i:%a:%u' -- "$physical") || \
+    fail "environment parent changed during creation"
+  [[ "$snapshot" == "$expected_snapshot" ]] || \
+    fail "environment parent changed during creation"
 }
 
 validate_empty_target() {
-  local target=$1 mode owner links size
-  [[ -f "$target" && ! -L "$target" ]] || \
+  local target=$1 snapshot device inode mode owner links size type
+  [[ ! -L "$target" ]] || fail "environment target must be a regular non-symlink file"
+  snapshot=$(stat -c '%d:%i:%a:%u:%h:%s:%F' -- "$target") || \
     fail "environment target must be a regular non-symlink file"
-  mode=$(stat -c '%a' -- "$target")
-  owner=$(stat -c '%u' -- "$target")
-  links=$(stat -c '%h' -- "$target")
-  size=$(stat -c '%s' -- "$target")
+  IFS=: read -r device inode mode owner links size type <<< "$snapshot"
+  [[ "$type" == "regular file" || "$type" == "regular empty file" ]] || \
+    fail "environment target must be a regular non-symlink file"
   [[ "$mode" == 600 ]] || fail "existing environment target must have mode 0600"
   [[ "$owner" == "$(id -u)" ]] || fail "existing environment target must be owned by the caller"
   [[ "$links" == 1 ]] || fail "existing environment target must not have hard links"
   [[ "$size" == 0 ]] || fail "existing environment target must be empty"
+  VALIDATED_TARGET_SNAPSHOT=$snapshot
 }
 
 allowed_name() {
