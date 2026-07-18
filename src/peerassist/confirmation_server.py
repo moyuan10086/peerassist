@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from common.config import get_settings
 from common.pipeline_context import peerassist_stage_dir, write_json_file
@@ -37,7 +37,26 @@ from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
 _SOURCE_FRONTEND_APP_ROOT = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace"
 _PACKAGED_FRONTEND_DIST_ROOT = Path(__file__).resolve().parents[1] / "web" / "peerassist-workspace" / "dist"
-_WORKSPACE_ROUTES = {"/", "/paper", "/agent", "/queue", "/trace", "/confirm", "/artifacts"}
+_WORKSPACE_ROUTES = {
+    "/",
+    "/paper",
+    "/agent",
+    "/queue",
+    "/trace",
+    "/confirm",
+    "/artifacts",
+    "/login",
+    "/admin",
+}
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirect)
 
 
 def _is_review_job_api_path(path: str) -> bool:
@@ -46,6 +65,10 @@ def _is_review_job_api_path(path: str) -> bool:
         or path.startswith("/api/jobs/")
         or path.startswith("/api/papers/")
     )
+
+
+def _is_platform_api_path(path: str) -> bool:
+    return path == "/api/v1" or path.startswith("/api/v1/")
 
 
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
@@ -5450,12 +5473,14 @@ def _load_workspace_state(*, run_dir: Path, paper_id: str) -> dict[str, Any]:
             {"id": "trace", "label": "工具追踪", "path": "/trace"},
             {"id": "confirm", "label": "人工确认", "path": "/confirm"},
             {"id": "artifacts", "label": "产物导出", "path": "/artifacts"},
+            {"id": "admin", "label": "成员管理", "path": "/admin"},
         ],
     }
 
 
 def _build_paper_overview(run_dir: Path) -> dict[str, object]:
-    ledger = read_json_safely(peerassist_stage_dir(run_dir) / "evidence_ledger.json")
+    stage_dir = peerassist_stage_dir(run_dir)
+    ledger = read_json_safely(stage_dir / "evidence_ledger.json")
     rows = ledger.get("items") if isinstance(ledger.get("items"), list) else []
     items = [row for row in rows if isinstance(row, dict)]
     title = next(
@@ -5499,12 +5524,28 @@ def _build_paper_overview(run_dir: Path) -> dict[str, object]:
     return {
         "available": bool(title or abstract),
         "title": title,
+        "summary": _paper_review_summary(stage_dir / "agent_review_draft.md"),
         "abstract": abstract,
         "objective": sentences[0] if sentences else "",
         "method": method or (sentences[1] if len(sentences) > 1 else ""),
         "result": result or (sentences[-1] if sentences else ""),
         "limitation": limitation,
     }
+
+
+def _paper_review_summary(path: Path) -> str:
+    try:
+        markdown = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeError):
+        return ""
+    match = re.search(
+        r"^##\s*论文概要\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+        markdown,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        return ""
+    return re.sub(r"\s+", " ", match.group("body")).strip()[:2400]
 
 
 def _join_paper_lines(lines: list[str]) -> str:
@@ -6216,6 +6257,10 @@ def _review_api_base_url() -> str:
     return get_settings().peerassist_review_api_url.rstrip("/")
 
 
+def _platform_api_base_url() -> str:
+    return get_settings().peerassist_platform_api_url.rstrip("/")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve a local PeerAssist confirmation review console.")
     parser.add_argument("--run-dir", required=True)
@@ -6247,6 +6292,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_platform_api_path(path):
+                self._proxy_platform_api()
+                return
             if _is_review_job_api_path(path):
                 self._proxy_review_job_api()
                 return
@@ -6285,6 +6333,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_HEAD(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_platform_api_path(path):
+                self._proxy_platform_api()
+                return
             if _is_review_job_api_path(path):
                 self._proxy_review_job_api()
                 return
@@ -6310,7 +6361,11 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             self.send_error(404, "not found")
 
         def do_POST(self) -> None:
-            if _is_review_job_api_path(self.path.split("?", 1)[0]):
+            path = self.path.split("?", 1)[0]
+            if _is_platform_api_path(path):
+                self._proxy_platform_api()
+                return
+            if _is_review_job_api_path(path):
                 self._proxy_review_job_api()
                 return
             if self.path == "/api/agent-review":
@@ -6398,12 +6453,36 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             return
 
         def _proxy_review_job_api(self) -> None:
+            self._proxy_api(_review_api_base_url(), "review_job_api_unavailable", timeout=300)
+
+        def _proxy_platform_api(self) -> None:
+            self._proxy_api(
+                _platform_api_base_url(),
+                "platform_api_unavailable",
+                timeout=30,
+                preserve_redirects=True,
+            )
+
+        def _proxy_api(
+            self,
+            base_url: str,
+            unavailable_code: str,
+            *,
+            timeout: float,
+            preserve_redirects: bool = False,
+        ) -> None:
             length = int(self.headers.get("Content-Length") or "0")
             headers = {"Connection": "close"}
             for name in (
+                "Accept",
+                "Authorization",
+                "Cookie",
                 "Content-Type",
+                "Idempotency-Key",
                 "Last-Event-ID",
+                "Origin",
                 "Range",
+                "X-CSRF-Token",
                 "If-None-Match",
                 "If-Modified-Since",
             ):
@@ -6423,17 +6502,22 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             if length:
                 headers["Content-Length"] = str(length)
             request = Request(
-                f"{_review_api_base_url()}{self.path}",
+                f"{base_url}{self.path}",
                 data=body,
                 method=self.command,
                 headers=headers,
             )
             try:
-                response = urlopen(request, timeout=300)
+                response = (
+                    _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+                    if preserve_redirects
+                    else urlopen(request, timeout=timeout)
+                )
             except HTTPError as exc:
                 response = exc
             except (URLError, TimeoutError) as exc:
-                self._send_json({"error": "review_job_api_unavailable", "detail": str(exc)}, status=503)
+                del exc
+                self._send_json({"error": unavailable_code}, status=503)
                 return
             with response:
                 self.send_response(response.status)
@@ -6446,10 +6530,13 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                     "Cache-Control",
                     "ETag",
                     "Last-Modified",
+                    "Location",
                 )
                 for name in forwarded_headers:
                     if response.headers.get(name):
                         self.send_header(name, str(response.headers[name]))
+                for cookie in response.headers.get_all("Set-Cookie", []):
+                    self.send_header("Set-Cookie", cookie)
                 if not response.headers.get("Content-Type"):
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                 if not response.headers.get("Cache-Control"):

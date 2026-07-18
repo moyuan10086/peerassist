@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import cast
@@ -16,6 +17,7 @@ from peerassist.platform.adapters.memory import (
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_schema import PostgresSchemaReadiness
 from peerassist.platform.ports import IdentityProvider, ObjectStore, UnitOfWorkFactory
+from peerassist.platform.services.sessions import BrowserSessionService
 
 from .dependencies import LifecycleResource, ReadinessCheck
 
@@ -63,6 +65,7 @@ class PlatformDependencies:
     uow_factory: UnitOfWorkFactory
     identity_provider: IdentityProvider
     object_store: ObjectStore
+    session_service: BrowserSessionService
     readiness_checks: tuple[ReadinessCheck, ...]
     lifecycle_resources: tuple[LifecycleResource, ...] = ()
     readiness_check_timeout_seconds: float = 2.0
@@ -111,7 +114,7 @@ class PlatformDependencies:
 def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
     """Build explicitly selected adapters, failing closed in production."""
 
-    if settings.environment == "production":
+    if settings.environment == "production" or settings.provider_profile == "external":
         if (
             not settings.oidc_issuer
             or not settings.oidc_audience.strip()
@@ -128,15 +131,26 @@ def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
             identity_provider = oidc.OidcIdentityProvider(
                 issuer=settings.oidc_issuer,
                 audience=settings.oidc_audience,
+                client_id=settings.oidc_client_id,
                 accepted_algorithms=frozenset(settings.oidc_algorithms),
-                require_https=True,
+                require_https=settings.environment == "production",
             )
         except Exception:
             raise CompositionError("OIDC identity provider is unavailable.") from None
+        session_keys = settings.decoded_session_keys()
+        if not session_keys:
+            raise CompositionError("Browser session provider is unavailable.")
+        session_service = BrowserSessionService(
+            uow_factory,
+            identity_provider,
+            key_ring=session_keys,
+            redirect_uri=f"{settings.public_base_url}/api/v1/auth/callback",
+        )
         return PlatformDependencies(
             uow_factory=uow_factory,
             identity_provider=identity_provider,
             object_store=cast(ObjectStore, _UnavailableProvider("Object store")),
+            session_service=session_service,
             readiness_checks=(
                 PostgresSchemaReadiness(uow_factory.engine),
                 identity_provider,
@@ -163,19 +177,27 @@ def _memory_dependencies(
     lifecycle_stop_timeout_seconds: float = 2.0,
     lifecycle_cleanup_timeout_seconds: float = 10.0,
 ) -> PlatformDependencies:
+    uow_factory = MemoryUnitOfWorkFactory()
+    identity_provider = FakeIdentityProvider(
+        issuer=issuer,
+        audience=audience,
+        accepted_algorithms=algorithms,
+    )
     checks = readiness_checks or (
         _Ready("database"),
         _Ready("identity"),
         _Ready("object_store"),
     )
     return PlatformDependencies(
-        uow_factory=MemoryUnitOfWorkFactory(),
-        identity_provider=FakeIdentityProvider(
-            issuer=issuer,
-            audience=audience,
-            accepted_algorithms=algorithms,
-        ),
+        uow_factory=uow_factory,
+        identity_provider=identity_provider,
         object_store=MemoryObjectStore(),
+        session_service=BrowserSessionService(
+            uow_factory,
+            identity_provider,
+            key_ring={"development": hashlib.sha256(b"peerassist-development-session-key").digest()},
+            redirect_uri="http://testserver/api/v1/auth/callback",
+        ),
         readiness_checks=checks,
         lifecycle_resources=lifecycle_resources,
         readiness_check_timeout_seconds=readiness_check_timeout_seconds,

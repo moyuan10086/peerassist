@@ -33,41 +33,73 @@
   "users": [
     {
       "username": "org-a-admin",
+      "email": "org-a-admin@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org A",
+      "lastName": "Admin",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-a-owner",
+      "email": "org-a-owner@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org A",
+      "lastName": "Owner",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-a-reviewer",
+      "email": "org-a-reviewer@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org A",
+      "lastName": "Reviewer",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-a-viewer",
+      "email": "org-a-viewer@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org A",
+      "lastName": "Viewer",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-b-admin",
+      "email": "org-b-admin@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org B",
+      "lastName": "Admin",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-b-owner",
+      "email": "org-b-owner@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org B",
+      "lastName": "Owner",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-b-reviewer",
+      "email": "org-b-reviewer@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org B",
+      "lastName": "Reviewer",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     },
     {
       "username": "org-b-viewer",
+      "email": "org-b-viewer@peerassist.test",
+      "emailVerified": true,
+      "firstName": "Org B",
+      "lastName": "Viewer",
       "enabled": true,
       "credentials": [{"type": "password", "value": "${M1_TEST_OIDC_USER_PASSWORD}", "temporary": false}]
     }

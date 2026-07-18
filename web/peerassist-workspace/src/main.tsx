@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import * as pdfjsLib from "pdfjs-dist";
 import {
   Bot,
+  Building2,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -16,6 +17,8 @@ import {
   GitBranch,
   History,
   Loader2,
+  LogIn,
+  LogOut,
   Maximize2,
   MessageSquareText,
   Minus,
@@ -29,6 +32,7 @@ import {
   ShieldCheck,
   Square,
   TerminalSquare,
+  Users,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -76,7 +80,7 @@ type WorkspaceWindow = {
   path: string;
 };
 
-type WindowId = "paper" | "agent" | "queue" | "trace" | "confirm" | "artifacts";
+type WindowId = "paper" | "agent" | "queue" | "trace" | "confirm" | "artifacts" | "admin" | "login";
 
 type Evidence = {
   id?: string;
@@ -300,11 +304,26 @@ type ModelSettingsView = {
 type PaperOverview = {
   available?: boolean;
   title?: string;
+  summary?: string;
   abstract?: string;
   objective?: string;
   method?: string;
   result?: string;
   limitation?: string;
+};
+
+type AuthUser = { id: string; display_name: string; status: string };
+type AuthSession = { authenticated: boolean; user: AuthUser | null; available: boolean };
+type OrganizationRow = { id: string; slug: string; name: string; status: string; version: number };
+type ProjectRow = { id: string; organization_id: string; name: string; status: string; version: number };
+type MembershipRow = {
+  id: string;
+  organization_id: string;
+  project_id?: string;
+  user_id: string;
+  role: string;
+  status: string;
+  version: number;
 };
 
 type PdfDocumentProxy = Awaited<ReturnType<typeof pdfjsLib.getDocument>> extends {
@@ -325,6 +344,7 @@ const fallbackBootstrap: Bootstrap = {
     { id: "trace", label: "工具追踪", path: "/trace" },
     { id: "confirm", label: "人工确认", path: "/confirm" },
     { id: "artifacts", label: "产物导出", path: "/artifacts" },
+    { id: "admin", label: "成员管理", path: "/admin" },
   ],
 };
 
@@ -341,6 +361,8 @@ function readServerBootstrap(): Partial<Bootstrap> {
 
 function currentWindowFromPath(): WindowId {
   const path = window.location.pathname.replace(/\/$/, "") || "/paper";
+  if (path.includes("login")) return "login";
+  if (path.includes("admin")) return "admin";
   if (path.includes("agent")) return "agent";
   if (path.includes("queue")) return "queue";
   if (path.includes("trace")) return "trace";
@@ -358,6 +380,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false, user: null, available: false });
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
@@ -402,6 +425,25 @@ function App() {
     return jobs;
   }, []);
 
+  const refreshSession = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/auth/session", { cache: "no-store" });
+      if (!response.ok) throw new Error("身份服务不可用");
+      const payload = (await response.json()) as { authenticated?: boolean; user?: AuthUser | null };
+      const next = {
+        authenticated: Boolean(payload.authenticated),
+        user: payload.user || null,
+        available: true,
+      };
+      setAuthSession(next);
+      return next;
+    } catch {
+      const next = { authenticated: false, user: null, available: false };
+      setAuthSession(next);
+      return next;
+    }
+  }, []);
+
   const refreshJobWorkspace = useCallback(async (jobId: string) => {
     if (!jobId) return null;
     const response = await fetch(`/api/jobs/${jobId}/workspace`, { cache: "no-store" });
@@ -413,10 +455,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    Promise.all([refresh(), refreshJobs()]).catch(() =>
+    Promise.all([refresh(), refreshJobs(), refreshSession()]).catch(() =>
       setStreamLines((lines) => [...lines, "初始状态读取失败，保留本地壳"]),
     );
-  }, [refresh, refreshJobs]);
+  }, [refresh, refreshJobs, refreshSession]);
 
   useEffect(() => {
     const timer = window.setInterval(() => refreshJobs().catch(() => undefined), 3000);
@@ -625,7 +667,29 @@ function App() {
     }
   }
 
-  const activeLabel = bootstrap.windows.find((item) => item.id === activeWindow)?.label || "论文阅读";
+  async function logout() {
+    const csrf = document.cookie
+      .split(";")
+      .map((item) => item.trim())
+      .find((item) => item.startsWith("peerassist_csrf="))
+      ?.split("=", 2)[1];
+    if (!csrf) {
+      await refreshSession();
+      navigate("login", "/login");
+      return;
+    }
+    await fetch("/api/v1/auth/logout", {
+      method: "POST",
+      headers: { "X-CSRF-Token": decodeURIComponent(csrf) },
+      redirect: "manual",
+    }).catch(() => undefined);
+    await refreshSession();
+    navigate("login", "/login");
+  }
+
+  const activeLabel = activeWindow === "login"
+    ? "登录"
+    : bootstrap.windows.find((item) => item.id === activeWindow)?.label || "论文阅读";
 
   return (
     <div className="app-shell">
@@ -669,6 +733,20 @@ function App() {
             <h1>{activeLabel}</h1>
           </div>
           <div className="topbar-actions">
+            {authSession.authenticated ? (
+              <>
+                <button className="ghost-button" type="button" onClick={() => navigate("admin", "/admin")}>
+                  <Users size={16} /> {authSession.user?.display_name || "成员管理"}
+                </button>
+                <button className="icon-button" type="button" onClick={() => void logout()} title="退出登录" aria-label="退出登录">
+                  <LogOut size={16} />
+                </button>
+              </>
+            ) : (
+              <button className="ghost-button" type="button" onClick={() => navigate("login", "/login")}>
+                <LogIn size={16} /> 登录
+              </button>
+            )}
             <button className="ghost-button" type="button" onClick={() => setModelSettingsOpen(true)}>
               <Settings2 size={16} /> 模型设置
             </button>
@@ -721,6 +799,12 @@ function App() {
         {activeWindow === "trace" && <TraceWindow events={events} streamLines={streamLines} />}
         {activeWindow === "confirm" && <ConfirmWindow items={queueItems} busy={busy} onDecision={submitDecision} />}
         {activeWindow === "artifacts" && <ArtifactsWindow paths={paths} reports={state.artifacts} />}
+        {activeWindow === "login" && <LoginWindow available={authSession.available} />}
+        {activeWindow === "admin" && (
+          authSession.authenticated
+            ? <AdminWindow showToast={showToast} />
+            : <LoginWindow available={authSession.available} />
+        )}
         <ModelSettingsDrawer
           open={modelSettingsOpen}
           initial={bootstrap.model_config}
@@ -761,15 +845,283 @@ function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
         <span className="paper-overview-toggle">展开 / 收起</span>
       </summary>
       <div className="paper-overview-body">
+        {overview.summary && (
+          <div className="paper-overview-summary">
+            <small>这篇论文讲了什么</small>
+            <p>{overview.summary}</p>
+          </div>
+        )}
         {facts.map(([label, value]) => (
           <div className="paper-overview-fact" key={label}>
             <small>{label}</small>
             <p>{value}</p>
           </div>
         ))}
-        {overview.abstract && <p className="paper-abstract">{overview.abstract}</p>}
+        {overview.abstract && (
+          <details className="paper-abstract">
+            <summary>查看英文摘要原文</summary>
+            <p>{overview.abstract}</p>
+          </details>
+        )}
       </div>
     </details>
+  );
+}
+
+function LoginWindow({ available }: { available: boolean }) {
+  return (
+    <section className="login-stage">
+      <div className="login-panel">
+        <span className="login-mark"><ShieldCheck size={28} /></span>
+        <p className="eyebrow">PeerAssist Identity</p>
+        <h2>登录审稿工作区</h2>
+        <p>使用统一身份进入组织、项目和成员管理。</p>
+        <button
+          className="primary-button wide"
+          type="button"
+          disabled={!available}
+          onClick={() => window.location.assign("/api/v1/auth/login?return_path=/admin")}
+        >
+          <LogIn size={17} /> {available ? "使用统一身份登录" : "身份服务启动中"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
+  const [organizations, setOrganizations] = useState<OrganizationRow[]>([]);
+  const [organizationId, setOrganizationId] = useState("");
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [projectId, setProjectId] = useState("");
+  const [organizationMembers, setOrganizationMembers] = useState<MembershipRow[]>([]);
+  const [projectMembers, setProjectMembers] = useState<MembershipRow[]>([]);
+  const [projectName, setProjectName] = useState("");
+  const [newUserId, setNewUserId] = useState("");
+  const [projectUserId, setProjectUserId] = useState("");
+  const [projectRole, setProjectRole] = useState("reviewer");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const api = useCallback(async (path: string, init?: RequestInit) => {
+    const response = await fetch(path, { cache: "no-store", ...init });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error?.message || payload.error || "管理操作失败");
+    return payload;
+  }, []);
+
+  const loadOrganizations = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const rows = await api("/api/v1/organizations") as OrganizationRow[];
+      setOrganizations(rows);
+      setOrganizationId((current) => current || rows[0]?.id || "");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法读取组织");
+    } finally {
+      setLoading(false);
+    }
+  }, [api]);
+
+  const loadOrganization = useCallback(async (id: string) => {
+    if (!id) {
+      setProjects([]);
+      setOrganizationMembers([]);
+      return;
+    }
+    try {
+      const [projectRows, memberRows] = await Promise.all([
+        api(`/api/v1/organizations/${id}/projects`) as Promise<ProjectRow[]>,
+        api(`/api/v1/organizations/${id}/members`) as Promise<MembershipRow[]>,
+      ]);
+      setProjects(projectRows);
+      setOrganizationMembers(memberRows);
+      setProjectId((current) => projectRows.some((row) => row.id === current) ? current : projectRows[0]?.id || "");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法读取组织数据");
+    }
+  }, [api]);
+
+  const loadProjectMembers = useCallback(async (id: string) => {
+    if (!id) {
+      setProjectMembers([]);
+      return;
+    }
+    try {
+      setProjectMembers(await api(`/api/v1/projects/${id}/members`) as MembershipRow[]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法读取项目成员");
+    }
+  }, [api]);
+
+  useEffect(() => { void loadOrganizations(); }, [loadOrganizations]);
+  useEffect(() => { void loadOrganization(organizationId); }, [loadOrganization, organizationId]);
+  useEffect(() => { void loadProjectMembers(projectId); }, [loadProjectMembers, projectId]);
+
+  async function createProject(event: React.FormEvent) {
+    event.preventDefault();
+    if (!organizationId || !projectName.trim()) return;
+    try {
+      await api(`/api/v1/organizations/${organizationId}/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ name: projectName.trim() }),
+      });
+      setProjectName("");
+      await loadOrganization(organizationId);
+      showToast("项目已创建");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "项目创建失败");
+    }
+  }
+
+  async function grantOrganizationMember(event: React.FormEvent) {
+    event.preventDefault();
+    if (!organizationId || !newUserId.trim()) return;
+    try {
+      await api(`/api/v1/organizations/${organizationId}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ user_id: newUserId.trim(), expected_version: null }),
+      });
+      setNewUserId("");
+      await loadOrganization(organizationId);
+      showToast("组织管理员已添加");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "成员添加失败");
+    }
+  }
+
+  async function grantProjectMember(event: React.FormEvent) {
+    event.preventDefault();
+    if (!projectId || !projectUserId) return;
+    try {
+      await api(`/api/v1/projects/${projectId}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ user_id: projectUserId, role: projectRole, expected_version: null }),
+      });
+      await loadProjectMembers(projectId);
+      showToast("项目成员已添加");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "项目成员添加失败");
+    }
+  }
+
+  async function updateProjectMember(member: MembershipRow, role: string, status = member.status) {
+    try {
+      await api(`/api/v1/projects/${member.project_id}/members/${member.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ role, status, expected_version: member.version }),
+      });
+      await loadProjectMembers(projectId);
+      showToast(status === "revoked" ? "成员已撤销" : "成员角色已更新");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "成员更新失败");
+    }
+  }
+
+  const activeOrganization = organizations.find((row) => row.id === organizationId);
+  return (
+    <section className="admin-layout">
+      <div className="admin-command-bar">
+        <div>
+          <p className="eyebrow">组织管理</p>
+          <h2>{activeOrganization?.name || "成员与项目"}</h2>
+        </div>
+        <label>
+          <span>当前组织</span>
+          <select value={organizationId} onChange={(event) => setOrganizationId(event.target.value)}>
+            {organizations.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
+          </select>
+        </label>
+      </div>
+      {loading && <div className="admin-empty"><Loader2 className="spin" /> 正在读取组织</div>}
+      {!loading && !organizations.length && (
+        <div className="admin-empty">
+          <Building2 size={28} />
+          <strong>当前账号尚未加入组织</strong>
+          <span>完成管理员初始化后，组织与成员会显示在这里。</span>
+        </div>
+      )}
+      {error && <p className="settings-error" role="alert">{error}</p>}
+      {organizationId && (
+        <div className="admin-grid">
+          <section className="admin-section">
+            <header><h3>项目</h3><span>{projects.length}</span></header>
+            <form className="admin-inline-form" onSubmit={createProject}>
+              <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="新项目名称" />
+              <button className="primary-button" type="submit"><Plus size={15} /> 创建</button>
+            </form>
+            <div className="admin-list">
+              {projects.map((row) => (
+                <button key={row.id} type="button" aria-pressed={row.id === projectId} onClick={() => setProjectId(row.id)}>
+                  <span><FolderDown size={16} /> {row.name}</span><small>{row.status}</small>
+                </button>
+              ))}
+            </div>
+          </section>
+          <section className="admin-section">
+            <header><h3>组织管理员</h3><span>{organizationMembers.length}</span></header>
+            <form className="admin-inline-form" onSubmit={grantOrganizationMember}>
+              <input value={newUserId} onChange={(event) => setNewUserId(event.target.value)} placeholder="用户 ID" />
+              <button className="ghost-button" type="submit"><Plus size={15} /> 添加</button>
+            </form>
+            <MembershipTable rows={organizationMembers} />
+          </section>
+          <section className="admin-section admin-project-members">
+            <header><h3>项目成员</h3><span>{projectMembers.length}</span></header>
+            <form className="admin-member-form" onSubmit={grantProjectMember}>
+              <select value={projectUserId} onChange={(event) => setProjectUserId(event.target.value)}>
+                <option value="">选择组织成员</option>
+                {organizationMembers.map((row) => <option key={row.user_id} value={row.user_id}>{row.user_id}</option>)}
+              </select>
+              <select value={projectRole} onChange={(event) => setProjectRole(event.target.value)}>
+                <option value="project_owner">项目所有者</option>
+                <option value="reviewer">审稿人</option>
+                <option value="viewer">只读成员</option>
+              </select>
+              <button className="primary-button" type="submit" disabled={!projectId}><Plus size={15} /> 添加成员</button>
+            </form>
+            <MembershipTable rows={projectMembers} onRoleChange={updateProjectMember} />
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MembershipTable({
+  rows,
+  onRoleChange,
+}: {
+  rows: MembershipRow[];
+  onRoleChange?: (row: MembershipRow, role: string, status?: string) => void;
+}) {
+  if (!rows.length) return <div className="admin-list-empty">暂无成员</div>;
+  return (
+    <div className="member-table">
+      {rows.map((row) => (
+        <div className="member-row" key={row.id}>
+          <span className="member-avatar">{row.user_id.slice(0, 2).toUpperCase()}</span>
+          <code title={row.user_id}>{row.user_id}</code>
+          {onRoleChange ? (
+            <select value={row.role} onChange={(event) => onRoleChange(row, event.target.value)}>
+              <option value="project_owner">项目所有者</option>
+              <option value="reviewer">审稿人</option>
+              <option value="viewer">只读成员</option>
+            </select>
+          ) : <span className="member-role">组织管理员</span>}
+          {onRoleChange && row.status !== "revoked" && (
+            <button className="icon-button" type="button" title="撤销成员" aria-label="撤销成员" onClick={() => onRoleChange(row, row.role, "revoked")}>
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -2253,6 +2605,8 @@ function windowIcon(id: WindowId) {
     trace: <TerminalSquare size={17} />,
     confirm: <ShieldCheck size={17} />,
     artifacts: <FolderDown size={17} />,
+    admin: <Users size={17} />,
+    login: <LogIn size={17} />,
   };
   return icons[id];
 }

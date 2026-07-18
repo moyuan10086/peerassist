@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ def _utc_now() -> datetime:
 @dataclass(frozen=True)
 class _Discovery:
     authorization_endpoint: str
+    token_endpoint: str
     jwks_uri: str
     expires_at: float
 
@@ -52,6 +54,7 @@ class OidcIdentityProvider:
         *,
         issuer: str,
         audience: str,
+        client_id: str | None = None,
         accepted_algorithms: frozenset[str],
         clock: Callable[[], datetime] = _utc_now,
         disabled_identities: set[tuple[str, str]] | None = None,
@@ -77,6 +80,7 @@ class OidcIdentityProvider:
 
         self.issuer = normalized_issuer
         self.audience = audience.strip()
+        self.client_id = (client_id or audience).strip()
         self.accepted_algorithms = algorithms
         self._clock = clock
         self._disabled_identities = frozenset(disabled_identities or ())
@@ -92,6 +96,16 @@ class OidcIdentityProvider:
 
     def validate_bearer(self, bearer: str) -> AuthenticatedIdentity:
         """Return only normalized claims after complete cryptographic validation."""
+
+        return self._validate_token(bearer, audience=self.audience)
+
+    def _validate_token(
+        self,
+        bearer: str,
+        *,
+        audience: str,
+        expected_nonce: str = "",
+    ) -> AuthenticatedIdentity:
 
         if not isinstance(bearer, str) or not bearer or len(bearer.encode("utf-8")) > _MAX_TOKEN_BYTES:
             raise AuthenticationRequired()
@@ -115,7 +129,7 @@ class OidcIdentityProvider:
                 bearer,
                 key=key,
                 algorithms=[algorithm],
-                audience=self.audience,
+                audience=audience,
                 issuer=self.issuer,
                 options={
                     "require": ["iss", "sub", "aud", "exp"],
@@ -125,27 +139,87 @@ class OidcIdentityProvider:
                     "verify_sub": True,
                 },
             )
+            if expected_nonce and not hmac.compare_digest(
+                str(claims.get("nonce") or ""),
+                expected_nonce,
+            ):
+                raise AuthenticationRequired()
             return self._identity(claims)
         except AuthenticationRequired:
             raise
         except (httpx.HTTPError, jwt.PyJWTError, KeyError, TypeError, ValueError):
             raise AuthenticationRequired() from None
 
-    def build_authorization_url(self, transaction_id: UUID) -> str:
+    def build_authorization_url(self, transaction_id: UUID, **kwargs: str) -> str:
         try:
             with self._cache_lock:
                 discovery = self._load_documents()[0]
-            return f"{discovery.authorization_endpoint}?{urlencode({'transaction_id': str(transaction_id)})}"
+            state = kwargs.get("state", "")
+            redirect_uri = kwargs.get("redirect_uri", "")
+            nonce = kwargs.get("nonce", "")
+            code_challenge = kwargs.get("code_challenge", "")
+            if not all((state, redirect_uri, nonce, code_challenge)):
+                return f"{discovery.authorization_endpoint}?{urlencode({'transaction_id': str(transaction_id)})}"
+            self._validate_url(
+                redirect_uri,
+                require_https=self._require_https,
+                label="redirect_uri",
+            )
+            parameters = {
+                'client_id': self.client_id,
+                'response_type': 'code',
+                'scope': 'openid profile email',
+                'redirect_uri': redirect_uri,
+                'state': state,
+                'nonce': nonce,
+                'code_challenge': code_challenge,
+                'code_challenge_method': 'S256',
+            }
+            return f"{discovery.authorization_endpoint}?{urlencode(parameters)}"
         except AuthenticationRequired:
             raise
         except (httpx.HTTPError, KeyError, TypeError, ValueError):
             raise AuthenticationRequired() from None
 
     def exchange_callback(
-        self, transaction_id: UUID, authorization_code: str
+        self, transaction_id: UUID, authorization_code: str, **kwargs: str
     ) -> AuthenticatedIdentity:
-        del transaction_id, authorization_code
-        raise AuthenticationRequired()
+        del transaction_id
+        redirect_uri = kwargs.get("redirect_uri", "")
+        code_verifier = kwargs.get("code_verifier", "")
+        expected_nonce = kwargs.get("expected_nonce", "")
+        if not all((authorization_code, redirect_uri, code_verifier, expected_nonce)):
+            raise AuthenticationRequired()
+        try:
+            with self._cache_lock:
+                discovery = self._load_documents()[0]
+            response = self._http.post(
+                discovery.token_endpoint,
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": self.client_id,
+                    "code": authorization_code,
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": code_verifier,
+                },
+                timeout=self._http_timeout,
+            )
+            response.raise_for_status()
+            if len(response.content) > _MAX_DOCUMENT_BYTES:
+                raise ValueError("OIDC token response exceeds the size limit")
+            payload = response.json()
+            id_token = payload.get("id_token") if isinstance(payload, dict) else None
+            if not isinstance(id_token, str):
+                raise AuthenticationRequired()
+            return self._validate_token(
+                id_token,
+                audience=self.client_id,
+                expected_nonce=expected_nonce,
+            )
+        except AuthenticationRequired:
+            raise
+        except (httpx.HTTPError, jwt.PyJWTError, KeyError, TypeError, ValueError):
+            raise AuthenticationRequired() from None
 
     async def check(self) -> bool:
         try:
@@ -206,9 +280,11 @@ class OidcIdentityProvider:
             raise ValueError("OIDC discovery issuer mismatch")
         jwks_uri = self._endpoint(document, "jwks_uri")
         authorization_endpoint = self._endpoint(document, "authorization_endpoint")
+        token_endpoint = self._endpoint(document, "token_endpoint")
         jwks = self._fetch_jwks(jwks_uri, now)
         discovery = _Discovery(
             authorization_endpoint=authorization_endpoint,
+            token_endpoint=token_endpoint,
             jwks_uri=jwks_uri,
             expires_at=now + self._cache_ttl_seconds,
         )

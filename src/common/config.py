@@ -69,9 +69,11 @@ class PlatformSettings(BaseSettings):
     )
 
     environment: Literal["development", "test", "production"] = "development"
+    provider_profile: Literal["memory", "external"] = "memory"
     database_url: SecretStr
     oidc_issuer: str
     oidc_audience: str
+    oidc_client_id: str = Field(default="peerassist-browser", min_length=1, max_length=255)
     oidc_algorithms: list[str] = Field(default_factory=lambda: ["RS256"], min_length=1)
     s3_endpoint: str
     s3_bucket: str = Field(min_length=1)
@@ -199,6 +201,14 @@ class PlatformSettings(BaseSettings):
                 raise ValueError("session key material has insufficient byte diversity")
         return values
 
+    def decoded_session_keys(self) -> dict[str, bytes]:
+        return {
+            secret.get_secret_value().partition("=")[0]: _decode_session_key_material(
+                secret.get_secret_value().partition("=")[2]
+            )
+            for secret in self.session_key_ring
+        }
+
     @field_validator("legacy_bind_host")
     @classmethod
     def validate_legacy_bind_host(cls, value: str, info: ValidationInfo) -> str:
@@ -292,8 +302,16 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8767",
         validation_alias=AliasChoices("PEERASSIST_REVIEW_API_URL"),
     )
+    peerassist_platform_api_url: str = Field(
+        default="http://127.0.0.1:8000",
+        validation_alias=AliasChoices("PEERASSIST_PLATFORM_API_URL"),
+    )
 
-    @field_validator("peerassist_openai_base_url", "peerassist_review_api_url")
+    @field_validator(
+        "peerassist_openai_base_url",
+        "peerassist_review_api_url",
+        "peerassist_platform_api_url",
+    )
     @classmethod
     def validate_http_base_url(cls, value: str) -> str:
         return _http_url(value, field_name="URL")

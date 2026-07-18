@@ -813,6 +813,13 @@ class _BrowserSessions:
             raise ValueError("browser session ID already exists")
         _insert_immutable(self._state.browser_sessions, session.session_digest, session)
 
+    def revoke(self, session_id: UUID, revoked_at: datetime) -> None:
+        for digest, session in tuple(self._state.browser_sessions.items()):
+            if session.id == session_id and session.revoked_at is None:
+                self._state.browser_sessions[digest] = replace(session, revoked_at=revoked_at)
+                return
+        raise ValueError("browser session is absent or revoked")
+
     def revoke_for_user(self, user_id: UUID) -> None:
         for digest, session in tuple(self._state.browser_sessions.items()):
             if session.user_id == user_id and session.revoked_at is None:
@@ -1135,15 +1142,18 @@ class FakeIdentityProvider:
             datetime.fromtimestamp(float(expires), UTC),
         )
 
-    def build_authorization_url(self, transaction_id: UUID) -> str:
-        return f"{self.issuer}/authorize?{urlencode({'transaction_id': str(transaction_id)})}"
+    def build_authorization_url(self, transaction_id: UUID, **kwargs: str) -> str:
+        return f"{self.issuer}/authorize?{urlencode({'transaction_id': str(transaction_id), **kwargs})}"
 
     def issue_callback(self, transaction_id: UUID, claims: dict[str, object]) -> str:
         code = uuid4().hex
         self._callback_claims[(transaction_id, code)] = copy.deepcopy(claims)
         return code
 
-    def exchange_callback(self, transaction_id: UUID, authorization_code: str) -> AuthenticatedIdentity:
+    def exchange_callback(
+        self, transaction_id: UUID, authorization_code: str, **kwargs: str
+    ) -> AuthenticatedIdentity:
+        del kwargs
         key = (transaction_id, authorization_code)
         claims = self._callback_claims.pop(key, None)
         if claims is None or transaction_id in self._consumed_transactions:

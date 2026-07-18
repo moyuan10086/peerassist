@@ -8,6 +8,9 @@ from typing import Protocol
 
 from fastapi import Request
 
+from peerassist.platform.errors import AuthenticationRequired
+from peerassist.platform.models import Actor, ActorKind
+
 
 class ReadinessCheck(Protocol):
     """A thread-safe probe callable from an independent event loop."""
@@ -78,3 +81,31 @@ def request_id(request: Request) -> str:
     """Return the validated request ID assigned by boundary middleware."""
 
     return request.state.request_id
+
+
+def optional_request_actor(request: Request) -> Actor | None:
+    """Resolve only verified bearer or opaque browser-session credentials."""
+
+    service = request.app.state.dependencies.session_service
+    authorization = request.headers.get("authorization", "")
+    try:
+        if authorization.startswith("Bearer "):
+            actor = service.resolve_bearer(authorization.removeprefix("Bearer ").strip())
+        else:
+            session_token = request.cookies.get("peerassist_session", "")
+            if not session_token:
+                return None
+            actor = service.resolve_session(session_token)
+    except AuthenticationRequired:
+        return None
+    if actor.kind is not ActorKind.USER:
+        return None
+    request.state.management_actor = actor
+    return actor
+
+
+def require_request_actor(request: Request) -> Actor:
+    actor = optional_request_actor(request)
+    if actor is None:
+        raise AuthenticationRequired()
+    return actor

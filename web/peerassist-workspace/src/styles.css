@@ -440,6 +440,250 @@ h1 {
   gap: 12px;
 }
 
+.login-stage {
+  min-height: calc(100vh - 100px);
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  background: #eef3f1;
+}
+
+.login-panel {
+  width: min(420px, calc(100vw - 36px));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: var(--shadow);
+  padding: 34px;
+  text-align: center;
+}
+
+.login-mark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  margin: 0 auto 18px;
+  border: 1px solid #8bc8bb;
+  border-radius: var(--radius);
+  background: #12302b;
+  color: #d8fff5;
+}
+
+.login-panel h2 {
+  margin-bottom: 8px;
+  font-size: 24px;
+}
+
+.login-panel > p:not(.eyebrow) {
+  margin-bottom: 24px;
+  color: var(--muted);
+}
+
+.admin-layout {
+  min-height: calc(100vh - 100px);
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.admin-command-bar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 14px 16px;
+}
+
+.admin-command-bar h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.admin-command-bar label {
+  min-width: 240px;
+}
+
+.admin-command-bar label span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.admin-command-bar select,
+.admin-inline-form input,
+.admin-member-form select,
+.member-row select {
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  padding: 7px 9px;
+}
+
+.admin-command-bar select {
+  width: 100%;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.75fr) minmax(390px, 1.25fr);
+  gap: 12px;
+}
+
+.admin-section {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.admin-section > header {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 13px;
+}
+
+.admin-section > header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.admin-section > header span {
+  min-width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #e8f2ef;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.admin-project-members {
+  grid-column: 1 / -1;
+}
+
+.admin-inline-form,
+.admin-member-form {
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding: 11px 13px;
+}
+
+.admin-inline-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.admin-member-form {
+  grid-template-columns: minmax(220px, 1fr) 180px auto;
+}
+
+.admin-list {
+  display: grid;
+  padding: 8px;
+}
+
+.admin-list > button {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.admin-list > button:hover,
+.admin-list > button[aria-pressed="true"] {
+  border-color: var(--line-strong);
+  background: #eef5f2;
+}
+
+.admin-list > button span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-list > button small {
+  color: var(--muted);
+}
+
+.admin-empty,
+.admin-list-empty {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: var(--muted);
+  padding: 42px 18px;
+  text-align: center;
+}
+
+.member-table {
+  display: grid;
+  padding: 4px 12px 12px;
+}
+
+.member-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(160px, 1fr) minmax(140px, 180px) 36px;
+  gap: 9px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding: 9px 0;
+}
+
+.member-row:last-child {
+  border-bottom: 0;
+}
+
+.member-avatar {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius);
+  background: #183a35;
+  color: #d8fff5;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.member-row code {
+  min-width: 0;
+  overflow: hidden;
+  color: #3f504c;
+  text-overflow: ellipsis;
+}
+
+.member-role {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 820;
+}
+
 .connection-state {
   color: var(--warn);
   font-size: 12px;
@@ -543,6 +787,27 @@ h1 {
   border-top: 1px solid var(--line);
 }
 
+.paper-overview-summary {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--line);
+  background: #f3f8f6;
+  padding: 14px;
+}
+
+.paper-overview-summary small {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.paper-overview-summary p {
+  max-width: 1100px;
+  margin: 6px 0 0;
+  color: #23332f;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .paper-overview-fact {
   min-width: 0;
   padding: 12px 14px;
@@ -564,16 +829,23 @@ h1 {
 
 .paper-abstract {
   grid-column: 1 / -1;
-  display: -webkit-box;
   margin: 0;
-  overflow: hidden;
   border-top: 1px solid var(--line);
   background: #f8faf9;
   color: #4d5a57;
   padding: 10px 14px;
   font-size: 12px;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+}
+
+.paper-abstract > summary {
+  color: #40504c;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.paper-abstract p {
+  margin: 9px 0 2px;
+  line-height: 1.6;
 }
 
 .metric-card {
@@ -2011,7 +2283,7 @@ input:focus {
   .window-nav {
     height: 100%;
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 2px;
     overflow: visible;
   }
@@ -2076,10 +2348,6 @@ input:focus {
     -webkit-line-clamp: 2;
   }
 
-  .paper-abstract {
-    -webkit-line-clamp: 3;
-  }
-
   .settings-drawer {
     width: 100vw;
     border-left: 0;
@@ -2087,6 +2355,36 @@ input:focus {
 
   .upload-bar {
     grid-template-columns: 1fr;
+  }
+
+  .admin-command-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-command-bar label {
+    min-width: 0;
+  }
+
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-project-members {
+    grid-column: auto;
+  }
+
+  .admin-member-form {
+    grid-template-columns: 1fr;
+  }
+
+  .member-row {
+    grid-template-columns: 34px minmax(0, 1fr) 36px;
+  }
+
+  .member-row select,
+  .member-role {
+    grid-column: 2 / -1;
   }
 
   .upload-actions {

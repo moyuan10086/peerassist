@@ -412,6 +412,18 @@ class _BrowserSessions(_Repository):
             "browser session already exists or is invalid",
         )
 
+    def revoke(self, session_id: UUID, revoked_at: datetime) -> None:
+        result = self.connection.execute(
+            update(schema.browser_sessions)
+            .where(
+                schema.browser_sessions.c.id == session_id,
+                schema.browser_sessions.c.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at, updated_at=revoked_at)
+        )
+        if result.rowcount != 1:
+            raise ValueError("browser session is absent or revoked")
+
     def revoke_for_user(self, user_id: UUID) -> None:
         now = self._clock()
         self.connection.execute(

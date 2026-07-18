@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -180,6 +181,13 @@ def test_profile_uses_generated_values_and_bootstraps_provider_data() -> None:
     assert '"webOrigins": ["${M1_TEST_PUBLIC_ORIGIN}"]' in realm_text
     assert '"http://127.0.0.1/*"' not in realm_text
     assert "minioadmin" not in (compose_text + realm_text).lower()
+
+    realm = json.loads(realm_text)
+    for user in realm["users"]:
+        assert user["email"]
+        assert user["emailVerified"] is True
+        assert user["firstName"]
+        assert user["lastName"]
 
 
 def test_non_root_bootstraps_can_read_inputs_and_write_only_to_tmpfs() -> None:

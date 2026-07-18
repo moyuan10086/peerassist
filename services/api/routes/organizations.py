@@ -25,13 +25,14 @@ from peerassist.platform.services.memberships import (
     MembershipService,
     UpdateOrganizationMembership,
 )
+from services.api.dependencies import require_request_actor
 
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
 
 
 def require_management_actor(request: Request) -> Actor:
-    """Fail closed until the session milestone installs a verified actor dependency."""
-    actor = getattr(request.state, "management_actor", None)
+    """Resolve a verified public user actor for management operations."""
+    actor = require_request_actor(request)
     if not isinstance(actor, Actor) or actor.kind is not ActorKind.USER:
         raise AuthenticationRequired()
     return actor

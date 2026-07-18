@@ -1145,10 +1145,19 @@ def test_paper_overview_extracts_title_abstract_method_and_result(tmp_path: Path
             ]
         },
     )
+    (stage_dir / "agent_review_draft.md").write_text(
+        "## 论文概要\n"
+        "本文用序贯检验动态决定评测样本量，在可靠性不下降的前提下降低计算成本。\n\n"
+        "## 主要意见\n后续审稿内容。\n",
+        encoding="utf-8",
+    )
 
     overview = confirmation_server._build_paper_overview(run_dir)
 
     assert overview["title"] == "Efficient Evaluation"
+    assert overview["summary"] == (
+        "本文用序贯检验动态决定评测样本量，在可靠性不下降的前提下降低计算成本。"
+    )
     assert "inefficient for model evaluation" in overview["abstract"]
     assert overview["method"] == "We propose a sequential testing framework."
     assert overview["result"] == "Our experiments reduce evaluation cost by 40%."
