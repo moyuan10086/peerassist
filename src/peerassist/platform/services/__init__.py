@@ -16,6 +16,7 @@ from .memberships import (
     UpdateOrganizationMembership,
     UpdateProjectMembership,
 )
+from .papers import PaperService, PaperSource, PaperUploadResult, UploadPaper
 
 __all__ = [
     "AuditFilter",
@@ -29,6 +30,10 @@ __all__ = [
     "GrantProjectMembership",
     "IdentityOperatorService",
     "MembershipService",
+    "PaperService",
+    "PaperSource",
+    "PaperUploadResult",
     "UpdateOrganizationMembership",
     "UpdateProjectMembership",
+    "UploadPaper",
 ]

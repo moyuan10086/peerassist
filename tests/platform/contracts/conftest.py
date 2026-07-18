@@ -72,7 +72,7 @@ def uow_factory(request: pytest.FixtureRequest, clock: MutableClock):
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    if config.getoption("--adapter") == "postgresql":
+    if config.getoption("--adapter") in {"postgresql", "minio", "keycloak"}:
         for item in items:
             if "/platform/contracts/" in str(item.path):
                 item.add_marker(pytest.mark.requires_docker)
@@ -81,6 +81,30 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @pytest.fixture
 def object_store_factory(request: pytest.FixtureRequest, clock: MutableClock):
     adapter = request.config.getoption("--adapter")
+    if adapter == "minio":
+        from peerassist.platform.adapters.s3 import S3ObjectStore
+
+        required = {
+            name: os.environ.get(name, "")
+            for name in (
+                "PEERASSIST_TEST_S3_ENDPOINT",
+                "M1_TEST_S3_BUCKET",
+                "M1_TEST_S3_REGION",
+                "M1_TEST_S3_ACCESS_KEY",
+                "M1_TEST_S3_SECRET_KEY",
+            )
+        }
+        if not all(required.values()):
+            pytest.skip("MinIO object-store settings are not configured")
+        return lambda: S3ObjectStore.from_endpoint(
+            endpoint=required["PEERASSIST_TEST_S3_ENDPOINT"],
+            bucket=required["M1_TEST_S3_BUCKET"],
+            region=required["M1_TEST_S3_REGION"],
+            access_key_id=required["M1_TEST_S3_ACCESS_KEY"],
+            secret_access_key=required["M1_TEST_S3_SECRET_KEY"],
+            path_style=True,
+            clock=clock,
+        )
     if adapter != "memory":
         pytest.skip(f"object-store adapter {adapter!r} is not implemented in Task 3")
     return lambda: MemoryObjectStore(clock=clock)

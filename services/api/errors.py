@@ -25,6 +25,7 @@ _PLATFORM_STATUS = {
     "idempotency_conflict": HTTPStatus.CONFLICT,
     "immutable_resource": HTTPStatus.CONFLICT,
     "invalid_canonical_payload": HTTPStatus.BAD_REQUEST,
+    "invalid_upload": HTTPStatus.BAD_REQUEST,
     "not_found": HTTPStatus.NOT_FOUND,
     "payload_too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
     "stale_version": HTTPStatus.CONFLICT,

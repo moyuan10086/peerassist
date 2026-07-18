@@ -33,6 +33,7 @@ def test_production_composition_selects_postgres_without_memory_fallback() -> No
 
     from peerassist.platform.adapters.oidc import OidcIdentityProvider
     from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
+    from peerassist.platform.adapters.s3 import S3ObjectStore
 
     settings = _settings(
         environment="production",
@@ -55,12 +56,27 @@ def test_production_composition_selects_postgres_without_memory_fallback() -> No
     assert not isinstance(dependencies.uow_factory, MemoryUnitOfWorkFactory)
     assert not isinstance(dependencies.identity_provider, FakeIdentityProvider)
     assert isinstance(dependencies.identity_provider, OidcIdentityProvider)
-    assert not isinstance(dependencies.object_store, MemoryObjectStore)
+    assert isinstance(dependencies.object_store, S3ObjectStore)
+    assert dependencies.object_store in dependencies.lifecycle_resources
     assert {check.name for check in dependencies.readiness_checks} == {
         "database",
         "identity",
         "object_store",
     }
+
+
+def test_external_composition_fails_closed_without_object_store_credentials() -> None:
+    from services.api.composition import CompositionError, build_dependencies
+
+    settings = _settings(
+        provider_profile="external",
+        session_key_ring=[
+            "key-2026-07=9f4c7b0d5e3a1862c8f1d4a7b0e3956c2f8a1d4e7b0c3965a2f8d1e4b7c09365"
+        ],
+    )
+
+    with pytest.raises(CompositionError, match="Object store provider is unavailable"):
+        build_dependencies(settings)
 
 
 def test_production_composition_fails_closed_when_identity_provider_cannot_be_built(

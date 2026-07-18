@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import cast
 
 from common.config import PlatformSettings
 from peerassist.platform.adapters import oidc
@@ -16,6 +15,7 @@ from peerassist.platform.adapters.memory import (
 )
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_schema import PostgresSchemaReadiness
+from peerassist.platform.adapters.s3 import S3ObjectStore
 from peerassist.platform.ports import IdentityProvider, ObjectStore, UnitOfWorkFactory
 from peerassist.platform.services.sessions import BrowserSessionService
 
@@ -34,28 +34,6 @@ class _Ready:
 
     async def check(self) -> bool:
         return True
-
-
-@dataclass(frozen=True)
-class _Unavailable:
-    name: str
-
-    async def check(self) -> bool:
-        return False
-
-
-@dataclass(frozen=True)
-class _UnavailableProvider:
-    provider_name: str
-
-    def __getattr__(self, operation: str) -> object:
-        del operation
-
-        def unavailable(*args: object, **kwargs: object) -> object:
-            del args, kwargs
-            raise CompositionError(f"{self.provider_name} provider is unavailable.")
-
-        return unavailable
 
 
 @dataclass(frozen=True)
@@ -137,6 +115,19 @@ def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
             )
         except Exception:
             raise CompositionError("OIDC identity provider is unavailable.") from None
+        if settings.s3_access_key_id is None or settings.s3_secret_access_key is None:
+            raise CompositionError("Object store provider is unavailable.")
+        try:
+            object_store = S3ObjectStore.from_endpoint(
+                endpoint=settings.s3_endpoint,
+                bucket=settings.s3_bucket,
+                region="us-east-1",
+                access_key_id=settings.s3_access_key_id.get_secret_value(),
+                secret_access_key=settings.s3_secret_access_key.get_secret_value(),
+                path_style=settings.s3_path_style,
+            )
+        except Exception:
+            raise CompositionError("Object store provider is unavailable.") from None
         session_keys = settings.decoded_session_keys()
         if not session_keys:
             raise CompositionError("Browser session provider is unavailable.")
@@ -149,14 +140,14 @@ def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
         return PlatformDependencies(
             uow_factory=uow_factory,
             identity_provider=identity_provider,
-            object_store=cast(ObjectStore, _UnavailableProvider("Object store")),
+            object_store=object_store,
             session_service=session_service,
             readiness_checks=(
                 PostgresSchemaReadiness(uow_factory.engine),
                 identity_provider,
-                _Unavailable("object_store"),
+                object_store,
             ),
-            lifecycle_resources=(uow_factory, identity_provider),
+            lifecycle_resources=(uow_factory, identity_provider, object_store),
         )
     return _memory_dependencies(
         issuer=settings.oidc_issuer,
