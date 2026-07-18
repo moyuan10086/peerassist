@@ -619,6 +619,15 @@ class _Outbox:
                 for item in self._state.outbox.values()
                 if item.published_at is None
                 and _record_scope_matches(scope, item.organization_id, item.project_id)
+                and not any(
+                    lower.published_at is None
+                    and lower.organization_id == item.organization_id
+                    and lower.project_id == item.project_id
+                    and lower.aggregate_type == item.aggregate_type
+                    and lower.aggregate_id == item.aggregate_id
+                    and lower.aggregate_sequence < item.aggregate_sequence
+                    for lower in self._state.outbox.values()
+                )
             ),
             key=lambda item: (item.created_at, item.aggregate_id.int, item.aggregate_sequence, item.id.int),
         )[:limit]

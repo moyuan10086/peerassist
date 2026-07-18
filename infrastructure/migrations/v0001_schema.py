@@ -146,6 +146,7 @@ oidc_transactions = Table(
     _timestamp("expires_at"),
     _timestamp("created_at"),
     _timestamp("consumed_at", nullable=True),
+    UniqueConstraint("nonce_digest", name="uq_oidc_transactions_nonce_digest"),
     UniqueConstraint("state_digest", name="uq_oidc_transactions_state_digest"),
     _check("char_length(return_path) > 0", "ck_oidc_transactions_return_path"),
 )

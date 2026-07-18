@@ -57,7 +57,11 @@ def uow_factory(request: pytest.FixtureRequest, clock: MutableClock):
         command.upgrade(config, "head")
         factory = PostgresUnitOfWorkFactory.from_url(database_url, clock=clock)
         with factory.engine.begin() as connection:
-            table_names = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
+            table_names = ", ".join(
+                f'"{table.name}"'
+                for table in reversed(metadata.sorted_tables)
+                if table.name != "schema_metadata"
+            )
             connection.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
 
         request.addfinalizer(factory.engine.dispose)

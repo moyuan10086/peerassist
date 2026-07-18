@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,7 +14,15 @@ from sqlalchemy import create_engine, text
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_schema import metadata
 from peerassist.platform.errors import IdempotencyConflict
-from peerassist.platform.models import Actor, ActorKind, CommandRecord, TenantScope, WorkItem
+from peerassist.platform.models import (
+    Actor,
+    ActorKind,
+    CommandRecord,
+    OidcTransaction,
+    OutboxEvent,
+    TenantScope,
+    WorkItem,
+)
 
 pytestmark = pytest.mark.requires_docker
 
@@ -30,7 +38,11 @@ def seeded_factory(request: pytest.FixtureRequest) -> tuple[PostgresUnitOfWorkFa
     command.upgrade(config, "head")
     engine = create_engine(database_url, pool_pre_ping=True, pool_size=20, max_overflow=4)
     with engine.begin() as connection:
-        tables = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
+        tables = ", ".join(
+            f'"{table.name}"'
+            for table in reversed(metadata.sorted_tables)
+            if table.name != "schema_metadata"
+        )
         connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
     actor = Actor(uuid4(), ActorKind.USER)
     scope = TenantScope(uuid4(), uuid4())
@@ -210,3 +222,92 @@ def test_competing_workers_never_receive_the_same_active_claim(
     claimed = tuple(item_id for item_id in claims if item_id is not None)
     assert len(claimed) == len(items)
     assert len(set(claimed)) == len(items)
+
+
+def test_outbox_locked_head_blocks_next_sequence_but_not_another_aggregate(
+    seeded_factory: tuple[PostgresUnitOfWorkFactory, Actor, TenantScope, UUID, UUID],
+) -> None:
+    factory, actor, scope, _, _ = seeded_factory
+    now = datetime(2026, 7, 18, 8, tzinfo=UTC)
+    aggregate_a, aggregate_b = uuid4(), uuid4()
+    first = OutboxEvent(
+        uuid4(), scope.organization_id, "review_job", aggregate_a, 1, "started", 1, {}, now,
+        project_id=scope.project_id,
+    )
+    second = replace(first, id=uuid4(), aggregate_sequence=2, created_at=now - timedelta(seconds=1))
+    other = replace(
+        first,
+        id=uuid4(),
+        aggregate_id=aggregate_b,
+        aggregate_sequence=1,
+        created_at=now + timedelta(seconds=1),
+    )
+    with factory(actor) as uow:
+        for event in (second, other, first):
+            uow.outbox.append(scope, event)
+        uow.commit()
+
+    publisher_a = factory(actor).__enter__()
+    try:
+        assert publisher_a.outbox.claim_batch(scope, 1) == (replace(first, publication_attempts=1),)
+        with factory(actor) as publisher_b:
+            assert publisher_b.outbox.claim_batch(scope, 10) == (
+                replace(other, publication_attempts=1),
+            )
+            publisher_b.outbox.mark_published(scope, other.id)
+            publisher_b.commit()
+        publisher_a.outbox.mark_published(scope, first.id)
+        publisher_a.commit()
+    finally:
+        publisher_a.__exit__(None, None, None)
+
+    with factory(actor) as publisher_b:
+        assert publisher_b.outbox.claim_batch(scope, 10) == (
+            replace(second, publication_attempts=1),
+        )
+
+
+def test_concurrent_oidc_transactions_enforce_nonce_and_state_uniqueness(
+    seeded_factory: tuple[PostgresUnitOfWorkFactory, Actor, TenantScope, UUID, UUID],
+) -> None:
+    factory, actor, _, _, _ = seeded_factory
+    now = datetime(2026, 7, 18, 8, tzinfo=UTC)
+    first = OidcTransaction(
+        uuid4(), "a" * 64, "b" * 64, b"ciphertext-a", "key-1", "/compat/",
+        now + timedelta(minutes=10), now,
+    )
+    same_nonce = replace(
+        first,
+        id=uuid4(),
+        state_digest="c" * 64,
+        encrypted_pkce_verifier=b"ciphertext-b",
+    )
+
+    def add(transaction: OidcTransaction) -> bool:
+        try:
+            with factory(actor) as uow:
+                uow.oidc_transactions.add(transaction)
+                uow.commit()
+            return True
+        except ValueError:
+            return False
+
+    candidates = (first, same_nonce)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(add, candidates))
+    assert sum(results) == 1
+
+    winner = next(
+        transaction
+        for transaction, inserted in zip(candidates, results, strict=True)
+        if inserted
+    )
+    same_state = replace(
+        winner,
+        id=uuid4(),
+        nonce_digest="d" * 64,
+        encrypted_pkce_verifier=b"ciphertext-c",
+    )
+    with factory(actor) as uow:
+        with pytest.raises(ValueError, match="already exists"):
+            uow.oidc_transactions.add(same_state)

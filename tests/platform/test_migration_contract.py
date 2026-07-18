@@ -70,6 +70,7 @@ def test_schema_names_tenant_constraints_and_required_deduplication_keys() -> No
 
     for name in {
         "uq_external_identities_issuer_subject",
+        "uq_oidc_transactions_nonce_digest",
         "uq_commands_identity",
         "uq_papers_project_digest",
         "uq_review_events_job_sequence",
@@ -85,6 +86,10 @@ def test_schema_names_tenant_constraints_and_required_deduplication_keys() -> No
         assert name in named
 
     assert isinstance(named["uq_commands_identity"], UniqueConstraint)
+    assert isinstance(named["uq_oidc_transactions_nonce_digest"], UniqueConstraint)
+    assert {column.name for column in named["uq_oidc_transactions_nonce_digest"].columns} == {
+        "nonce_digest"
+    }
     assert isinstance(named["fk_review_jobs_paper_version_tenant"], ForeignKeyConstraint)
     assert {column.name for column in named["uq_commands_identity"].columns} == {
         "organization_id",

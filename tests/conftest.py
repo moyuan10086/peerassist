@@ -8,11 +8,54 @@ stage's test file instead.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from schemas.paper import Paper, PaperMetadata, Section, Table
+
+POSTGRES_TEST_ADVISORY_LOCK_KEY = 0x5065657241737374
+
+
+@pytest.fixture(autouse=True)
+def postgres_database_lock(request: pytest.FixtureRequest):
+    """Serialize every shared-M1-database test across pytest workers."""
+
+    path = str(request.node.path).replace("\\", "/")
+    guarded = "/platform/contracts/" in path or "/platform/integration/" in path
+    raw_url = os.environ.get("PEERASSIST_TEST_DATABASE_URL")
+    if not guarded or not raw_url:
+        yield None
+        return
+
+    from sqlalchemy import create_engine, text
+
+    database_url = raw_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    engine = create_engine(database_url, pool_pre_ping=True)
+    connection = engine.connect()
+    acquired = False
+    try:
+        connection.execute(text("SET statement_timeout = '120000ms'"))
+        connection.execute(
+            text("SELECT pg_advisory_lock(:key)"),
+            {"key": POSTGRES_TEST_ADVISORY_LOCK_KEY},
+        )
+        connection.commit()
+        acquired = True
+        yield connection
+    finally:
+        if acquired:
+            try:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": POSTGRES_TEST_ADVISORY_LOCK_KEY},
+                )
+                connection.commit()
+            except Exception:
+                pass
+        connection.close()
+        engine.dispose()
 
 
 @pytest.fixture

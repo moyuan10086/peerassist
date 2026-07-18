@@ -28,7 +28,11 @@ def postgres_factory(request: pytest.FixtureRequest) -> PostgresUnitOfWorkFactor
     command.upgrade(config, "head")
     engine = create_engine(database_url, pool_pre_ping=True)
     with engine.begin() as connection:
-        tables = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
+        tables = ", ".join(
+            f'"{table.name}"'
+            for table in reversed(metadata.sorted_tables)
+            if table.name != "schema_metadata"
+        )
         connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
     factory = PostgresUnitOfWorkFactory(engine)
     yield factory
@@ -163,3 +167,24 @@ def test_foreign_keys_and_append_only_trigger_remain_enabled(
                 },
             )
             connection.execute(text("UPDATE audit_events SET outcome = 'failed'"))
+
+
+def test_advisory_lock_serializes_workers_before_database_cleanup(
+    postgres_factory: PostgresUnitOfWorkFactory,
+    postgres_database_lock,
+) -> None:
+    engine = postgres_factory.engine
+    lock_key = 0x5065657241737374
+    assert postgres_database_lock.scalar(
+        text(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM pg_locks "
+            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted"
+            ")"
+        )
+    )
+    with engine.connect() as contender:
+        assert contender.scalar(
+            text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": lock_key},
+        ) is False

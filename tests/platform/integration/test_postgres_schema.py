@@ -36,6 +36,7 @@ async def test_real_postgres_upgrade_downgrade_and_repeat(
     alembic_config: Config,
 ) -> None:
     engine = create_engine(database_url)
+    command.downgrade(alembic_config, "base")
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE m0_legacy_marker (id integer PRIMARY KEY)"))
     readiness = PostgresSchemaReadiness(engine)

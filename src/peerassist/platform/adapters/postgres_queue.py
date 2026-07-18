@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, insert, or_, select, update
+from sqlalchemy import delete, exists, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from peerassist.platform.errors import IdempotencyConflict, NotFound
@@ -310,13 +310,31 @@ class _Outbox(_Repository):
     def claim_batch(self, scope: TenantScope, limit: int) -> tuple[OutboxEvent, ...]:
         if limit <= 0:
             return ()
+        candidate = schema.outbox_events.alias("outbox_candidate")
+        lower = schema.outbox_events.alias("outbox_lower")
+        lower_unpublished_exists = exists(
+            select(1).select_from(lower).where(
+                lower.c.organization_id == candidate.c.organization_id,
+                lower.c.project_id.is_not_distinct_from(candidate.c.project_id),
+                lower.c.aggregate_type == candidate.c.aggregate_type,
+                lower.c.aggregate_id == candidate.c.aggregate_id,
+                lower.c.aggregate_sequence < candidate.c.aggregate_sequence,
+                lower.c.published_at.is_(None),
+            )
+        )
         rows = tuple(
             self.connection.execute(
-                select(schema.outbox_events)
-                .where(_record_filter(schema.outbox_events, scope), schema.outbox_events.c.published_at.is_(None))
+                select(candidate)
+                .where(
+                    _record_filter(candidate, scope),
+                    candidate.c.published_at.is_(None),
+                    ~lower_unpublished_exists,
+                )
                 .order_by(
-                    schema.outbox_events.c.created_at, schema.outbox_events.c.aggregate_id,
-                    schema.outbox_events.c.aggregate_sequence, schema.outbox_events.c.id,
+                    candidate.c.created_at,
+                    candidate.c.aggregate_id,
+                    candidate.c.aggregate_sequence,
+                    candidate.c.id,
                 )
                 .limit(limit)
                 .with_for_update(skip_locked=True)

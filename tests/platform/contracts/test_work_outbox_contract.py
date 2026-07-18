@@ -166,12 +166,37 @@ def test_outbox_is_atomic_ordered_and_publication_is_idempotent(uow_factory, clo
         uow.commit()
     with uow_factory(principal) as uow:
         claimed = uow.outbox.claim_batch(scope, 10)
-        assert [event.aggregate_sequence for event in claimed] == [1, 2]
+        assert [event.aggregate_sequence for event in claimed] == [1]
         uow.outbox.mark_published(scope, first.id)
         uow.outbox.mark_published(scope, first.id)
         uow.commit()
     with uow_factory(principal) as uow:
-        assert uow.outbox.claim_batch(scope, 10) == (replace(second, publication_attempts=2),)
+        assert uow.outbox.claim_batch(scope, 10) == (replace(second, publication_attempts=1),)
+
+
+def test_outbox_claims_only_the_minimum_unpublished_sequence_per_aggregate(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    first = outbox(scope, clock(), 1)
+    second = replace(
+        first,
+        id=uuid4(),
+        aggregate_sequence=2,
+        created_at=clock() - timedelta(seconds=1),
+    )
+    with uow_factory(principal) as uow:
+        uow.outbox.append(scope, second)
+        uow.outbox.append(scope, first)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.outbox.claim_batch(scope, 10) == (replace(first, publication_attempts=1),)
+        uow.outbox.mark_published(scope, first.id)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.outbox.claim_batch(scope, 10) == (replace(second, publication_attempts=1),)
 
 
 def test_audit_is_append_only_and_tenant_scoped(uow_factory, clock) -> None:
