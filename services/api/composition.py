@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import cast
 
 from common.config import PlatformSettings
 from peerassist.platform.adapters.memory import (
     FakeIdentityProvider,
     MemoryObjectStore,
     MemoryUnitOfWorkFactory,
+)
+from peerassist.platform.adapters.postgres_schema import (
+    PostgresSchemaReadiness,
+    PostgresUnitOfWorkFactory,
 )
 from peerassist.platform.ports import IdentityProvider, ObjectStore, UnitOfWorkFactory
 
@@ -28,6 +33,28 @@ class _Ready:
 
     async def check(self) -> bool:
         return True
+
+
+@dataclass(frozen=True)
+class _Unavailable:
+    name: str
+
+    async def check(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True)
+class _UnavailableProvider:
+    provider_name: str
+
+    def __getattr__(self, operation: str) -> object:
+        del operation
+
+        def unavailable(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise CompositionError(f"{self.provider_name} provider is unavailable.")
+
+        return unavailable
 
 
 @dataclass(frozen=True)
@@ -86,7 +113,26 @@ def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
     """Build explicitly selected adapters, failing closed in production."""
 
     if settings.environment == "production":
-        raise CompositionError("Production platform providers are not implemented.")
+        try:
+            uow_factory = PostgresUnitOfWorkFactory.from_url(
+                settings.database_url.get_secret_value()
+            )
+        except Exception:
+            raise CompositionError("PostgreSQL provider is unavailable.") from None
+        return PlatformDependencies(
+            uow_factory=uow_factory,
+            identity_provider=cast(
+                IdentityProvider,
+                _UnavailableProvider("Identity"),
+            ),
+            object_store=cast(ObjectStore, _UnavailableProvider("Object store")),
+            readiness_checks=(
+                PostgresSchemaReadiness(uow_factory.engine),
+                _Unavailable("identity"),
+                _Unavailable("object_store"),
+            ),
+            lifecycle_resources=(uow_factory,),
+        )
     return _memory_dependencies(
         issuer=settings.oidc_issuer,
         audience=settings.oidc_audience,

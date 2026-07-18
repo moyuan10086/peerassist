@@ -28,8 +28,10 @@ def test_test_and_development_composition_select_memory_providers_explicitly() -
         }
 
 
-def test_production_composition_fails_closed_without_real_providers() -> None:
-    from services.api.composition import CompositionError, build_dependencies
+def test_production_composition_selects_postgres_without_memory_fallback() -> None:
+    from services.api.composition import build_dependencies
+
+    from peerassist.platform.adapters.postgres_schema import PostgresUnitOfWorkFactory
 
     settings = _settings(
         environment="production",
@@ -46,13 +48,51 @@ def test_production_composition_fails_closed_without_real_providers() -> None:
         scratch_root=Path("/var/lib/peerassist/scratch"),
     )
 
+    dependencies = build_dependencies(settings)
+
+    assert isinstance(dependencies.uow_factory, PostgresUnitOfWorkFactory)
+    assert not isinstance(dependencies.uow_factory, MemoryUnitOfWorkFactory)
+    assert not isinstance(dependencies.identity_provider, FakeIdentityProvider)
+    assert not isinstance(dependencies.object_store, MemoryObjectStore)
+    assert {check.name for check in dependencies.readiness_checks} == {
+        "database",
+        "identity",
+        "object_store",
+    }
+
+
+def test_production_composition_fails_closed_without_database_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.api.composition import CompositionError, build_dependencies
+
+    import peerassist.platform.adapters.postgres_schema as postgres_schema
+
+    settings = _settings(
+        environment="production",
+        database_url="postgresql+psycopg://peerassist:private-db-secret@db/peerassist",
+        oidc_issuer="https://identity.example.test/realms/peerassist",
+        s3_endpoint="https://objects.example.test",
+        s3_access_key_id="private-access-key",
+        s3_secret_access_key="private-object-secret",
+        public_base_url="https://peerassist.example.test",
+        allowed_origins=["https://peerassist.example.test"],
+        session_key_ring=[
+            "key-2026-07=9f4c7b0d5e3a1862c8f1d4a7b0e3956c2f8a1d4e7b0c3965a2f8d1e4b7c09365"
+        ],
+        scratch_root=Path("/var/lib/peerassist/scratch"),
+    )
+    monkeypatch.setattr(
+        postgres_schema,
+        "create_engine",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError("private-db-secret")),
+    )
+
     with pytest.raises(CompositionError) as captured:
         build_dependencies(settings)
 
-    rendered = str(captured.value)
-    assert rendered == "Production platform providers are not implemented."
-    assert "private" not in rendered
-    assert "postgresql" not in rendered
+    assert str(captured.value) == "PostgreSQL provider is unavailable."
+    assert "private" not in str(captured.value)
 
 
 def test_configured_application_loads_settings_only_when_factory_is_called(
