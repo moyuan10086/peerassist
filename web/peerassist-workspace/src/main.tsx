@@ -317,6 +317,52 @@ type PaperOverview = {
   limitation?: string;
 };
 
+function parsePaperSummaryMarkdown(markdown: string): PaperOverview {
+  const sections = new Map<string, string[]>();
+  let currentHeading = "";
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const heading = line.match(/^#{1,3}\s+(.+)$/);
+    if (heading) {
+      currentHeading = heading[1].trim();
+      if (!sections.has(currentHeading)) sections.set(currentHeading, []);
+      continue;
+    }
+    if (!line || !currentHeading) continue;
+    sections.get(currentHeading)?.push(line.replace(/^[-*]\s+/, ""));
+  }
+  const read = (...labels: string[]) => labels
+    .map((label) => sections.get(label)?.join(" ").trim() || "")
+    .find(Boolean) || "";
+  const knownHeadings = new Set([
+    "这篇论文讲了什么",
+    "一句话总结",
+    "论文概要",
+    "研究问题",
+    "研究目标",
+    "研究方法",
+    "方法",
+    "方法概览",
+    "主要发现",
+    "主要结果",
+    "结果概览",
+    "局限",
+    "局限性",
+    "阅读提示",
+  ]);
+  const title = [...sections.keys()].find((heading) => !knownHeadings.has(heading)) || "";
+  const summary = read("一句话总结", "论文概要") || markdown.replace(/^#{1,3}\s+.*$/gm, "").replace(/\s+/g, " ").trim();
+  return {
+    available: Boolean(summary),
+    title,
+    summary,
+    objective: read("研究问题", "研究目标"),
+    method: read("研究方法", "方法", "方法概览"),
+    result: read("主要发现", "主要结果", "结果概览"),
+    limitation: read("局限", "局限性"),
+  };
+}
+
 type AuthUser = { id: string; display_name: string; status: string };
 type AuthSession = { authenticated: boolean; user: AuthUser | null; available: boolean };
 type OrganizationRow = { id: string; slug: string; name: string; status: string; version: number };
@@ -558,15 +604,19 @@ function App() {
         summaryArtifact ? fetch(artifactUrl(summaryArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
         reviewArtifact ? fetch(artifactUrl(reviewArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
       ]);
-      const summaryText = summaryMarkdown.replace(/^#+\s.*$/gm, "").replace(/\s+/g, " ").trim();
-      if (summaryText) {
+      const parsedSummary = parsePaperSummaryMarkdown(summaryMarkdown);
+      if (parsedSummary.available) {
         setBootstrap((current) => ({
           ...current,
           paper_overview: {
             ...(current.paper_overview || {}),
             available: true,
-            title: current.paper_overview?.title || "当前论文",
-            summary: summaryText,
+            title: parsedSummary.title || current.paper_overview?.title || "当前论文",
+            summary: parsedSummary.summary,
+            objective: parsedSummary.objective || current.paper_overview?.objective,
+            method: parsedSummary.method || current.paper_overview?.method,
+            result: parsedSummary.result || current.paper_overview?.result,
+            limitation: parsedSummary.limitation || current.paper_overview?.limitation,
           },
         }));
       }
@@ -943,8 +993,13 @@ function App() {
           <div className="topbar-actions">
             {authSession.authenticated ? (
               <>
-                <button className="ghost-button" type="button" onClick={() => navigate("admin", "/admin")}>
-                  <Users size={16} /> {authSession.user?.display_name || "成员管理"}
+                <button
+                  className="ghost-button"
+                  type="button"
+                  title={`当前账号：${authSession.user?.display_name || "已登录"}`}
+                  onClick={() => navigate("admin", "/admin")}
+                >
+                  <Users size={16} /> 成员与权限
                 </button>
                 <button className="icon-button" type="button" onClick={() => void logout()} title="退出登录" aria-label="退出登录">
                   <LogOut size={16} />
@@ -952,7 +1007,7 @@ function App() {
               </>
             ) : (
               <button className="ghost-button" type="button" onClick={() => navigate("login", "/login")}>
-                <LogIn size={16} /> 登录
+                <LogIn size={16} /> 登录 / 注册
               </button>
             )}
             <button className="ghost-button" type="button" onClick={() => setModelSettingsOpen(true)}>
@@ -962,7 +1017,7 @@ function App() {
               <RefreshCw size={16} /> 刷新状态
             </button>
             <button className="primary-button" type="button" disabled={busy} onClick={() => navigate("agent", "/agent")}>
-              <Bot size={16} /> 打开智能审稿
+              <Bot size={16} /> 上传论文 / 智能审稿
             </button>
           </div>
         </header>
@@ -1038,35 +1093,33 @@ function App() {
 }
 
 function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
-  if (!overview?.available) return null;
   const facts = [
-    ["研究问题", overview.objective],
-    ["方法", overview.method],
-    ["主要结果", overview.result],
+    ["研究问题", overview?.objective],
+    ["方法", overview?.method],
+    ["主要结果", overview?.result],
+    ["局限", overview?.limitation],
   ].filter((item) => item[1]);
   return (
     <details className="paper-overview" open>
       <summary>
         <span>
           <small>论文概览</small>
-          <strong>{overview.title || "当前论文"}</strong>
+          <strong>{overview?.title || "这篇论文讲了什么"}</strong>
         </span>
         <span className="paper-overview-toggle">展开 / 收起</span>
       </summary>
       <div className="paper-overview-body">
-        {overview.summary && (
-          <div className="paper-overview-summary">
-            <small>这篇论文讲了什么</small>
-            <p>{overview.summary}</p>
-          </div>
-        )}
+        <div className="paper-overview-summary">
+          <small>这篇论文讲了什么</small>
+          <p>{overview?.summary || "摘要正在生成，完成后会在这里显示论文的问题、方法、发现与局限。"}</p>
+        </div>
         {facts.map(([label, value]) => (
           <div className="paper-overview-fact" key={label}>
             <small>{label}</small>
             <p>{value}</p>
           </div>
         ))}
-        {overview.abstract && (
+        {overview?.abstract && (
           <details className="paper-abstract">
             <summary>查看英文摘要原文</summary>
             <p>{overview.abstract}</p>
@@ -1083,15 +1136,15 @@ function LoginWindow({ available }: { available: boolean }) {
       <div className="login-panel">
         <span className="login-mark"><ShieldCheck size={28} /></span>
         <p className="eyebrow">PeerAssist Identity</p>
-        <h2>登录审稿工作区</h2>
-        <p>使用统一身份进入组织、项目和成员管理。</p>
+        <h2>登录 / 注册</h2>
+        <p>使用统一身份进入审稿工作区；首次使用可在身份页创建账号。</p>
         <button
           className="primary-button wide"
           type="button"
           disabled={!available}
           onClick={() => window.location.assign("/api/v1/auth/login?return_path=/admin")}
         >
-          <LogIn size={17} /> {available ? "使用统一身份登录" : "身份服务启动中"}
+          <LogIn size={17} /> {available ? "继续登录 / 注册" : "身份服务启动中"}
         </button>
       </div>
     </section>

@@ -2,7 +2,7 @@
   "realm": "${M1_TEST_OIDC_REALM}",
   "enabled": true,
   "sslRequired": "none",
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "loginWithEmailAllowed": false,
   "clients": [
     {

@@ -701,6 +701,18 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "运行时间线" in source
 
 
+def test_workspace_frontend_exposes_account_admin_and_summary_surfaces() -> None:
+    source = (
+        Path(__file__).parents[2] / "web" / "peerassist-workspace" / "src" / "main.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "登录 / 注册" in source
+    assert "成员与权限" in source
+    assert "function parsePaperSummaryMarkdown" in source
+    assert "这篇论文讲了什么" in source
+    assert "摘要正在生成" in source
+
+
 def test_confirmation_server_state_and_decision_endpoints(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -183,6 +183,7 @@ def test_profile_uses_generated_values_and_bootstraps_provider_data() -> None:
     assert "minioadmin" not in (compose_text + realm_text).lower()
 
     realm = json.loads(realm_text)
+    assert realm["registrationAllowed"] is True
     for user in realm["users"]:
         assert user["email"]
         assert user["emailVerified"] is True
