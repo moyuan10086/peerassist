@@ -1,7 +1,8 @@
 """Create the authoritative PeerAssist M1 PostgreSQL schema.
 
-This base revision owns only the platform tables declared in ``postgres_schema``.
-Downgrade deliberately leaves unrelated M0/file-backed resources untouched.
+This unpublished base revision owns only the platform tables and relationship
+constraints declared in ``postgres_schema``. Downgrade deliberately leaves
+unrelated M0/file-backed resources untouched.
 """
 
 from alembic import op

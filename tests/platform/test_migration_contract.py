@@ -107,6 +107,78 @@ def test_schema_names_tenant_constraints_and_required_deduplication_keys() -> No
     assert all(isinstance(index, Index) for index in indexes.values())
 
 
+def test_artifact_stage_manifest_reference_preserves_tenant_and_job_scope() -> None:
+    from peerassist.platform.adapters.postgres_schema import metadata
+
+    stage_unique = _constraint(metadata, "uq_stage_manifests_tenant_id")
+    artifact_stage = _constraint(metadata, "fk_artifacts_stage_manifest_tenant")
+
+    assert _column_names(stage_unique) == {
+        "organization_id",
+        "project_id",
+        "job_id",
+        "id",
+    }
+    assert _column_names(artifact_stage) == {
+        "organization_id",
+        "project_id",
+        "job_id",
+        "stage_manifest_id",
+    }
+    assert metadata.tables["artifacts"].c.stage_manifest_id.nullable is True
+
+
+def test_current_paper_version_reference_must_belong_to_the_same_paper() -> None:
+    from peerassist.platform.adapters.postgres_schema import metadata
+
+    paper_version_unique = _constraint(metadata, "uq_paper_versions_paper_id")
+    current_version = _constraint(metadata, "fk_papers_current_version_tenant_paper")
+
+    assert _column_names(paper_version_unique) == {
+        "organization_id",
+        "project_id",
+        "paper_id",
+        "id",
+    }
+    assert _column_names(current_version) == {
+        "organization_id",
+        "project_id",
+        "id",
+        "current_version_id",
+    }
+    assert metadata.tables["papers"].c.current_version_id.nullable is True
+
+
+def test_audit_command_reference_preserves_organization_and_optional_project_scope() -> None:
+    from peerassist.platform.adapters.postgres_schema import metadata
+
+    audit = metadata.tables["audit_events"]
+    assert audit.c.command_id.nullable is True
+    assert _column_names(_constraint(metadata, "fk_audit_events_command_organization")) == {
+        "organization_id",
+        "command_id",
+    }
+    assert _column_names(_constraint(metadata, "fk_audit_events_command_project")) == {
+        "organization_id",
+        "project_id",
+        "command_id",
+    }
+    assert "ix_audit_events_command" in {index.name for index in audit.indexes}
+
+
+def test_browser_session_identity_reference_preserves_user_scope() -> None:
+    from peerassist.platform.adapters.postgres_schema import metadata
+
+    assert _column_names(_constraint(metadata, "uq_external_identities_user_id")) == {
+        "user_id",
+        "id",
+    }
+    assert _column_names(_constraint(metadata, "fk_browser_sessions_user_identity")) == {
+        "user_id",
+        "identity_id",
+    }
+
+
 def test_mutable_versions_statuses_and_enums_have_strict_checks() -> None:
     from peerassist.platform.adapters.postgres_schema import metadata
 
@@ -183,3 +255,16 @@ def test_migration_module_does_not_auto_run_when_imported(
     module = importlib.import_module("peerassist.platform.adapters.postgres_schema")
 
     assert module.HEAD_REVISION == "0001_platform_m1"
+
+
+def _constraint(metadata: object, name: str) -> object:
+    return next(
+        constraint
+        for table in metadata.tables.values()
+        for constraint in table.constraints
+        if constraint.name == name
+    )
+
+
+def _column_names(constraint: object) -> set[str]:
+    return {column.name for column in constraint.columns}

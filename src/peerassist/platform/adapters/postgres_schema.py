@@ -100,6 +100,7 @@ external_identities = Table(
     Column("version", Integer, nullable=False),
     ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_external_identities_user"),
     UniqueConstraint("issuer", "subject", name="uq_external_identities_issuer_subject"),
+    UniqueConstraint("user_id", "id", name="uq_external_identities_user_id"),
     _check("version > 0", "ck_external_identities_version_positive"),
 )
 
@@ -120,7 +121,9 @@ browser_sessions = Table(
     _timestamp("revoked_at", nullable=True),
     ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_browser_sessions_user"),
     ForeignKeyConstraint(
-        ["identity_id"], ["external_identities.id"], name="fk_browser_sessions_identity"
+        ["user_id", "identity_id"],
+        ["external_identities.user_id", "external_identities.id"],
+        name="fk_browser_sessions_user_identity",
     ),
     UniqueConstraint("session_digest", name="uq_browser_sessions_digest"),
     _check("idle_expires_at <= expires_at", "ck_browser_sessions_idle_expiry"),
@@ -235,7 +238,7 @@ papers = Table(
     _uuid("organization_id"),
     _uuid("project_id"),
     Column("content_sha256", String(64), nullable=False),
-    _uuid("current_version_id"),
+    _uuid("current_version_id", nullable=True),
     Column("status", String(32), nullable=False),
     Column("version", Integer, nullable=False),
     _timestamp("created_at"),
@@ -274,6 +277,13 @@ paper_versions = Table(
     ),
     ForeignKeyConstraint(["created_by"], ["users.id"], name="fk_paper_versions_created_by"),
     UniqueConstraint("organization_id", "project_id", "id", name="uq_paper_versions_tenant_id"),
+    UniqueConstraint(
+        "organization_id",
+        "project_id",
+        "paper_id",
+        "id",
+        name="uq_paper_versions_paper_id",
+    ),
     UniqueConstraint("paper_id", "revision", name="uq_paper_versions_paper_revision"),
     UniqueConstraint("source_object_id", name="uq_paper_versions_source_object"),
     _check("revision > 0", "ck_paper_versions_revision_positive"),
@@ -282,13 +292,19 @@ paper_versions = Table(
 )
 papers.append_constraint(
     ForeignKeyConstraint(
-        [papers.c.organization_id, papers.c.project_id, papers.c.current_version_id],
+        [
+            papers.c.organization_id,
+            papers.c.project_id,
+            papers.c.id,
+            papers.c.current_version_id,
+        ],
         [
             paper_versions.c.organization_id,
             paper_versions.c.project_id,
+            paper_versions.c.paper_id,
             paper_versions.c.id,
         ],
-        name="fk_papers_current_version_tenant",
+        name="fk_papers_current_version_tenant_paper",
         use_alter=True,
     )
 )
@@ -421,6 +437,10 @@ commands = Table(
     UniqueConstraint(
         "organization_id", "actor_id", "operation", "idempotency_key", name="uq_commands_identity"
     ),
+    UniqueConstraint("organization_id", "id", name="uq_commands_organization_id"),
+    UniqueConstraint(
+        "organization_id", "project_id", "id", name="uq_commands_project_id"
+    ),
     _check("char_length(payload_digest) = 64", "ck_commands_payload_digest"),
     _check(
         "(response_status IS NULL AND completed_at IS NULL) OR "
@@ -533,6 +553,13 @@ stage_manifests = Table(
     UniqueConstraint(
         "job_id", "attempt_id", "stage", "input_revision", name="uq_stage_manifests_commit"
     ),
+    UniqueConstraint(
+        "organization_id",
+        "project_id",
+        "job_id",
+        "id",
+        name="uq_stage_manifests_tenant_id",
+    ),
     _values("status", ("pending", "committed", "superseded"), "ck_stage_manifests_status"),
     _check(
         "input_revision >= 0 AND output_revision > 0 AND schema_version > 0",
@@ -594,7 +621,14 @@ artifacts = Table(
         name="fk_artifacts_job_tenant",
     ),
     ForeignKeyConstraint(
-        ["stage_manifest_id"], ["stage_manifests.id"], name="fk_artifacts_stage_manifest"
+        ["organization_id", "project_id", "job_id", "stage_manifest_id"],
+        [
+            "stage_manifests.organization_id",
+            "stage_manifests.project_id",
+            "stage_manifests.job_id",
+            "stage_manifests.id",
+        ],
+        name="fk_artifacts_stage_manifest_tenant",
     ),
     ForeignKeyConstraint(
         ["organization_id", "project_id", "job_id", "report_version_id"],
@@ -650,6 +684,7 @@ audit_events = Table(
     _uuid("identity_id", nullable=True),
     _uuid("organization_id", nullable=True),
     _uuid("project_id", nullable=True),
+    _uuid("command_id", nullable=True),
     Column("action", String(128), nullable=False),
     Column("resource_type", String(128), nullable=False),
     Column("resource_id", String(255), nullable=False),
@@ -668,10 +703,25 @@ audit_events = Table(
         ["projects.organization_id", "projects.id"],
         name="fk_audit_events_project_tenant",
     ),
+    ForeignKeyConstraint(
+        ["organization_id", "command_id"],
+        ["commands.organization_id", "commands.id"],
+        name="fk_audit_events_command_organization",
+    ),
+    ForeignKeyConstraint(
+        ["organization_id", "project_id", "command_id"],
+        ["commands.organization_id", "commands.project_id", "commands.id"],
+        name="fk_audit_events_command_project",
+    ),
     _values("actor_kind", ("user", "operator", "service"), "ck_audit_events_actor_kind"),
     _values("outcome", ("succeeded", "denied", "failed"), "ck_audit_events_outcome"),
+    _check(
+        "command_id IS NULL OR organization_id IS NOT NULL",
+        "ck_audit_events_command_organization_required",
+    ),
 )
 Index("ix_audit_events_tenant_created", audit_events.c.organization_id, audit_events.c.project_id, audit_events.c.created_at, audit_events.c.id)
+Index("ix_audit_events_command", audit_events.c.organization_id, audit_events.c.project_id, audit_events.c.command_id)
 
 AUDIT_FUNCTION_SQL = """
 CREATE OR REPLACE FUNCTION peerassist_reject_audit_mutation()
