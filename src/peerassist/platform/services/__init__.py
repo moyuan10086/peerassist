@@ -1,5 +1,6 @@
 """Application services for tenant, membership, audit, and operator administration."""
 
+from .artifacts import ArtifactService, ArtifactSource
 from .audit import AuditFilter, AuditService
 from .bootstrap import (
     BootstrapOrganization,
@@ -17,15 +18,20 @@ from .memberships import (
     UpdateProjectMembership,
 )
 from .papers import PaperService, PaperSource, PaperUploadResult, UploadPaper
+from .reviews import ChangeReviewJob, CreateReviewJob, RecordReviewDecision, ReviewService
 
 __all__ = [
+    "ArtifactService",
+    "ArtifactSource",
     "AuditFilter",
     "AuditService",
     "BootstrapOrganization",
     "BootstrapOrganizationResult",
     "BootstrapOrganizationService",
     "ChangeIdentity",
+    "ChangeReviewJob",
     "CreateProject",
+    "CreateReviewJob",
     "GrantOrganizationMembership",
     "GrantProjectMembership",
     "IdentityOperatorService",
@@ -33,6 +39,8 @@ __all__ = [
     "PaperService",
     "PaperSource",
     "PaperUploadResult",
+    "RecordReviewDecision",
+    "ReviewService",
     "UpdateOrganizationMembership",
     "UpdateProjectMembership",
     "UploadPaper",

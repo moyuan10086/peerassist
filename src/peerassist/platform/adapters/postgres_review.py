@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy import and_, insert, or_, select, update
 
@@ -188,8 +188,8 @@ class _ReviewJobs(_Repository):
             if _review_job(current) == job:
                 return
             raise ValueError("review job already exists")
-        self._integrity(
-            lambda: self.connection.execute(
+        def operation() -> None:
+            self.connection.execute(
                 insert(schema.review_jobs).values(
                     id=job.id, organization_id=job.organization_id, project_id=job.project_id,
                     paper_version_id=job.paper_version_id, mode=job.mode, stage=job.stage, status=job.status,
@@ -197,13 +197,23 @@ class _ReviewJobs(_Repository):
                     created_at=job.created_at, updated_at=job.updated_at, cancelled_at=job.cancelled_at,
                     safe_error_code=job.safe_error_code,
                 )
-            ),
-            "review job already exists or is invalid",
-        )
+            )
+            self._add_attempt(job)
+
+        self._integrity(operation, "review job already exists or is invalid")
 
     def save(self, scope: TenantScope, job: ReviewJob, expected_version: int) -> None:
         _require_project(scope, job)
         _require_next(job, expected_version)
+        current_row = self._one(
+            select(schema.review_jobs).where(
+                _project_filter(schema.review_jobs, scope),
+                schema.review_jobs.c.id == job.id,
+            )
+        )
+        if current_row is None:
+            raise NotFound()
+        current = _review_job(current_row)
         result = self.connection.execute(
             update(schema.review_jobs)
             .where(
@@ -218,6 +228,28 @@ class _ReviewJobs(_Repository):
         )
         if result.rowcount != 1:
             raise StaleVersion(details={"expected_version": expected_version, "current_version": None})
+        if job.attempt > current.attempt:
+            self._integrity(
+                lambda: self._add_attempt(job),
+                "review attempt already exists or is invalid",
+            )
+
+    def _add_attempt(self, job: ReviewJob) -> None:
+        if job.attempt <= 0:
+            return
+        self.connection.execute(
+            insert(schema.review_attempts).values(
+                id=uuid5(job.id, f"attempt:{job.attempt}"),
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                job_id=job.id,
+                attempt_number=job.attempt,
+                status="queued",
+                started_at=None,
+                finished_at=None,
+                created_at=job.updated_at,
+            )
+        )
 
     def append_event(self, scope: TenantScope, event: ReviewEvent) -> None:
         _require_project(scope, event)
