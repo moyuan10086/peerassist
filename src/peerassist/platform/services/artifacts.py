@@ -45,7 +45,12 @@ class ArtifactService:
             if artifact is None or artifact.job_id != job_id or artifact.status != "available":
                 raise NotFound()
         descriptor = self._object_store.metadata(project.scope, artifact.object.object_id)
-        if descriptor != artifact.object:
+        if (
+            descriptor is None
+            or descriptor.object_id != artifact.object.object_id
+            or descriptor.size_bytes != artifact.object.size_bytes
+            or descriptor.sha256 != artifact.object.sha256
+        ):
             raise DependencyUnavailable()
         return ArtifactSource(
             artifact,

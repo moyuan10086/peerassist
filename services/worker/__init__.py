@@ -1,1 +1,5 @@
-"""Durable worker composition root package."""
+"""PeerAssist durable review worker."""
+
+from .main import ReviewWorker
+
+__all__ = ["ReviewWorker"]
