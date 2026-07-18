@@ -452,6 +452,8 @@ class _Commands:
         existing = self._state.commands.get(key)
         identity = self._identity(command)
         if existing is not None:
+            if not _record_scope_matches(scope, existing.organization_id, existing.project_id):
+                raise IdempotencyConflict()
             if self._identity(existing) != identity:
                 raise IdempotencyConflict()
             return
@@ -474,23 +476,29 @@ class _Commands:
         if existing is None or self._identity(existing) != self._identity(command):
             raise IdempotencyConflict()
         if existing.completed_at is not None:
-            if existing == command:
+            if self._completion(existing) == self._completion(command):
                 return
             raise IdempotencyConflict()
-        self._state.commands[key] = command
+        self._state.commands[key] = replace(
+            existing,
+            response_status=command.response_status,
+            response_body=command.response_body,
+            completed_at=command.completed_at,
+        )
 
     @staticmethod
     def _identity(command: CommandRecord) -> tuple[object, ...]:
         return (
-            command.id,
             command.organization_id,
-            command.project_id,
             command.actor_id,
             command.operation,
             command.idempotency_key,
             command.payload_digest,
-            command.created_at,
         )
+
+    @staticmethod
+    def _completion(command: CommandRecord) -> tuple[object, ...]:
+        return command.response_status, command.response_body, command.completed_at
 
 
 class _WorkItems:

@@ -69,8 +69,14 @@ class _Papers(_Repository):
         _require_initial(paper)
         if version.paper_id != paper.id or version.id != paper.current_version_id or version.revision != 1:
             raise StaleVersion(details={"expected_version": 1, "current_version": version.revision})
-        current_paper = self._one(select(schema.papers).where(schema.papers.c.id == paper.id))
-        current_version = self._one(select(schema.paper_versions).where(schema.paper_versions.c.id == version.id))
+        current_paper = self._one(
+            select(schema.papers).where(_project_filter(schema.papers, scope), schema.papers.c.id == paper.id)
+        )
+        current_version = self._one(
+            select(schema.paper_versions).where(
+                _project_filter(schema.paper_versions, scope), schema.paper_versions.c.id == version.id
+            )
+        )
         if current_paper is not None or current_version is not None:
             if current_paper is not None and current_version is not None:
                 if _paper(current_paper) == paper and _paper_version(current_version) == version:
@@ -95,7 +101,9 @@ class _Papers(_Repository):
                 )
             )
             self.connection.execute(
-                update(schema.papers).where(schema.papers.c.id == paper.id).values(current_version_id=version.id)
+                update(schema.papers)
+                .where(_project_filter(schema.papers, scope), schema.papers.c.id == paper.id)
+                .values(current_version_id=version.id)
             )
 
         self._integrity(operation, "paper or version already exists or is invalid")
@@ -114,7 +122,11 @@ class _Papers(_Repository):
             raise StaleVersion(
                 details={"expected_version": expected_paper_version + 1, "current_version": version.revision}
             )
-        current = self._one(select(schema.paper_versions).where(schema.paper_versions.c.id == version.id))
+        current = self._one(
+            select(schema.paper_versions).where(
+                _project_filter(schema.paper_versions, scope), schema.paper_versions.c.id == version.id
+            )
+        )
         if current is not None:
             if _paper_version(current) == version:
                 return
@@ -167,7 +179,11 @@ class _ReviewJobs(_Repository):
     def add(self, scope: TenantScope, job: ReviewJob) -> None:
         _require_project(scope, job)
         _require_initial(job)
-        current = self._one(select(schema.review_jobs).where(schema.review_jobs.c.id == job.id))
+        current = self._one(
+            select(schema.review_jobs).where(
+                _project_filter(schema.review_jobs, scope), schema.review_jobs.c.id == job.id
+            )
+        )
         if current is not None:
             if _review_job(current) == job:
                 return
@@ -256,6 +272,7 @@ class _Artifacts(_Repository):
         _require_project(scope, artifact)
         current = self._one(
             select(schema.artifacts).where(
+                _project_filter(schema.artifacts, scope),
                 or_(
                     schema.artifacts.c.id == artifact.id,
                     and_(
@@ -298,7 +315,10 @@ class _LegacyRegistrations(_Repository):
     def add(self, scope: TenantScope, registration: LegacyRegistration) -> None:
         _require_project(scope, registration)
         current = self._one(
-            select(schema.legacy_registrations).where(schema.legacy_registrations.c.id == registration.id)
+            select(schema.legacy_registrations).where(
+                _project_filter(schema.legacy_registrations, scope),
+                schema.legacy_registrations.c.id == registration.id,
+            )
         )
         if current is not None:
             if _legacy(current) == registration:

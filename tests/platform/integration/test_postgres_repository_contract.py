@@ -8,6 +8,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_schema import metadata
@@ -28,7 +29,7 @@ def postgres_factory(request: pytest.FixtureRequest) -> PostgresUnitOfWorkFactor
     engine = create_engine(database_url, pool_pre_ping=True)
     with engine.begin() as connection:
         tables = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
-        connection.execute(text(f"TRUNCATE TABLE {tables} CASCADE"))
+        connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
     factory = PostgresUnitOfWorkFactory(engine)
     yield factory
     engine.dispose()
@@ -116,3 +117,49 @@ def test_database_errors_are_stable_and_do_not_expose_sql_or_dsn(
     rendered = f"{caught.value!s} {caught.value!r}"
     assert "INSERT" not in rendered
     assert "postgresql" not in rendered
+
+
+def test_cross_tenant_global_project_id_collision_is_a_safe_generic_conflict(
+    postgres_factory: PostgresUnitOfWorkFactory,
+) -> None:
+    actor, visible, hidden = _seed_projects(postgres_factory)
+    now = datetime(2026, 7, 18, 8, tzinfo=UTC)
+    collision = Project(hidden.project_id, hidden.organization_id, "Collision", "active", 1, now, now)
+    with postgres_factory(actor) as uow:
+        with pytest.raises(ValueError) as caught:
+            uow.projects.add(hidden, collision)
+    rendered = f"{caught.value!s} {caught.value!r}"
+    assert str(visible.organization_id) not in rendered
+    assert str(visible.project_id) not in rendered
+
+
+def test_foreign_keys_and_append_only_trigger_remain_enabled(
+    postgres_factory: PostgresUnitOfWorkFactory,
+) -> None:
+    with pytest.raises(IntegrityError):
+        with postgres_factory.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO projects (id, organization_id, name, status, version, created_at, updated_at) "
+                    "VALUES (gen_random_uuid(), gen_random_uuid(), 'Invalid', 'active', 1, now(), now())"
+                )
+            )
+    actor, scope, _ = _seed_projects(postgres_factory)
+    with pytest.raises(Exception, match="append-only"):
+        with postgres_factory.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO audit_events (id, actor_id, actor_kind, organization_id, project_id, "
+                    "action, resource_type, resource_id, outcome, request_id, metadata, created_at) "
+                    "VALUES (:id, :actor, 'user', :organization, :project, 'review_job.create', "
+                    "'review_job', :resource, 'succeeded', 'trigger-probe', '{}', now())"
+                ),
+                {
+                    "id": uuid4(),
+                    "actor": actor.actor_id,
+                    "organization": scope.organization_id,
+                    "project": scope.project_id,
+                    "resource": str(uuid4()),
+                },
+            )
+            connection.execute(text("UPDATE audit_events SET outcome = 'failed'"))

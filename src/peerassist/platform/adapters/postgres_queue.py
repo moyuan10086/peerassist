@@ -38,9 +38,16 @@ class _Commands(_Repository):
     @staticmethod
     def _identity(command: CommandRecord) -> tuple[object, ...]:
         return (
-            command.id, command.organization_id, command.project_id, command.actor_id,
-            command.operation, command.idempotency_key, command.payload_digest, command.created_at,
+            command.organization_id,
+            command.actor_id,
+            command.operation,
+            command.idempotency_key,
+            command.payload_digest,
         )
+
+    @staticmethod
+    def _completion(command: CommandRecord) -> tuple[object, ...]:
+        return command.response_status, command.response_body, command.completed_at
 
     def get(
         self, scope: TenantScope, actor_id: UUID, operation: str, idempotency_key: str
@@ -112,14 +119,18 @@ class _Commands(_Repository):
         if self._identity(current) != self._identity(command):
             raise IdempotencyConflict()
         if current.completed_at is not None:
-            if current == command:
+            if self._completion(current) == self._completion(command):
                 return
             raise IdempotencyConflict()
         if command.completed_at is None or command.response_status is None:
             raise IdempotencyConflict()
         self.connection.execute(
             update(schema.commands)
-            .where(schema.commands.c.id == command.id, schema.commands.c.completed_at.is_(None))
+            .where(
+                _record_filter(schema.commands, scope),
+                schema.commands.c.id == current.id,
+                schema.commands.c.completed_at.is_(None),
+            )
             .values(
                 response_status=command.response_status, response_body=_json(command.response_body),
                 completed_at=command.completed_at,
@@ -134,7 +145,11 @@ class _WorkItems(_Repository):
 
     def enqueue(self, scope: TenantScope, item: WorkItem) -> None:
         _require_project(scope, item)
-        current = self._one(select(schema.work_items).where(schema.work_items.c.id == item.id))
+        current = self._one(
+            select(schema.work_items).where(
+                _project_filter(schema.work_items, scope), schema.work_items.c.id == item.id
+            )
+        )
         if current is not None:
             if _work_item(current) == item:
                 return
@@ -194,7 +209,7 @@ class _WorkItems(_Repository):
             if item.lease_expires_at is not None and item.attempt_count >= item.max_attempts:
                 self.connection.execute(
                     update(schema.work_items)
-                    .where(schema.work_items.c.id == item.id)
+                    .where(_project_filter(schema.work_items, scope), schema.work_items.c.id == item.id)
                     .values(
                         lease_owner=None, lease_expires_at=None, dead_lettered_at=now,
                         safe_error_code="lease_expired", updated_at=now,
@@ -203,7 +218,7 @@ class _WorkItems(_Repository):
                 continue
             result = self.connection.execute(
                 update(schema.work_items)
-                .where(schema.work_items.c.id == item.id)
+                .where(_project_filter(schema.work_items, scope), schema.work_items.c.id == item.id)
                 .values(
                     attempt_count=item.attempt_count + 1, lease_owner=worker_id,
                     lease_expires_at=now + timedelta(seconds=lease_seconds), updated_at=now,
@@ -217,7 +232,7 @@ class _WorkItems(_Repository):
         now = self._clock()
         row = self.connection.execute(
             update(schema.work_items)
-            .where(schema.work_items.c.id == item.id)
+            .where(_project_filter(schema.work_items, scope), schema.work_items.c.id == item.id)
             .values(lease_expires_at=now + timedelta(seconds=lease_seconds), updated_at=now)
             .returning(schema.work_items)
         ).mappings().one()
@@ -225,7 +240,11 @@ class _WorkItems(_Repository):
 
     def complete(self, scope: TenantScope, item_id: UUID, lease_owner: str) -> None:
         item = self._active(scope, item_id, lease_owner)
-        self.connection.execute(delete(schema.work_items).where(schema.work_items.c.id == item.id))
+        self.connection.execute(
+            delete(schema.work_items).where(
+                _project_filter(schema.work_items, scope), schema.work_items.c.id == item.id
+            )
+        )
 
     def fail(self, scope: TenantScope, item: WorkItem, lease_owner: str) -> None:
         current = self._active(scope, item.id, lease_owner)
@@ -233,7 +252,7 @@ class _WorkItems(_Repository):
         exhausted = current.attempt_count >= current.max_attempts
         self.connection.execute(
             update(schema.work_items)
-            .where(schema.work_items.c.id == current.id)
+            .where(_project_filter(schema.work_items, scope), schema.work_items.c.id == current.id)
             .values(
                 lease_owner=None, lease_expires_at=None, available_at=now,
                 dead_lettered_at=now if exhausted else None,
@@ -264,7 +283,11 @@ class _Outbox(_Repository):
 
     def append(self, scope: TenantScope, event: OutboxEvent) -> None:
         _require_record(scope, event)
-        current = self._one(select(schema.outbox_events).where(schema.outbox_events.c.id == event.id))
+        current = self._one(
+            select(schema.outbox_events).where(
+                _record_filter(schema.outbox_events, scope), schema.outbox_events.c.id == event.id
+            )
+        )
         if current is not None:
             raise ValueError("outbox event already exists")
         self._integrity(
@@ -300,7 +323,7 @@ class _Outbox(_Repository):
         for row in rows:
             updated = self.connection.execute(
                 update(schema.outbox_events)
-                .where(schema.outbox_events.c.id == row["id"])
+                .where(_record_filter(schema.outbox_events, scope), schema.outbox_events.c.id == row["id"])
                 .values(publication_attempts=row["publication_attempts"] + 1)
                 .returning(schema.outbox_events)
             ).mappings().one()
@@ -318,7 +341,7 @@ class _Outbox(_Repository):
         if row["published_at"] is None:
             self.connection.execute(
                 update(schema.outbox_events)
-                .where(schema.outbox_events.c.id == event_id)
+                .where(_record_filter(schema.outbox_events, scope), schema.outbox_events.c.id == event_id)
                 .values(published_at=self._clock())
             )
 
@@ -326,7 +349,11 @@ class _Outbox(_Repository):
 class _Audit(_Repository):
     def append(self, scope: TenantScope, event: AuditEvent) -> None:
         _require_record(scope, event)
-        if self._one(select(schema.audit_events.c.id).where(schema.audit_events.c.id == event.id)) is not None:
+        if self._one(
+            select(schema.audit_events.c.id).where(
+                _record_filter(schema.audit_events, scope), schema.audit_events.c.id == event.id
+            )
+        ) is not None:
             raise ValueError("audit records are append-only")
         self._integrity(
             lambda: self.connection.execute(

@@ -49,11 +49,20 @@ class PostgresUnitOfWork:
     def __enter__(self) -> Self:
         if self._active:
             raise RuntimeError("unit of work is already active")
+        connection: Connection | None = None
         try:
-            self._connection = self._factory.engine.connect()
-            self._transaction = self._connection.begin()
+            connection = self._factory.engine.connect()
+            self._transaction = connection.begin()
         except SQLAlchemyError as error:
+            if connection is not None:
+                try:
+                    connection.close()
+                except SQLAlchemyError:
+                    pass
+            self._connection = None
+            self._transaction = None
             raise DependencyUnavailable(cause=error) from None
+        self._connection = connection
         self._active = True
         self._repositories = {
             "users": _Users(self),
@@ -79,18 +88,25 @@ class PostgresUnitOfWork:
         traceback: TracebackType | None,
     ) -> None:
         del exc_value, traceback
+        cleanup_error: SQLAlchemyError | None = None
         try:
             if self._transaction is not None and self._transaction.is_active:
-                self._transaction.rollback()
+                try:
+                    self._transaction.rollback()
+                except SQLAlchemyError as error:
+                    cleanup_error = error
         finally:
             self._active = False
             self._repositories.clear()
             if self._connection is not None:
-                self._connection.close()
+                try:
+                    self._connection.close()
+                except SQLAlchemyError as error:
+                    cleanup_error = cleanup_error or error
             self._connection = None
             self._transaction = None
-        if exc_type is not None:
-            return None
+        if cleanup_error is not None and exc_type is None:
+            raise DependencyUnavailable(cause=cleanup_error) from None
 
     def _connection_for_repository(self) -> Connection:
         if not self._active or self._connection is None or self._transaction is None:
@@ -110,7 +126,10 @@ class PostgresUnitOfWork:
     def rollback(self) -> None:
         if not self._active or self._transaction is None or not self._transaction.is_active:
             raise RuntimeError("unit of work is not active")
-        self._transaction.rollback()
+        try:
+            self._transaction.rollback()
+        except SQLAlchemyError as error:
+            raise DependencyUnavailable(cause=error) from None
 
 
 class PostgresUnitOfWorkFactory:
@@ -135,10 +154,21 @@ class PostgresUnitOfWorkFactory:
         return PostgresUnitOfWork(self, actor)
 
     async def start(self) -> None:
-        return None
+        connection: Connection | None = None
+        try:
+            connection = self.engine.connect()
+        except SQLAlchemyError as error:
+            raise DependencyUnavailable(cause=error) from None
+        try:
+            connection.close()
+        except SQLAlchemyError as error:
+            raise DependencyUnavailable(cause=error) from None
 
     async def stop(self) -> None:
-        self.engine.dispose()
+        try:
+            self.engine.dispose()
+        except SQLAlchemyError as error:
+            raise DependencyUnavailable(cause=error) from None
 
 
 __all__ = ["PostgresUnitOfWork", "PostgresUnitOfWorkFactory"]

@@ -234,19 +234,52 @@ def _oidc_transaction(row: Mapping[str, Any]) -> OidcTransaction:
 class _Repository:
     def __init__(self, uow: Any) -> None:
         self._uow = uow
+        self._preserve_integrity = False
 
     @property
-    def connection(self) -> Connection:
-        return self._uow._connection_for_repository()
+    def connection(self) -> _SafeConnection:
+        return _SafeConnection(
+            self._uow._connection_for_repository(),
+            preserve_integrity=self._preserve_integrity,
+        )
 
     def _one(self, statement: Any) -> Mapping[str, Any] | None:
         return self.connection.execute(statement).mappings().one_or_none()
 
     def _integrity(self, operation: Callable[[], Any], message: str) -> Any:
+        connection = self._uow._connection_for_repository()
         try:
-            with self.connection.begin_nested():
-                return operation()
+            with connection.begin_nested():
+                self._preserve_integrity = True
+                try:
+                    return operation()
+                finally:
+                    self._preserve_integrity = False
         except IntegrityError:
             raise ValueError(message) from None
+        except SQLAlchemyError as error:
+            raise DependencyUnavailable(cause=error) from None
+
+
+class _SafeConnection:
+    """Expose only normalized SQL execution to repositories."""
+
+    def __init__(self, connection: Connection, *, preserve_integrity: bool) -> None:
+        self._connection = connection
+        self._preserve_integrity = preserve_integrity
+
+    def execute(self, statement: Any) -> Any:
+        try:
+            return self._connection.execute(statement)
+        except IntegrityError:
+            if self._preserve_integrity:
+                raise
+            raise DependencyUnavailable() from None
+        except SQLAlchemyError as error:
+            raise DependencyUnavailable(cause=error) from None
+
+    def scalar(self, statement: Any) -> Any:
+        try:
+            return self._connection.scalar(statement)
         except SQLAlchemyError as error:
             raise DependencyUnavailable(cause=error) from None

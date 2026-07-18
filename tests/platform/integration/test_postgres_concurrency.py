@@ -31,7 +31,7 @@ def seeded_factory(request: pytest.FixtureRequest) -> tuple[PostgresUnitOfWorkFa
     engine = create_engine(database_url, pool_pre_ping=True, pool_size=20, max_overflow=4)
     with engine.begin() as connection:
         tables = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
-        connection.execute(text(f"TRUNCATE TABLE {tables} CASCADE"))
+        connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
     actor = Actor(uuid4(), ActorKind.USER)
     scope = TenantScope(uuid4(), uuid4())
     job_id, attempt_id = uuid4(), uuid4()
@@ -99,17 +99,29 @@ def test_sixteen_concurrent_identical_commands_converge_and_changed_payload_conf
     )
     completed = replace(record, response_status=201, response_body={"winner": "same"}, completed_at=now)
 
-    def execute() -> CommandRecord:
+    def execute(index: int) -> CommandRecord:
+        candidate = replace(record, id=uuid4(), created_at=now.replace(microsecond=index + 1))
         with factory(actor) as uow:
-            existing = uow.commands.reserve_or_replay(scope, record)
+            existing = uow.commands.reserve_or_replay(scope, candidate)
             if existing.completed_at is None:
-                uow.commands.complete(scope, completed)
-                existing = completed
+                uow.commands.complete(
+                    scope,
+                    replace(
+                        candidate,
+                        response_status=201,
+                        response_body={"winner": "same"},
+                        completed_at=now,
+                    ),
+                )
+                existing = uow.commands.reserve_or_replay(scope, candidate)
             uow.commit()
             return existing
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        assert tuple(executor.map(lambda _: execute(), range(16))) == (completed,) * 16
+        results = tuple(executor.map(execute, range(16)))
+    assert all(result == results[0] for result in results)
+    assert results[0].response_status == completed.response_status
+    assert results[0].response_body == completed.response_body
     with factory(actor) as uow:
         with pytest.raises(IdempotencyConflict):
             uow.commands.reserve_or_replay(scope, replace(record, payload_digest="b" * 64))

@@ -178,7 +178,7 @@ class _Projects(_Repository):
     def add(self, scope: TenantScope, project: Project) -> None:
         _require_project(scope, project)
         _require_initial(project)
-        current = self._one(select(schema.projects).where(schema.projects.c.id == project.id))
+        current = self._one(select(schema.projects).where(_project_filter(schema.projects, scope)))
         if current is not None:
             if _project(current) == project:
                 return

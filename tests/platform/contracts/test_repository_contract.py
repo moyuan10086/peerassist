@@ -359,20 +359,38 @@ def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clo
     )
 
     def execute_or_replay() -> CommandRecord:
+        candidate = replace(record, id=uuid4(), created_at=clock() + timedelta(microseconds=uuid4().int % 1000))
         with uow_factory(principal) as uow:
-            existing = uow.commands.reserve_or_replay(scope, record)
+            existing = uow.commands.reserve_or_replay(scope, candidate)
             if existing.completed_at is None:
-                uow.commands.complete(scope, completed)
-                existing = completed
+                uow.commands.complete(
+                    scope,
+                    replace(
+                        candidate,
+                        response_status=201,
+                        response_body={"id": str(command_id)},
+                        completed_at=clock(),
+                    ),
+                )
+                existing = uow.commands.reserve_or_replay(scope, candidate)
             uow.commit()
             return existing
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = tuple(executor.map(lambda _: execute_or_replay(), range(16)))
-    assert results == (completed,) * 16
+    assert all(result == results[0] for result in results)
+    winner = results[0]
+    assert winner.response_status == completed.response_status
+    assert winner.response_body == completed.response_body
+    assert winner.completed_at == completed.completed_at
 
     with uow_factory(principal) as uow:
-        changed = replace(completed, id=uuid4(), payload_digest=canonical_json_digest({"name": "Beta"}))
+        changed = replace(
+            completed,
+            id=uuid4(),
+            created_at=clock() + timedelta(seconds=1),
+            payload_digest=canonical_json_digest({"name": "Beta"}),
+        )
         with pytest.raises(IdempotencyConflict):
             uow.commands.reserve_or_replay(scope, changed)
 
@@ -446,12 +464,10 @@ def test_concurrent_different_command_completions_only_first_result_wins(uow_fac
 @pytest.mark.parametrize(
     "replacement",
     [
-        {"id": uuid4()},
         {"actor_id": uuid4()},
         {"operation": "project.delete"},
         {"idempotency_key": "changed-key"},
         {"payload_digest": "f" * 64},
-        {"created_at": "changed"},
     ],
 )
 def test_command_completion_cannot_replace_reserved_identity(uow_factory, clock, replacement) -> None:
@@ -468,8 +484,6 @@ def test_command_completion_cannot_replace_reserved_identity(uow_factory, clock,
         project_id=scope.project_id,
     )
     completed = replace(record, response_status=201, response_body={}, completed_at=clock())
-    if replacement.get("created_at") == "changed":
-        replacement = {"created_at": clock() + timedelta(seconds=1)}
     with uow_factory(principal) as uow:
         uow.commands.reserve(scope, record)
         with pytest.raises(IdempotencyConflict):
@@ -510,7 +524,7 @@ def test_command_completion_requires_exact_scope_and_rollbacks_remain_invisible(
         assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) == record
 
 
-def test_command_reservation_cannot_replace_reserved_identity(uow_factory, clock) -> None:
+def test_command_retry_ignores_generated_presentation_fields(uow_factory, clock) -> None:
     principal = actor()
     scope = TenantScope(uuid4(), uuid4())
     record = CommandRecord(
@@ -523,15 +537,24 @@ def test_command_reservation_cannot_replace_reserved_identity(uow_factory, clock
         clock(),
         project_id=scope.project_id,
     )
+    retry = replace(record, id=uuid4(), created_at=clock() + timedelta(seconds=1))
     with uow_factory(principal) as uow:
         uow.commands.reserve(scope, record)
-        with pytest.raises(IdempotencyConflict):
-            uow.commands.reserve(scope, replace(record, id=uuid4()))
-        with pytest.raises(IdempotencyConflict):
-            uow.commands.reserve_or_replay(scope, replace(record, id=uuid4()))
+        uow.commands.reserve(scope, retry)
+        assert uow.commands.reserve_or_replay(scope, retry) == record
+        uow.commands.complete(
+            scope,
+            replace(retry, response_status=201, response_body={"winner": "stored"}, completed_at=clock()),
+        )
         uow.commit()
     with uow_factory(principal) as uow:
-        assert uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key) == record
+        stored = uow.commands.get(scope, principal.actor_id, record.operation, record.idempotency_key)
+        assert stored == replace(
+            record,
+            response_status=201,
+            response_body={"winner": "stored"},
+            completed_at=clock(),
+        )
 
 
 def test_aggregate_events_are_strictly_ordered_and_unique(uow_factory, clock) -> None:
