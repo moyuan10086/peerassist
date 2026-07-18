@@ -8,6 +8,7 @@ from peerassist.model_review import (
     resolve_model_review_config,
     run_batched_model_review,
 )
+from peerassist.model_settings import ModelSettingsInput, save_model_settings
 
 
 class _Response:
@@ -111,3 +112,25 @@ def test_batched_model_review_uses_codex_responses_without_peerassist_api_key(
     assert observed["base_url"] == "https://provider.example/v1"
     assert observed["model"] == "gpt-codex"
     assert result["usage"]["total_tokens"] == 17
+
+
+def test_saved_homepage_model_settings_override_process_defaults(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "model-settings.json"
+    save_model_settings(
+        ModelSettingsInput(
+            provider="openai-compatible",
+            base_url="https://saved-provider.example/v1",
+            model="saved-model",
+            api_key="sk-saved-private",
+        ),
+        path=path,
+    )
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(path))
+
+    config = resolve_model_review_config()
+
+    assert config is not None
+    assert config.provider == "openai"
+    assert config.base_url == "https://saved-provider.example/v1"
+    assert config.model == "saved-model"
+    assert config.api_key == "sk-saved-private"

@@ -24,6 +24,13 @@ from peerassist.model_review import (
     resolve_model_review_config,
     run_model_review_text,
 )
+from peerassist.model_settings import (
+    ModelSettingsError,
+    ModelSettingsInput,
+    discover_models,
+    load_model_settings,
+    save_model_settings,
+)
 from peerassist.review_context import build_review_context
 from peerassist.review_job_api import create_review_job_server as create_review_job_server
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
@@ -5429,6 +5436,7 @@ def _load_workspace_state(*, run_dir: Path, paper_id: str) -> dict[str, Any]:
     return {
         "schema_version": "peerassist.workspace_bootstrap.v1",
         "paper_id": paper_id,
+        "paper_overview": _build_paper_overview(run_dir),
         "state": state,
         "model_config": _resolve_model_config(),
         "assets": {
@@ -5444,6 +5452,76 @@ def _load_workspace_state(*, run_dir: Path, paper_id: str) -> dict[str, Any]:
             {"id": "artifacts", "label": "产物导出", "path": "/artifacts"},
         ],
     }
+
+
+def _build_paper_overview(run_dir: Path) -> dict[str, object]:
+    ledger = read_json_safely(peerassist_stage_dir(run_dir) / "evidence_ledger.json")
+    rows = ledger.get("items") if isinstance(ledger.get("items"), list) else []
+    items = [row for row in rows if isinstance(row, dict)]
+    title = next(
+        (
+            str(row.get("section") or "").strip().lstrip("# ")
+            for row in items
+            if str(row.get("section") or "").strip()
+        ),
+        "",
+    )
+    abstract_start = next(
+        (
+            index
+            for index, row in enumerate(items)
+            if str(row.get("text") or "").strip().casefold() == "abstract"
+        ),
+        -1,
+    )
+    abstract_lines: list[str] = []
+    if abstract_start >= 0:
+        for row in items[abstract_start + 1 : abstract_start + 100]:
+            text = str(row.get("text") or "").strip()
+            if re.fullmatch(r"(?:\d+(?:\.\d+)?)?\s*introduction", text, re.IGNORECASE):
+                break
+            if text:
+                abstract_lines.append(text)
+    abstract = _join_paper_lines(abstract_lines)[:2400]
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", abstract) if part.strip()]
+    method = _first_matching_sentence(
+        sentences,
+        r"\b(propose|present|introduce|develop|provide|framework|method|approach)\b",
+    )
+    result = _first_matching_sentence(
+        sentences,
+        r"\b(experiment|show|demonstrate|reduce|reduction|improve|improvement|outperform|achieve|save)\w*\b",
+    )
+    limitation = _first_matching_sentence(
+        sentences,
+        r"\b(limit|limitation|however|future work|remain)\w*\b",
+    )
+    return {
+        "available": bool(title or abstract),
+        "title": title,
+        "abstract": abstract,
+        "objective": sentences[0] if sentences else "",
+        "method": method or (sentences[1] if len(sentences) > 1 else ""),
+        "result": result or (sentences[-1] if sentences else ""),
+        "limitation": limitation,
+    }
+
+
+def _join_paper_lines(lines: list[str]) -> str:
+    result = ""
+    for line in lines:
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if not cleaned:
+            continue
+        if result.endswith("-") and cleaned[:1].islower():
+            result = result[:-1] + cleaned
+        else:
+            result = f"{result} {cleaned}".strip()
+    return result
+
+
+def _first_matching_sentence(sentences: list[str], pattern: str) -> str:
+    return next((sentence for sentence in sentences if re.search(pattern, sentence, re.IGNORECASE)), "")
 
 
 def _is_workspace_route(path: str) -> bool:
@@ -6117,6 +6195,23 @@ def _resolve_model_config() -> dict[str, str]:
     }
 
 
+def _public_model_settings() -> dict[str, object]:
+    stored = load_model_settings()
+    if stored is not None:
+        return stored.public_view()
+    current = _resolve_model_config()
+    return {
+        "provider": current["provider"],
+        "base_url": current["base_url"],
+        "model": current["model"],
+        "api_mode": "responses"
+        if current["provider"] == "openai-codex"
+        else "chat_completions",
+        "api_key_configured": current["api_key_configured"] == "true",
+        "api_key_hint": "Codex 登录" if current["provider"] == "openai-codex" else "",
+    }
+
+
 def _review_api_base_url() -> str:
     return get_settings().peerassist_review_api_url.rstrip("/")
 
@@ -6174,6 +6269,12 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             if path == "/api/bootstrap":
                 self._send_json(_load_workspace_state(run_dir=run_dir, paper_id=paper_id))
                 return
+            if path == "/api/model-settings":
+                if not self._model_settings_allowed():
+                    self._send_json({"error": "模型设置仅允许在本机访问。"}, status=403)
+                    return
+                self._send_json({"settings": _public_model_settings()})
+                return
             if path == "/api/state":
                 self._send_json(_load_workspace_state(run_dir=run_dir, paper_id=paper_id)["state"])
                 return
@@ -6227,6 +6328,30 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                     self._send_json({"error": str(exc)}, status=400)
                     return
                 self._send_json(result)
+                return
+            if self.path in {"/api/model-settings", "/api/model-settings/discover"}:
+                if not self._model_settings_allowed():
+                    self._send_json({"error": "模型设置仅允许在本机访问。"}, status=403)
+                    return
+                try:
+                    payload = self._read_json()
+                    value = ModelSettingsInput(
+                        provider=str(payload.get("provider") or ""),
+                        base_url=str(payload.get("base_url") or ""),
+                        model=str(payload.get("model") or ""),
+                        api_key=str(payload.get("api_key") or ""),
+                        clear_api_key=bool(payload.get("clear_api_key")),
+                    )
+                    models = discover_models(value)
+                    if self.path == "/api/model-settings/discover":
+                        self._send_json({"models": models})
+                        return
+                    stored = save_model_settings(value)
+                    self._send_json({"settings": stored.public_view(), "models": models})
+                except ModelSettingsError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                except Exception:
+                    self._send_json({"error": "模型设置保存失败。"}, status=400)
                 return
             if self.path == "/api/manual-concern":
                 try:
@@ -6341,9 +6466,14 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or "0")
+            if length < 0 or length > 16 * 1024:
+                raise ValueError("请求内容过大。")
             raw = self.rfile.read(length).decode("utf-8")
             payload = json.loads(raw or "{}")
             return payload if isinstance(payload, dict) else {}
+
+        def _model_settings_allowed(self) -> bool:
+            return self.client_address[0] in {"127.0.0.1", "::1"}
 
         def _send_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")

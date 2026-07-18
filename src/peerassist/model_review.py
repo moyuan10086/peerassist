@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
 
 from common.config import get_settings
-from llm.codex_auth import get_codex_auth, load_cached_codex_auth
+from llm.codex_auth import CodexAuth, get_codex_auth, load_cached_codex_auth
 from llm.codex_client import invoke_codex
 from llm.provider_capabilities import is_codex_provider
+from peerassist.model_settings import load_model_settings
 
 
 @dataclass(frozen=True)
 class ModelReviewConfig:
-    api_key: str | None
+    api_key: str | None = field(repr=False)
     base_url: str
     model: str
     provider: str = "openai"
@@ -27,11 +28,25 @@ class ModelReviewConfig:
 
 def resolve_model_review_config() -> ModelReviewConfig | None:
     settings = get_settings()
-    api_key = str(settings.peerassist_openai_api_key or "").strip()
     common = {
         "max_tokens": min(1200, max(256, settings.peerassist_review_max_tokens)),
         "timeout_seconds": min(300.0, max(10.0, settings.peerassist_openai_timeout_seconds)),
     }
+    stored = load_model_settings()
+    if stored is not None:
+        provider = "openai-codex" if stored.provider == "openai-codex" else "openai"
+        cached = load_cached_codex_auth() if provider == "openai-codex" else None
+        api_key = stored.api_key or (cached.access_token if cached is not None else "")
+        if not api_key:
+            return None
+        return ModelReviewConfig(
+            api_key=api_key,
+            base_url=stored.base_url,
+            model=stored.model,
+            provider=provider,
+            **common,
+        )
+    api_key = str(settings.peerassist_openai_api_key or "").strip()
     if api_key:
         return ModelReviewConfig(
             api_key=api_key,
@@ -61,7 +76,11 @@ def run_model_review_text(
 
     if config.provider != "openai-codex":
         raise ValueError("model_review_provider_not_supported")
-    auth = get_codex_auth(allow_browser_login=False)
+    auth = (
+        CodexAuth(config.api_key, None, "model-settings")
+        if config.api_key
+        else get_codex_auth(allow_browser_login=False)
+    )
     return invoke_codex(
         prompt=prompt,
         system=system,

@@ -25,9 +25,11 @@ import {
   RefreshCw,
   Search,
   Send,
+  Settings2,
   ShieldCheck,
   Square,
   TerminalSquare,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
@@ -271,18 +273,38 @@ type ConfirmationState = {
 type Bootstrap = {
   schema_version?: string;
   paper_id: string;
+  paper_overview?: PaperOverview;
   state: ConfirmationState;
   model_config: {
     provider?: string;
     model?: string;
     base_url?: string;
-    api_key_configured?: string;
+    api_key_configured?: string | boolean;
   };
   assets: {
     pdf_url?: string;
     legacy_url?: string;
   };
   windows: WorkspaceWindow[];
+};
+
+type ModelSettingsView = {
+  provider: "openai-codex" | "openai-compatible";
+  base_url: string;
+  model: string;
+  api_mode?: string;
+  api_key_configured: boolean;
+  api_key_hint?: string;
+};
+
+type PaperOverview = {
+  available?: boolean;
+  title?: string;
+  abstract?: string;
+  objective?: string;
+  method?: string;
+  result?: string;
+  limitation?: string;
 };
 
 type PdfDocumentProxy = Awaited<ReturnType<typeof pdfjsLib.getDocument>> extends {
@@ -335,6 +357,7 @@ function App() {
   const [lastReviewDraft, setLastReviewDraft] = useState("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
@@ -349,7 +372,9 @@ function App() {
   const events = state.tool_trace?.events || [];
   const agentRuns = state.agent_runs || [];
   const paths = state.paths || {};
-  const modelEnabled = bootstrap.model_config.api_key_configured === "true";
+  const modelEnabled =
+    bootstrap.model_config.api_key_configured === "true" ||
+    bootstrap.model_config.api_key_configured === true;
   const modelDisplay = bootstrap.model_config.model
     ? `${bootstrap.model_config.model}${modelEnabled ? "" : "（未启用）"}`
     : "模型未配置";
@@ -629,7 +654,10 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span>{modelDisplay}</span>
+          <button className="model-status-button" type="button" onClick={() => setModelSettingsOpen(true)} title="模型设置">
+            <Settings2 size={14} />
+            <span>{modelDisplay}</span>
+          </button>
           <span>证据约束 · 人工确认</span>
         </div>
       </aside>
@@ -641,6 +669,9 @@ function App() {
             <h1>{activeLabel}</h1>
           </div>
           <div className="topbar-actions">
+            <button className="ghost-button" type="button" onClick={() => setModelSettingsOpen(true)}>
+              <Settings2 size={16} /> 模型设置
+            </button>
             <button className="ghost-button" type="button" onClick={() => refresh().then(() => showToast("状态已刷新"))}>
               <RefreshCw size={16} /> 刷新状态
             </button>
@@ -653,17 +684,20 @@ function App() {
         {activeWindow !== "paper" && <StatusStrip state={state} model={modelDisplay} />}
 
         {activeWindow === "paper" && (
-          <PaperWindow
-            pdfUrl={activePdfUrl}
-            queueItems={queueItems}
-            busy={busy}
-            linkedReviewJob={Boolean(activePaperId)}
-            readyForConfirmation={Boolean(state.ready_for_confirmation)}
-            citationAudit={state.citation_audit}
-            onRunReview={runAgentReview}
-            onSubmitManual={submitManualConcern}
-            onDecision={submitDecision}
-          />
+          <>
+            <PaperOverviewPanel overview={bootstrap.paper_overview} />
+            <PaperWindow
+              pdfUrl={activePdfUrl}
+              queueItems={queueItems}
+              busy={busy}
+              linkedReviewJob={Boolean(activePaperId)}
+              readyForConfirmation={Boolean(state.ready_for_confirmation)}
+              citationAudit={state.citation_audit}
+              onRunReview={runAgentReview}
+              onSubmitManual={submitManualConcern}
+              onDecision={submitDecision}
+            />
+          </>
         )}
         {activeWindow === "agent" && (
           <AgentWindow
@@ -687,8 +721,239 @@ function App() {
         {activeWindow === "trace" && <TraceWindow events={events} streamLines={streamLines} />}
         {activeWindow === "confirm" && <ConfirmWindow items={queueItems} busy={busy} onDecision={submitDecision} />}
         {activeWindow === "artifacts" && <ArtifactsWindow paths={paths} reports={state.artifacts} />}
+        <ModelSettingsDrawer
+          open={modelSettingsOpen}
+          initial={bootstrap.model_config}
+          onClose={() => setModelSettingsOpen(false)}
+          onSaved={(settings) => {
+            setBootstrap((current) => ({
+              ...current,
+              model_config: {
+                provider: settings.provider,
+                base_url: settings.base_url,
+                model: settings.model,
+                api_key_configured: settings.api_key_configured,
+              },
+            }));
+            showToast(`模型已切换为 ${settings.model}`);
+          }}
+        />
         {toast && <div className="toast">{toast}</div>}
       </main>
+    </div>
+  );
+}
+
+function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
+  if (!overview?.available) return null;
+  const facts = [
+    ["研究问题", overview.objective],
+    ["方法", overview.method],
+    ["主要结果", overview.result],
+  ].filter((item) => item[1]);
+  return (
+    <details className="paper-overview" open>
+      <summary>
+        <span>
+          <small>论文概览</small>
+          <strong>{overview.title || "当前论文"}</strong>
+        </span>
+        <span className="paper-overview-toggle">展开 / 收起</span>
+      </summary>
+      <div className="paper-overview-body">
+        {facts.map(([label, value]) => (
+          <div className="paper-overview-fact" key={label}>
+            <small>{label}</small>
+            <p>{value}</p>
+          </div>
+        ))}
+        {overview.abstract && <p className="paper-abstract">{overview.abstract}</p>}
+      </div>
+    </details>
+  );
+}
+
+function ModelSettingsDrawer({
+  open,
+  initial,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  initial: Bootstrap["model_config"];
+  onClose: () => void;
+  onSaved: (settings: ModelSettingsView) => void;
+}) {
+  const [provider, setProvider] = useState<ModelSettingsView["provider"]>(
+    initial.provider === "openai-compatible" ? "openai-compatible" : "openai-codex",
+  );
+  const [baseUrl, setBaseUrl] = useState(initial.base_url || "");
+  const [model, setModel] = useState(initial.model || "");
+  const [apiKey, setApiKey] = useState("");
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(
+    initial.api_key_configured === true || initial.api_key_configured === "true",
+  );
+  const [apiKeyHint, setApiKeyHint] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/model-settings", { cache: "no-store" })
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "无法读取模型设置");
+        return payload.settings as ModelSettingsView;
+      })
+      .then((settings) => {
+        setProvider(settings.provider === "openai-compatible" ? "openai-compatible" : "openai-codex");
+        setBaseUrl(settings.base_url || "");
+        setModel(settings.model || "");
+        setApiKeyConfigured(Boolean(settings.api_key_configured));
+        setApiKeyHint(settings.api_key_hint || "");
+        setApiKey("");
+        setError("");
+      })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : "无法读取模型设置"));
+  }, [open]);
+
+  const pullModels = useCallback(async (silent = false) => {
+    if (!baseUrl.trim() || (!apiKey.trim() && !apiKeyConfigured)) return;
+    if (!silent) setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/model-settings/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          base_url: baseUrl.trim(),
+          model,
+          api_key: apiKey,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "模型列表拉取失败");
+      const nextModels = Array.isArray(payload.models) ? payload.models.map(String) : [];
+      setModels(nextModels);
+      if (!model && nextModels.length) setModel(nextModels[0]);
+    } catch (cause) {
+      setModels([]);
+      setError(cause instanceof Error ? cause.message : "模型列表拉取失败");
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [apiKey, apiKeyConfigured, baseUrl, model, provider]);
+
+  useEffect(() => {
+    if (!open || !baseUrl.trim() || (!apiKey.trim() && !apiKeyConfigured)) return;
+    const timer = window.setTimeout(() => void pullModels(true), 650);
+    return () => window.clearTimeout(timer);
+  }, [apiKey, apiKeyConfigured, baseUrl, open, provider, pullModels]);
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/model-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          base_url: baseUrl.trim(),
+          model: model.trim(),
+          api_key: apiKey,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "模型设置保存失败");
+      const settings = payload.settings as ModelSettingsView;
+      setModels(Array.isArray(payload.models) ? payload.models.map(String) : models);
+      setApiKey("");
+      setApiKeyConfigured(Boolean(settings.api_key_configured));
+      setApiKeyHint(settings.api_key_hint || "");
+      onSaved(settings);
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "模型设置保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) return null;
+  const modelOptions = Array.from(new Set([model, ...models].filter(Boolean)));
+  return (
+    <div className="settings-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <aside className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="model-settings-title">
+        <header className="settings-head">
+          <div>
+            <p className="eyebrow">运行配置</p>
+            <h2 id="model-settings-title">模型设置</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} title="关闭模型设置" aria-label="关闭模型设置">
+            <X size={18} />
+          </button>
+        </header>
+        <form className="settings-form" onSubmit={save}>
+          <fieldset className="settings-fieldset">
+            <legend>接口模式</legend>
+            <div className="segmented-control">
+              <button type="button" aria-pressed={provider === "openai-codex"} onClick={() => setProvider("openai-codex")}>
+                Responses
+              </button>
+              <button type="button" aria-pressed={provider === "openai-compatible"} onClick={() => setProvider("openai-compatible")}>
+                Chat Completions
+              </button>
+            </div>
+          </fieldset>
+          <label className="settings-field">
+            <span>Base URL</span>
+            <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" required />
+          </label>
+          <label className="settings-field">
+            <span>API Key</span>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder={apiKeyConfigured ? apiKeyHint || "已配置，留空保持不变" : "sk-..."}
+              autoComplete="new-password"
+            />
+          </label>
+          <label className="settings-field">
+            <span>模型</span>
+            {modelOptions.length ? (
+              <select value={model} onChange={(event) => setModel(event.target.value)} required>
+                {modelOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+              </select>
+            ) : (
+              <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="选择或输入模型" required />
+            )}
+          </label>
+          <div className="model-discovery-row">
+            <span className={apiKeyConfigured ? "connection-state ready" : "connection-state"}>
+              {apiKeyConfigured ? "凭据已配置" : "等待凭据"}
+            </span>
+            <button className="ghost-button" type="button" disabled={loading} onClick={() => void pullModels()}>
+              <RefreshCw size={15} className={loading ? "spin" : ""} />
+              {loading ? "正在拉取" : "刷新模型"}
+            </button>
+          </div>
+          {models.length > 0 && <p className="settings-result">已发现 {models.length} 个模型</p>}
+          {error && <p className="settings-error" role="alert">{error}</p>}
+          <footer className="settings-actions">
+            <button className="ghost-button" type="button" onClick={onClose}>取消</button>
+            <button className="primary-button" type="submit" disabled={saving || !model.trim()}>
+              {saving ? <Loader2 size={16} className="spin" /> : <ShieldCheck size={16} />}
+              {saving ? "正在保存" : "保存并启用"}
+            </button>
+          </footer>
+        </form>
+      </aside>
     </div>
   );
 }

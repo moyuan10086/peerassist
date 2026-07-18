@@ -1074,6 +1074,86 @@ def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:
         confirmation_server.get_settings.cache_clear()
 
 
+def test_homepage_model_settings_endpoint_saves_and_returns_models(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _seed_peerassist_stage(run_dir)
+    settings_path = tmp_path / "model-settings.json"
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setattr(
+        confirmation_server,
+        "discover_models",
+        lambda value=None: ["gpt-5.5", "gpt-5.6-sol"],
+    )
+    server = create_confirmation_server(
+        run_dir=run_dir,
+        paper_id="demo",
+        host="127.0.0.1",
+        port=0,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    try:
+        request = urllib.request.Request(
+            f"{base_url}/api/model-settings",
+            data=json.dumps(
+                {
+                    "provider": "openai-codex",
+                    "base_url": "https://provider.example/v1",
+                    "model": "gpt-5.6-sol",
+                    "api_key": "sk-synthetic-private",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            saved = json.loads(response.read().decode())
+
+        assert saved["settings"]["api_key_configured"] is True
+        assert saved["settings"]["api_key_hint"] == "sk-...vate"
+        assert saved["models"] == ["gpt-5.5", "gpt-5.6-sol"]
+        assert "sk-synthetic-private" not in json.dumps(saved)
+
+        with urllib.request.urlopen(f"{base_url}/api/model-settings", timeout=5) as response:
+            loaded = json.loads(response.read().decode())
+        assert loaded["settings"]["model"] == "gpt-5.6-sol"
+        assert "sk-synthetic-private" not in json.dumps(loaded)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_paper_overview_extracts_title_abstract_method_and_result(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    stage_dir = peerassist_stage_dir(run_dir)
+    stage_dir.mkdir(parents=True)
+    write_json_file(
+        stage_dir / "evidence_ledger.json",
+        {
+            "items": [
+                {"section": "Efficient Evaluation", "text": "# Efficient Evaluation"},
+                {"section": "Efficient Evaluation", "text": "Abstract"},
+                {"section": "Efficient Evaluation", "text": "Fixed benchmarks are ineffi-"},
+                {"section": "Efficient Evaluation", "text": "cient for model evaluation."},
+                {"section": "Efficient Evaluation", "text": "We propose a sequential testing framework."},
+                {"section": "Efficient Evaluation", "text": "Our experiments reduce evaluation cost by 40%."},
+                {"section": "Efficient Evaluation", "text": "1 Introduction"},
+            ]
+        },
+    )
+
+    overview = confirmation_server._build_paper_overview(run_dir)
+
+    assert overview["title"] == "Efficient Evaluation"
+    assert "inefficient for model evaluation" in overview["abstract"]
+    assert overview["method"] == "We propose a sequential testing framework."
+    assert overview["result"] == "Our experiments reduce evaluation cost by 40%."
+
+
 def test_review_api_base_url_uses_workspace_setting(monkeypatch) -> None:
     monkeypatch.setenv("PEERASSIST_REVIEW_API_URL", "http://review-api:8767/")
     confirmation_server.get_settings.cache_clear()
