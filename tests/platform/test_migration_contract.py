@@ -276,27 +276,48 @@ def test_frozen_v0001_schema_does_not_depend_on_live_application_metadata() -> N
     assert "REVISION_TABLES" in snapshot
 
 
-def test_readiness_has_a_fingerprinted_bounded_catalog_signature() -> None:
-    from peerassist.platform.adapters.postgres_schema import (
-        EXPECTED_SCHEMA_COLUMNS,
-        EXPECTED_SCHEMA_CONSTRAINTS,
-        EXPECTED_SCHEMA_INDEXES,
-        EXPECTED_SCHEMA_TABLES,
-        SCHEMA_FINGERPRINT,
-        SCHEMA_INSPECTION_SQL,
+def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
+    from peerassist.platform.adapters.postgres_v0001_signature import (
+        CATALOG_INSPECTION_SQL,
+        EXPECTED_CATALOG_FINGERPRINT,
+        EXPECTED_CATALOG_SIGNATURE,
     )
 
-    assert len(EXPECTED_SCHEMA_TABLES) == 22
-    assert {"audit_events.command_id", "commands.scope_project_id"}.issubset(
-        EXPECTED_SCHEMA_COLUMNS
-    )
-    assert "fk_audit_events_command_scope" in EXPECTED_SCHEMA_CONSTRAINTS
-    assert "ix_audit_events_command" in EXPECTED_SCHEMA_INDEXES
-    assert len(SCHEMA_FINGERPRINT) == 64
-    normalized = " ".join(SCHEMA_INSPECTION_SQL.lower().split())
-    for catalog in ("pg_constraint", "pg_indexes", "pg_trigger", "information_schema.columns"):
+    assert len(EXPECTED_CATALOG_SIGNATURE["tables"]) == 22
+    assert set(EXPECTED_CATALOG_SIGNATURE) == {
+        "tables",
+        "columns",
+        "constraints",
+        "indexes",
+        "triggers",
+    }
+    assert len(EXPECTED_CATALOG_FINGERPRINT) == 64
+    normalized = " ".join(CATALOG_INSPECTION_SQL.lower().split())
+    for expression in (
+        "format_type",
+        "pg_get_expr",
+        "pg_get_constraintdef",
+        "pg_get_indexdef",
+        "pg_get_triggerdef",
+        "attnotnull",
+        "attidentity",
+        "attgenerated",
+    ):
+        assert expression in normalized
+    for catalog in ("pg_constraint", "pg_index", "pg_trigger", "pg_attribute"):
         assert catalog in normalized
     assert "statement_timeout" in normalized
+
+    root = Path(__file__).parents[2]
+    readiness_source = (
+        root / "src/peerassist/platform/adapters/postgres_schema.py"
+    ).read_text(encoding="utf-8")
+    frozen_source = (root / "infrastructure/migrations/v0001_schema.py").read_text(
+        encoding="utf-8"
+    )
+    assert "postgres_v0001_signature" in readiness_source
+    assert "EXPECTED_CATALOG_FINGERPRINT" in frozen_source
+    assert "EXPECTED_SCHEMA_CONSTRAINTS.issubset" not in readiness_source
 
 
 def test_audit_table_is_protected_from_update_and_delete() -> None:

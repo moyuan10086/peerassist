@@ -360,8 +360,35 @@ async def _assert_readiness_detects_catalog_drift(
                 "DROP CONSTRAINT fk_browser_sessions_user_identity"
             )
         )
+        connection.execute(
+            text(
+                "ALTER TABLE browser_sessions ADD CONSTRAINT "
+                "fk_browser_sessions_user_identity FOREIGN KEY (identity_id) "
+                "REFERENCES external_identities (id)"
+            )
+        )
     assert await readiness.check() is False
     with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO browser_sessions "
+                "(id, user_id, identity_id, session_digest, csrf_digest, provider_credential_ref, "
+                "token_expires_at, expires_at, idle_expires_at, created_at, updated_at) VALUES "
+                "(gen_random_uuid(), '00000000-0000-0000-0000-000000000002', "
+                "'00000000-0000-0000-0000-000000000101', repeat('e', 64), repeat('f', 64), "
+                "'weaker-fk-proof', now() + interval '1 hour', now() + interval '1 hour', "
+                "now() + interval '30 minutes', now(), now())"
+            )
+        )
+        connection.execute(
+            text("DELETE FROM browser_sessions WHERE session_digest = repeat('e', 64)")
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE browser_sessions "
+                "DROP CONSTRAINT fk_browser_sessions_user_identity"
+            )
+        )
         connection.execute(
             text(
                 "ALTER TABLE browser_sessions ADD CONSTRAINT "
@@ -372,9 +399,38 @@ async def _assert_readiness_detects_catalog_drift(
     assert await readiness.check() is True
 
     with engine.begin() as connection:
-        connection.execute(text("DROP TRIGGER trg_audit_events_append_only ON audit_events"))
+        connection.execute(text("ALTER TABLE users ALTER COLUMN display_name DROP NOT NULL"))
     assert await readiness.check() is False
     with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE users ALTER COLUMN display_name SET NOT NULL"))
+    assert await readiness.check() is True
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX ix_audit_events_command"))
+        connection.execute(text("CREATE INDEX ix_audit_events_command ON audit_events (command_id)"))
+    assert await readiness.check() is False
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX ix_audit_events_command"))
+        connection.execute(
+            text(
+                "CREATE INDEX ix_audit_events_command ON audit_events "
+                "(organization_id, project_id, command_id)"
+            )
+        )
+    assert await readiness.check() is True
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER trg_audit_events_append_only ON audit_events"))
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_audit_events_append_only "
+                "BEFORE DELETE OR UPDATE ON audit_events FOR EACH STATEMENT "
+                "EXECUTE FUNCTION peerassist_reject_audit_mutation()"
+            )
+        )
+    assert await readiness.check() is False
+    with engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER trg_audit_events_append_only ON audit_events"))
         connection.execute(text(live_schema.AUDIT_TRIGGER_SQL))
     assert await readiness.check() is True
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 from sqlalchemy import (
@@ -24,6 +22,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.engine import Connection
+
+from peerassist.platform.adapters.postgres_v0001_signature import (
+    EXPECTED_CATALOG_FINGERPRINT,
+)
 
 HEAD_REVISION = "0001_platform_m1"
 
@@ -770,33 +772,6 @@ FOR EACH ROW EXECUTE FUNCTION peerassist_reject_audit_mutation()
 """
 AUDIT_PROTECTION_SQL = f"{AUDIT_FUNCTION_SQL}\n{AUDIT_TRIGGER_SQL}"
 
-EXPECTED_SCHEMA_TABLES = frozenset(metadata.tables)
-EXPECTED_SCHEMA_COLUMNS = frozenset(
-    f"{table.name}.{column.name}"
-    for table in metadata.tables.values()
-    for column in table.columns
-)
-EXPECTED_SCHEMA_CONSTRAINTS = frozenset(
-    constraint.name
-    for table in metadata.tables.values()
-    for constraint in table.constraints
-)
-EXPECTED_SCHEMA_INDEXES = frozenset(
-    index.name for table in metadata.tables.values() for index in table.indexes
-)
-_SCHEMA_FINGERPRINT_PAYLOAD = {
-    "revision": HEAD_REVISION,
-    "tables": sorted(EXPECTED_SCHEMA_TABLES),
-    "columns": sorted(EXPECTED_SCHEMA_COLUMNS),
-    "constraints": sorted(EXPECTED_SCHEMA_CONSTRAINTS),
-    "indexes": sorted(EXPECTED_SCHEMA_INDEXES),
-    "audit_trigger": " ".join(AUDIT_TRIGGER_SQL.split()),
-}
-SCHEMA_FINGERPRINT = hashlib.sha256(
-    json.dumps(_SCHEMA_FINGERPRINT_PAYLOAD, separators=(",", ":"), sort_keys=True).encode("ascii")
-).hexdigest()
-
-
 REVISION_TABLES = tuple(metadata.tables)
 
 
@@ -811,10 +786,10 @@ def upgrade_v0001(connection: Connection) -> None:
         text(
             "INSERT INTO schema_metadata (key, value, updated_at) "
             "VALUES ('platform_revision', :revision, now()), "
-            "('platform_fingerprint', :fingerprint, now()) "
+            "('platform_catalog_fingerprint', :fingerprint, now()) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
         ),
-        {"revision": HEAD_REVISION, "fingerprint": SCHEMA_FINGERPRINT},
+        {"revision": HEAD_REVISION, "fingerprint": EXPECTED_CATALOG_FINGERPRINT},
     )
 
 

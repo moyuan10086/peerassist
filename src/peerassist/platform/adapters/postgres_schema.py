@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +24,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.engine import Connection, Engine
+
+from .postgres_v0001_signature import (
+    CATALOG_INSPECTION_SQL,
+    EXPECTED_CATALOG_FINGERPRINT,
+    EXPECTED_CATALOG_SIGNATURE,
+    OWNED_TABLES,
+    catalog_fingerprint,
+    catalog_signature_from_row,
+)
 
 HEAD_REVISION = "0001_platform_m1"
 
@@ -772,83 +779,6 @@ FOR EACH ROW EXECUTE FUNCTION peerassist_reject_audit_mutation()
 """
 AUDIT_PROTECTION_SQL = f"{AUDIT_FUNCTION_SQL}\n{AUDIT_TRIGGER_SQL}"
 
-EXPECTED_SCHEMA_TABLES = frozenset(metadata.tables)
-EXPECTED_SCHEMA_COLUMNS = frozenset(
-    f"{table.name}.{column.name}"
-    for table in metadata.tables.values()
-    for column in table.columns
-)
-EXPECTED_SCHEMA_CONSTRAINTS = frozenset(
-    constraint.name
-    for table in metadata.tables.values()
-    for constraint in table.constraints
-)
-EXPECTED_SCHEMA_INDEXES = frozenset(
-    index.name for table in metadata.tables.values() for index in table.indexes
-)
-_SCHEMA_FINGERPRINT_PAYLOAD = {
-    "revision": HEAD_REVISION,
-    "tables": sorted(EXPECTED_SCHEMA_TABLES),
-    "columns": sorted(EXPECTED_SCHEMA_COLUMNS),
-    "constraints": sorted(EXPECTED_SCHEMA_CONSTRAINTS),
-    "indexes": sorted(EXPECTED_SCHEMA_INDEXES),
-    "audit_trigger": " ".join(AUDIT_TRIGGER_SQL.split()),
-}
-SCHEMA_FINGERPRINT = hashlib.sha256(
-    json.dumps(_SCHEMA_FINGERPRINT_PAYLOAD, separators=(",", ":"), sort_keys=True).encode("ascii")
-).hexdigest()
-
-SCHEMA_INSPECTION_SQL = """
-WITH timeout_setting AS (
-    SELECT set_config('statement_timeout', '2000', true)
-), expected_tables AS (
-    SELECT unnest(CAST(:expected_tables AS text[])) AS table_name
-)
-SELECT
-    (SELECT version_num FROM alembic_version LIMIT 1) AS alembic_revision,
-    (SELECT value FROM schema_metadata WHERE key = 'platform_revision') AS schema_revision,
-    (SELECT value FROM schema_metadata WHERE key = 'platform_fingerprint') AS schema_fingerprint,
-    ARRAY(
-        SELECT tablename
-        FROM pg_tables
-        WHERE schemaname = current_schema()
-        ORDER BY tablename
-    ) AS table_names,
-    ARRAY(
-        SELECT columns.table_name || '.' || columns.column_name
-        FROM information_schema.columns AS columns
-        JOIN expected_tables ON expected_tables.table_name = columns.table_name
-        WHERE columns.table_schema = current_schema()
-        ORDER BY columns.table_name, columns.ordinal_position
-    ) AS column_names,
-    ARRAY(
-        SELECT constraints.conname
-        FROM pg_constraint AS constraints
-        JOIN pg_class AS relations ON relations.oid = constraints.conrelid
-        JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
-        JOIN expected_tables ON expected_tables.table_name = relations.relname
-        WHERE namespaces.nspname = current_schema()
-        ORDER BY constraints.conname
-    ) AS constraint_names,
-    ARRAY(
-        SELECT indexes.indexname
-        FROM pg_indexes AS indexes
-        JOIN expected_tables ON expected_tables.table_name = indexes.tablename
-        WHERE indexes.schemaname = current_schema()
-        ORDER BY indexes.indexname
-    ) AS index_names,
-    ARRAY(
-        SELECT triggers.tgname || '|' || pg_get_triggerdef(triggers.oid)
-        FROM pg_trigger AS triggers
-        JOIN pg_class AS relations ON relations.oid = triggers.tgrelid
-        JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
-        WHERE namespaces.nspname = current_schema() AND NOT triggers.tgisinternal
-        ORDER BY triggers.tgname
-    ) AS trigger_definitions
-FROM timeout_setting
-"""
-
-
 def create_platform_schema(connection: Connection) -> None:
     """Create only M1-owned tables; Alembic remains the migration authority."""
 
@@ -860,10 +790,10 @@ def create_platform_schema(connection: Connection) -> None:
         text(
             "INSERT INTO schema_metadata (key, value, updated_at) "
             "VALUES ('platform_revision', :revision, now()), "
-            "('platform_fingerprint', :fingerprint, now()) "
+            "('platform_catalog_fingerprint', :fingerprint, now()) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
         ),
-        {"revision": HEAD_REVISION, "fingerprint": SCHEMA_FINGERPRINT},
+        {"revision": HEAD_REVISION, "fingerprint": EXPECTED_CATALOG_FINGERPRINT},
     )
 
 
@@ -907,28 +837,16 @@ class PostgresSchemaReadiness:
         try:
             with self.engine.connect() as connection:
                 result = connection.execute(
-                    text(SCHEMA_INSPECTION_SQL),
-                    {"expected_tables": sorted(EXPECTED_SCHEMA_TABLES)},
+                    text(CATALOG_INSPECTION_SQL),
+                    {"owned_tables": list(OWNED_TABLES)},
                 ).mappings().one()
-            triggers = tuple(result["trigger_definitions"] or ())
-            audit_trigger = next(
-                (
-                    definition
-                    for definition in triggers
-                    if definition.startswith("trg_audit_events_append_only|")
-                ),
-                "",
-            ).upper()
+            actual_signature = catalog_signature_from_row(result)
             return (
                 result["alembic_revision"] == HEAD_REVISION
                 and result["schema_revision"] == HEAD_REVISION
-                and result["schema_fingerprint"] == SCHEMA_FINGERPRINT
-                and EXPECTED_SCHEMA_TABLES.issubset(result["table_names"] or ())
-                and set(result["column_names"] or ()) == EXPECTED_SCHEMA_COLUMNS
-                and EXPECTED_SCHEMA_CONSTRAINTS.issubset(result["constraint_names"] or ())
-                and EXPECTED_SCHEMA_INDEXES.issubset(result["index_names"] or ())
-                and "BEFORE DELETE OR UPDATE" in audit_trigger
-                and "PEERASSIST_REJECT_AUDIT_MUTATION" in audit_trigger
+                and result["stored_fingerprint"] == EXPECTED_CATALOG_FINGERPRINT
+                and actual_signature == EXPECTED_CATALOG_SIGNATURE
+                and catalog_fingerprint(actual_signature) == EXPECTED_CATALOG_FINGERPRINT
             )
         except Exception:
             return False
