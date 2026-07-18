@@ -32,6 +32,7 @@ from peerassist.platform.services.bootstrap import (
     ChangeIdentity,
     IdentityOperatorService,
 )
+from peerassist.platform.services.memberships import CreateProject, MembershipService
 
 pytestmark = pytest.mark.requires_docker
 
@@ -361,6 +362,22 @@ def test_concurrent_operator_bootstrap_converges_on_real_postgres(
     with factory(operator) as uow:
         assert len(tuple(uow.audit.list(scope))) == 1
 
+    admin = Actor(user.id, ActorKind.USER, identity.id)
+    created_project = MembershipService(factory, clock=lambda: now).create_project(
+        admin,
+        CreateProject(
+            scope.organization_id,
+            "PostgreSQL Managed Project",
+            "postgres-project-key",
+            "req-postgres-project",
+        ),
+    )
+    assert created_project.organization_id == scope.organization_id
+    with factory(admin) as uow:
+        assert "project.created" in {
+            event.event_type for event in uow.outbox.claim_batch(scope, 10)
+        }
+
     identity_service = IdentityOperatorService(factory, clock=lambda: now)
     identity_service.disable(
         operator,
@@ -386,4 +403,4 @@ def test_concurrent_operator_bootstrap_converges_on_real_postgres(
     )
     with factory(operator) as uow:
         assert uow.users.get_identity(identity.issuer, identity.subject) is None
-        assert len(tuple(uow.audit.list(scope))) == 3
+        assert len(tuple(uow.audit.list(scope))) == 4

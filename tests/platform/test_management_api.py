@@ -118,3 +118,30 @@ def test_management_dependency_fails_closed_and_registry_is_deterministic() -> N
         ["organizations"],
         ["projects"],
     )
+
+    service_actor = Actor(admin_id := uuid4(), ActorKind.SERVICE)
+    now = datetime(2026, 7, 18, 10, 0, tzinfo=UTC)
+    dependencies = PlatformDependencies.for_test()
+    organization = Organization(uuid4(), "service-collision", "Service Collision", "active", 1, now, now)
+    with dependencies.uow_factory(Actor(admin_id, ActorKind.USER)) as uow:
+        uow.users.add(User(admin_id, "active", "Admin", now, now))
+        uow.organizations.add(TenantScope(organization.id), organization)
+        uow.organizations.save_membership(
+            TenantScope(organization.id),
+            OrganizationMembership(
+                uuid4(), organization.id, admin_id, Role.ORGANIZATION_ADMIN, "active", 1, now, now
+            ),
+            None,
+        )
+        uow.commit()
+    app = create_app(_settings(), dependencies)
+
+    @app.middleware("http")
+    async def install_service_actor(request, call_next):
+        request.state.management_actor = service_actor
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        collision = client.get(f"/api/v1/organizations/{organization.id}/members")
+    assert collision.status_code == 401
+    assert collision.json()["error"]["code"] == "authentication_required"

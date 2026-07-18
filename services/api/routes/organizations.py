@@ -10,7 +10,14 @@ from fastapi import APIRouter, Depends, Header, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from peerassist.platform.errors import AuthenticationRequired
-from peerassist.platform.models import Action, Actor, AuditEvent, Organization, OrganizationMembership
+from peerassist.platform.models import (
+    Action,
+    Actor,
+    ActorKind,
+    AuditEvent,
+    Organization,
+    OrganizationMembership,
+)
 from peerassist.platform.services.audit import AuditFilter, AuditService
 from peerassist.platform.services.memberships import (
     CreateProject,
@@ -25,7 +32,7 @@ router = APIRouter(prefix="/api/v1", tags=["organizations"])
 def require_management_actor(request: Request) -> Actor:
     """Fail closed until the session milestone installs a verified actor dependency."""
     actor = getattr(request.state, "management_actor", None)
-    if not isinstance(actor, Actor):
+    if not isinstance(actor, Actor) or actor.kind is not ActorKind.USER:
         raise AuthenticationRequired()
     return actor
 

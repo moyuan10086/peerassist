@@ -12,15 +12,19 @@ from ..idempotency import canonical_json_digest
 from ..models import (
     Action,
     Actor,
+    ActorKind,
     AuditEvent,
     CommandRecord,
+    Decision,
     Organization,
     OrganizationMembership,
+    OutboxEvent,
     Project,
     ProjectMembership,
     Role,
     TenantScope,
 )
+from ..permissions import decide_permission
 from ..ports import UnitOfWork, UnitOfWorkFactory
 
 Clock = Callable[[], datetime]
@@ -32,6 +36,11 @@ def _now() -> datetime:
 
 def _active(status: str) -> bool:
     return status == "active"
+
+
+def _require_user_actor(actor: Actor) -> None:
+    if actor.kind is not ActorKind.USER:
+        raise Forbidden()
 
 
 def _time(value: datetime | None) -> str | None:
@@ -190,6 +199,7 @@ class MembershipService:
         self._clock = clock
 
     def list_organizations(self, actor: Actor) -> tuple[Organization, ...]:
+        _require_user_actor(actor)
         with self._uow_factory(actor) as uow:
             organization_ids = {
                 membership.organization_id
@@ -209,6 +219,7 @@ class MembershipService:
             return result
 
     def list_projects(self, actor: Actor, organization_id: UUID | None = None) -> tuple[Project, ...]:
+        _require_user_actor(actor)
         with self._uow_factory(actor) as uow:
             projects: dict[UUID, Project] = {}
             for membership in uow.organizations.list_for_user(actor.actor_id):
@@ -232,24 +243,34 @@ class MembershipService:
             return tuple(projects[key] for key in sorted(projects, key=lambda value: value.int))
 
     def get_project(self, actor: Actor, project_id: UUID) -> Project:
+        _require_user_actor(actor)
         with self._uow_factory(actor) as uow:
             return self._visible_project(uow, actor, project_id)
 
     def list_organization_memberships(
         self, actor: Actor, organization_id: UUID
     ) -> tuple[OrganizationMembership, ...]:
+        _require_user_actor(actor)
         with self._uow_factory(actor) as uow:
-            self._require_organization_admin(uow, actor, organization_id)
+            self._require_organization_admin(
+                uow, actor, organization_id, Action.ORGANIZATION_MANAGE_MEMBERS
+            )
             return tuple(uow.organizations.list_memberships(TenantScope(organization_id)))
 
     def list_project_memberships(self, actor: Actor, project_id: UUID) -> tuple[ProjectMembership, ...]:
+        _require_user_actor(actor)
         with self._uow_factory(actor) as uow:
-            project = self._require_project_manager(uow, actor, project_id)
+            project = self._require_project_manager(
+                uow, actor, project_id, Action.PROJECT_MANAGE_MEMBERS
+            )
             return tuple(uow.projects.list_memberships(project.scope))
 
     def create_project(self, actor: Actor, request: CreateProject) -> Project:
+        _require_user_actor(actor)
         with self._uow_factory(actor) as uow:
-            self._require_organization_admin(uow, actor, request.organization_id)
+            self._require_organization_admin(
+                uow, actor, request.organization_id, Action.PROJECT_CREATE
+            )
             scope = TenantScope(request.organization_id)
             payload = {"name": request.name}
             reserved = self._reserve(
@@ -270,13 +291,23 @@ class MembershipService:
             self._audit(
                 uow,
                 actor,
-                project_scope,
+                scope,
                 reserved,
                 Action.PROJECT_CREATE,
                 "project",
                 project.id,
                 request.request_id,
                 {},
+            )
+            self._outbox(
+                uow,
+                scope,
+                reserved,
+                "project",
+                project.id,
+                project.version,
+                "project.created",
+                {"project_id": str(project.id)},
             )
             self._complete(uow, scope, reserved, 201, _project_response(project))
             uow.commit()
@@ -285,9 +316,15 @@ class MembershipService:
     def grant_organization_membership(
         self, actor: Actor, request: GrantOrganizationMembership
     ) -> OrganizationMembership:
+        _require_user_actor(actor)
         scope = TenantScope(request.organization_id)
         with self._uow_factory(actor) as uow:
-            self._require_organization_admin(uow, actor, request.organization_id)
+            self._require_organization_admin(
+                uow,
+                actor,
+                request.organization_id,
+                Action.ORGANIZATION_MEMBERSHIP_GRANT,
+            )
             if uow.users.get(request.user_id) is None:
                 raise NotFound()
             payload = {
@@ -325,6 +362,16 @@ class MembershipService:
                 request.request_id,
                 {"role": membership.role.value, "version": membership.version},
             )
+            self._outbox(
+                uow,
+                scope,
+                reserved,
+                "organization_membership",
+                membership.id,
+                membership.version,
+                "organization_membership.granted",
+                {"membership_id": str(membership.id), "user_id": str(membership.user_id)},
+            )
             self._complete(uow, scope, reserved, 201, _membership_response(membership))
             uow.commit()
             return membership
@@ -332,11 +379,17 @@ class MembershipService:
     def update_organization_membership(
         self, actor: Actor, request: UpdateOrganizationMembership
     ) -> OrganizationMembership:
+        _require_user_actor(actor)
         if request.status not in {"active", "revoked"}:
             raise ValueError("membership status must be active or revoked")
         scope = TenantScope(request.organization_id)
         with self._uow_factory(actor) as uow:
-            self._require_organization_admin(uow, actor, request.organization_id)
+            action = (
+                Action.ORGANIZATION_MEMBERSHIP_REVOKE
+                if request.status == "revoked"
+                else Action.ORGANIZATION_MEMBERSHIP_CHANGE
+            )
+            self._require_organization_admin(uow, actor, request.organization_id, action)
             current = uow.organizations.get_membership_by_id(scope, request.membership_id)
             if current is None:
                 raise NotFound()
@@ -378,15 +431,32 @@ class MembershipService:
                 request.request_id,
                 {"status": updated.status, "version": updated.version},
             )
+            self._outbox(
+                uow,
+                scope,
+                reserved,
+                "organization_membership",
+                updated.id,
+                updated.version,
+                (
+                    "organization_membership.revoked"
+                    if updated.status == "revoked"
+                    else "organization_membership.changed"
+                ),
+                {"membership_id": str(updated.id), "status": updated.status},
+            )
             self._complete(uow, scope, reserved, 200, _membership_response(updated))
             uow.commit()
             return updated
 
     def grant_project_membership(self, actor: Actor, request: GrantProjectMembership) -> ProjectMembership:
+        _require_user_actor(actor)
         if request.role not in {Role.PROJECT_OWNER, Role.REVIEWER, Role.VIEWER}:
             raise ValueError("invalid project role")
         with self._uow_factory(actor) as uow:
-            project = self._require_project_manager(uow, actor, request.project_id)
+            project = self._require_project_manager(
+                uow, actor, request.project_id, Action.PROJECT_MEMBERSHIP_GRANT
+            )
             if uow.users.get(request.user_id) is None:
                 raise NotFound()
             scope = project.scope
@@ -426,17 +496,33 @@ class MembershipService:
                 request.request_id,
                 {"role": membership.role.value, "version": membership.version},
             )
+            self._outbox(
+                uow,
+                scope,
+                reserved,
+                "project_membership",
+                membership.id,
+                membership.version,
+                "project_membership.granted",
+                {"membership_id": str(membership.id), "user_id": str(membership.user_id)},
+            )
             self._complete(uow, scope, reserved, 201, _membership_response(membership))
             uow.commit()
             return membership
 
     def update_project_membership(self, actor: Actor, request: UpdateProjectMembership) -> ProjectMembership:
+        _require_user_actor(actor)
         if request.status not in {"active", "revoked"}:
             raise ValueError("membership status must be active or revoked")
         if request.role not in {Role.PROJECT_OWNER, Role.REVIEWER, Role.VIEWER}:
             raise ValueError("invalid project role")
         with self._uow_factory(actor) as uow:
-            project = self._require_project_manager(uow, actor, request.project_id)
+            action = (
+                Action.PROJECT_MEMBERSHIP_REVOKE
+                if request.status == "revoked"
+                else Action.PROJECT_MEMBERSHIP_CHANGE
+            )
+            project = self._require_project_manager(uow, actor, request.project_id, action)
             scope = project.scope
             current = uow.projects.get_membership_by_id(scope, request.membership_id)
             if current is None:
@@ -479,6 +565,20 @@ class MembershipService:
                 request.request_id,
                 {"role": updated.role.value, "status": updated.status, "version": updated.version},
             )
+            self._outbox(
+                uow,
+                scope,
+                reserved,
+                "project_membership",
+                updated.id,
+                updated.version,
+                (
+                    "project_membership.revoked"
+                    if updated.status == "revoked"
+                    else "project_membership.changed"
+                ),
+                {"membership_id": str(updated.id), "status": updated.status},
+            )
             self._complete(uow, scope, reserved, 200, _membership_response(updated))
             uow.commit()
             return updated
@@ -493,7 +593,11 @@ class MembershipService:
         )
 
     def _require_organization_admin(
-        self, uow: UnitOfWork, actor: Actor, organization_id: UUID
+        self,
+        uow: UnitOfWork,
+        actor: Actor,
+        organization_id: UUID,
+        action: Action,
     ) -> Organization:
         scope = TenantScope(organization_id)
         membership = uow.organizations.get_membership(scope, actor.actor_id)
@@ -501,7 +605,17 @@ class MembershipService:
             organization = uow.organizations.get(scope)
             if organization is None:
                 raise NotFound()
-            return organization
+            decision = decide_permission(
+                role=membership.role,
+                membership_scope=scope,
+                resource_scope=scope,
+                action=action,
+            )
+            if decision is Decision.ALLOW:
+                return organization
+            if decision is Decision.NOT_FOUND:
+                raise NotFound()
+            raise Forbidden()
         if self._organization_visible(uow, actor, organization_id):
             raise Forbidden()
         raise NotFound()
@@ -521,16 +635,36 @@ class MembershipService:
                 return project
         raise NotFound()
 
-    def _require_project_manager(self, uow: UnitOfWork, actor: Actor, project_id: UUID) -> Project:
+    def _require_project_manager(
+        self,
+        uow: UnitOfWork,
+        actor: Actor,
+        project_id: UUID,
+        action: Action,
+    ) -> Project:
         project = self._visible_project(uow, actor, project_id)
         organization_membership = uow.organizations.get_membership(
             TenantScope(project.organization_id), actor.actor_id
         )
         if organization_membership is not None and _active(organization_membership.status):
-            return project
+            decision = decide_permission(
+                role=organization_membership.role,
+                membership_scope=TenantScope(project.organization_id),
+                resource_scope=project.scope,
+                action=action,
+            )
+            if decision is Decision.ALLOW:
+                return project
         membership = uow.projects.get_membership(project.scope, actor.actor_id)
-        if membership is not None and _active(membership.status) and membership.role is Role.PROJECT_OWNER:
-            return project
+        if membership is not None and _active(membership.status):
+            decision = decide_permission(
+                role=membership.role,
+                membership_scope=project.scope,
+                resource_scope=project.scope,
+                action=action,
+            )
+            if decision is Decision.ALLOW:
+                return project
         raise Forbidden()
 
     def _reserve(
@@ -602,5 +736,32 @@ class MembershipService:
                 identity_id=actor.identity_id,
                 command_id=command.id,
                 safe_metadata=metadata,
+            ),
+        )
+
+    def _outbox(
+        self,
+        uow: UnitOfWork,
+        scope: TenantScope,
+        command: CommandRecord,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        aggregate_sequence: int,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        uow.outbox.append(
+            scope,
+            OutboxEvent(
+                uuid5(command.id, "outbox"),
+                scope.organization_id,
+                aggregate_type,
+                aggregate_id,
+                aggregate_sequence,
+                event_type,
+                1,
+                payload,
+                self._clock(),
+                project_id=scope.project_id,
             ),
         )

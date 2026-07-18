@@ -214,3 +214,11 @@ def test_cross_tenant_is_not_found_visible_denial_is_forbidden_and_audit_filters
     )
     assert audit
     assert all(event.project_id == created.id and event.outcome == "succeeded" for event in audit)
+
+    with factory(admin) as uow:
+        organization_events = uow.outbox.claim_batch(TenantScope(organization.id), 10)
+        project_events = uow.outbox.claim_batch(created.scope, 10)
+    assert [event.event_type for event in organization_events] == ["project.created"]
+    assert [event.event_type for event in project_events] == [
+        "project_membership.granted"
+    ]

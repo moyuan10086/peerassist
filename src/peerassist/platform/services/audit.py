@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ..errors import Forbidden, NotFound
-from ..models import Action, Actor, AuditEvent, TenantScope
+from ..models import Action, Actor, ActorKind, AuditEvent, Decision, TenantScope
+from ..permissions import decide_permission
 from ..ports import UnitOfWorkFactory
 
 
@@ -30,6 +31,8 @@ class AuditService:
         filters: AuditFilter | None = None,
     ) -> tuple[AuditEvent, ...]:
         selected = filters or AuditFilter()
+        if actor.kind is not ActorKind.USER:
+            raise Forbidden()
         scope = TenantScope(organization_id)
         with self._uow_factory(actor) as uow:
             membership = uow.organizations.get_membership(scope, actor.actor_id)
@@ -41,6 +44,16 @@ class AuditService:
                 if visible:
                     raise Forbidden()
                 raise NotFound()
+            decision = decide_permission(
+                role=membership.role,
+                membership_scope=scope,
+                resource_scope=scope,
+                action=Action.ORGANIZATION_READ_AUDIT,
+            )
+            if decision is Decision.NOT_FOUND:
+                raise NotFound()
+            if decision is not Decision.ALLOW:
+                raise Forbidden()
             if selected.project_id is not None:
                 project_scope = TenantScope(organization_id, selected.project_id)
                 if uow.projects.get(project_scope) is None:
