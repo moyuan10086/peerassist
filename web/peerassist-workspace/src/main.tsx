@@ -143,9 +143,14 @@ type AgentRun = {
 type ReviewJob = {
   id: string;
   paper_id: string;
+  paper_version_id?: string;
+  project_id?: string;
   status: string;
   stage: string;
   revision: number;
+  version?: number;
+  source_url?: string;
+  platform?: boolean;
   confirmation_revision?: number;
   required_consents?: string[];
   resume_stage?: string | null;
@@ -381,6 +386,17 @@ function cookieValue(name: string) {
   return value ? decodeURIComponent(value) : "";
 }
 
+async function resolvePlatformProject() {
+  const organizationsResponse = await fetch("/api/v1/organizations", { cache: "no-store" });
+  if (!organizationsResponse.ok) return null;
+  const organizations = await organizationsResponse.json() as OrganizationRow[];
+  if (!organizations.length) return null;
+  const projectsResponse = await fetch(`/api/v1/organizations/${organizations[0].id}/projects`, { cache: "no-store" });
+  if (!projectsResponse.ok) return null;
+  const projects = await projectsResponse.json() as ProjectRow[];
+  return projects[0] || null;
+}
+
 function App() {
   const initial = useMemo(() => ({ ...fallbackBootstrap, ...readServerBootstrap() }), []);
   const [bootstrap, setBootstrap] = useState<Bootstrap>(initial as Bootstrap);
@@ -390,12 +406,15 @@ function App() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [modelReachable, setModelReachable] = useState<boolean | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false, user: null, available: false });
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
   const [jobWorkspace, setJobWorkspace] = useState<ConfirmationState | null>(null);
   const [activePdfUrl, setActivePdfUrl] = useState(() => {
+    const storedPdfUrl = window.localStorage.getItem("peerassist.activePdfUrl") || "";
+    if (storedPdfUrl) return storedPdfUrl;
     const storedPaperId = window.localStorage.getItem("peerassist.activePaperId") || "";
     return storedPaperId ? `/api/papers/${storedPaperId}/source` : initial.assets.pdf_url || "";
   });
@@ -405,12 +424,53 @@ function App() {
   const events = state.tool_trace?.events || [];
   const agentRuns = state.agent_runs || [];
   const paths = state.paths || {};
-  const modelEnabled =
+  const modelConfigured =
     bootstrap.model_config.api_key_configured === "true" ||
     bootstrap.model_config.api_key_configured === true;
+  const modelEnabled = modelConfigured && modelReachable === true;
   const modelDisplay = bootstrap.model_config.model
-    ? `${bootstrap.model_config.model}${modelEnabled ? "" : "（未启用）"}`
+    ? `${bootstrap.model_config.model}${
+      modelEnabled
+        ? ""
+        : !modelConfigured
+          ? "（未启用）"
+          : modelReachable === false
+            ? "（连接失败）"
+            : "（验证中）"
+    }`
     : "模型未配置";
+
+  useEffect(() => {
+    if (!modelConfigured || !bootstrap.model_config.base_url || !bootstrap.model_config.model) {
+      setModelReachable(false);
+      return;
+    }
+    const controller = new AbortController();
+    setModelReachable(null);
+    fetch("/api/model-settings/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: bootstrap.model_config.provider,
+        base_url: bootstrap.model_config.base_url,
+        model: bootstrap.model_config.model,
+        api_key: "",
+      }),
+      signal: controller.signal,
+    })
+      .then((response) => setModelReachable(response.ok))
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setModelReachable(false);
+      });
+    return () => controller.abort();
+  }, [
+    bootstrap.model_config.api_key_configured,
+    bootstrap.model_config.base_url,
+    bootstrap.model_config.model,
+    bootstrap.model_config.provider,
+    modelConfigured,
+  ]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -426,10 +486,35 @@ function App() {
   }, []);
 
   const refreshJobs = useCallback(async () => {
+    const project = await resolvePlatformProject().catch(() => null);
+    if (project) {
+      const [jobsResponse, papersResponse] = await Promise.all([
+        fetch(`/api/v1/projects/${project.id}/review-jobs`, { cache: "no-store" }),
+        fetch(`/api/v1/projects/${project.id}/papers`, { cache: "no-store" }),
+      ]);
+      if (jobsResponse.ok && papersResponse.ok) {
+        const rows = await jobsResponse.json() as Array<ReviewJob & { paper_version_id: string; version: number }>;
+        const papers = await papersResponse.json() as Array<{ id: string; current_version_id: string }>;
+        const paperByVersion = new Map(papers.map((paper) => [paper.current_version_id, paper.id]));
+        const jobs = rows.map((row) => {
+          const paperId = paperByVersion.get(row.paper_version_id) || row.paper_version_id;
+          return {
+            ...row,
+            paper_id: paperId,
+            revision: row.version,
+            platform: true,
+            source_url: `/api/v1/projects/${project.id}/papers/${paperId}/source`,
+          };
+        });
+        jobs.sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
+        setReviewJobs(jobs);
+        return jobs;
+      }
+    }
     const response = await fetch("/api/jobs", { cache: "no-store" });
     if (!response.ok) throw new Error("无法读取后台审稿任务");
     const payload = (await response.json()) as { jobs?: ReviewJob[] };
-    const jobs = payload.jobs || [];
+    const jobs = (payload.jobs || []).map((job) => ({ ...job, platform: false }));
     jobs.sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
     setReviewJobs(jobs);
     return jobs;
@@ -456,13 +541,69 @@ function App() {
 
   const refreshJobWorkspace = useCallback(async (jobId: string) => {
     if (!jobId) return null;
+    const platformJob = reviewJobs.find((job) => job.id === jobId && job.platform);
+    if (platformJob?.project_id) {
+      const base = `/api/v1/projects/${platformJob.project_id}/review-jobs/${jobId}`;
+      const [artifactResponse, eventResponse] = await Promise.all([
+        fetch(`${base}/artifacts`, { cache: "no-store" }),
+        fetch(`${base}/events`, { cache: "no-store" }),
+      ]);
+      if (!artifactResponse.ok || !eventResponse.ok) throw new Error("无法读取平台审稿产物");
+      const artifacts = await artifactResponse.json() as Array<{ id: string; logical_name: string; object: { media_type: string; size_bytes: number; sha256: string } }>;
+      const eventRows = await eventResponse.json() as Array<{ event_type: string; created_at: string; payload?: Record<string, unknown> }>;
+      const artifactUrl = (id: string) => `${base}/artifacts/${id}`;
+      const summaryArtifact = artifacts.find((item) => item.logical_name === "paper_summary.md");
+      const reviewArtifact = artifacts.find((item) => item.logical_name === "review.md");
+      const [summaryMarkdown, reviewMarkdown] = await Promise.all([
+        summaryArtifact ? fetch(artifactUrl(summaryArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
+        reviewArtifact ? fetch(artifactUrl(reviewArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
+      ]);
+      const summaryText = summaryMarkdown.replace(/^#+\s.*$/gm, "").replace(/\s+/g, " ").trim();
+      if (summaryText) {
+        setBootstrap((current) => ({
+          ...current,
+          paper_overview: {
+            ...(current.paper_overview || {}),
+            available: true,
+            title: current.paper_overview?.title || "当前论文",
+            summary: summaryText,
+          },
+        }));
+      }
+      if (reviewMarkdown) setLastReviewDraft(reviewMarkdown);
+      const nextState: ConfirmationState = {
+        artifacts: {
+          ready: artifacts.length > 0,
+          items: artifacts.map((item) => ({
+            name: item.logical_name,
+            filename: item.logical_name,
+            media_type: item.object.media_type,
+            size_bytes: item.object.size_bytes,
+            sha256: item.object.sha256,
+            download_url: artifactUrl(item.id),
+          })),
+        },
+        tool_trace: {
+          events: eventRows.map((event, index) => ({
+            call_id: `${jobId}-${index}`,
+            source: "platform",
+            tool: event.event_type,
+            status: "completed",
+            ts: event.created_at,
+            output_summary: JSON.stringify(event.payload || {}),
+          })),
+        },
+      };
+      setJobWorkspace(nextState);
+      return nextState;
+    }
     const response = await fetch(`/api/jobs/${jobId}/workspace`, { cache: "no-store" });
     if (!response.ok) throw new Error("无法读取当前审稿任务工作区");
     const payload = (await response.json()) as { state?: ConfirmationState };
     const nextState = payload.state || {};
     setJobWorkspace(nextState);
     return nextState;
-  }, []);
+  }, [reviewJobs]);
 
   useEffect(() => {
     Promise.all([refresh(), refreshJobs(), refreshSession()]).catch(() =>
@@ -508,16 +649,18 @@ function App() {
     setActiveWindow(windowId);
   };
 
-  const openPaperById = (paperId: string, jobId = "") => {
+  const openPaperById = (paperId: string, jobId = "", sourceUrl = "") => {
     const normalized = paperId.trim();
-    if (!/^[0-9a-f]{64}$/.test(normalized)) return;
+    if (!/^[0-9a-f-]{32,64}$/i.test(normalized)) return;
     window.localStorage.setItem("peerassist.activePaperId", normalized);
     if (jobId) {
       window.localStorage.setItem("peerassist.activeJobId", jobId);
       setActiveJobId(jobId);
     }
     setActivePaperId(normalized);
-    setActivePdfUrl(`/api/papers/${normalized}/source`);
+    const resolvedSource = sourceUrl || `/api/papers/${normalized}/source`;
+    window.localStorage.setItem("peerassist.activePdfUrl", resolvedSource);
+    setActivePdfUrl(resolvedSource);
     navigate("paper", "/paper");
   };
 
@@ -616,6 +759,30 @@ function App() {
   async function runJobAction(job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") {
     setBusy(true);
     try {
+      if (job.platform && job.project_id) {
+        const platformAction = action === "consent" ? "decisions" : action;
+        const response = await fetch(
+          `/api/v1/projects/${job.project_id}/review-jobs/${job.id}/${platformAction}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": crypto.randomUUID(),
+              "X-CSRF-Token": cookieValue("peerassist_csrf"),
+            },
+            body: JSON.stringify(
+              action === "consent"
+                ? { decision_type: "consent", subject_id: "model", decision: "granted", expected_version: job.revision }
+                : { expected_version: job.revision },
+            ),
+          },
+        );
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error?.message || "任务操作失败");
+        showToast(jobActionLabel(action));
+        await refreshJobs();
+        return;
+      }
       const path =
         action === "consent"
           ? `/api/jobs/${job.id}/consents/model`
@@ -654,6 +821,41 @@ function App() {
     setBusy(true);
     setStreamLines((lines) => [...lines.slice(-80), `upload: 正在上传 ${file.name}`]);
     try {
+      if (authSession.authenticated) {
+        const project = await resolvePlatformProject();
+        if (!project) throw new Error("当前账号还没有可用项目，请先到成员管理创建项目");
+        const body = new FormData();
+        body.append("file", file, file.name);
+        const uploadedResponse = await fetch(`/api/v1/projects/${project.id}/papers`, {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": crypto.randomUUID(),
+            "X-CSRF-Token": cookieValue("peerassist_csrf"),
+          },
+          body,
+        });
+        const uploaded = await uploadedResponse.json();
+        if (!uploadedResponse.ok) throw new Error(uploaded.error?.message || "论文上传失败");
+        const reviewResponse = await fetch(`/api/v1/projects/${project.id}/review-jobs`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": crypto.randomUUID(),
+            "X-CSRF-Token": cookieValue("peerassist_csrf"),
+          },
+          body: JSON.stringify({ paper_version_id: uploaded.version.id, mode: "full" }),
+        });
+        const job = await reviewResponse.json();
+        if (!reviewResponse.ok) throw new Error(job.error?.message || "审阅任务创建失败");
+        showToast("论文已上传，平台审阅任务已启动");
+        await refreshJobs();
+        openPaperById(
+          uploaded.paper.id,
+          job.id,
+          `/api/v1/projects/${project.id}/papers/${uploaded.paper.id}/source`,
+        );
+        return true;
+      }
       const body = new FormData();
       body.append("file", file, file.name);
       const response = await fetch("/api/papers/upload", { method: "POST", body });
@@ -796,7 +998,7 @@ function App() {
             onRunReview={runAgentReview}
             onJobAction={runJobAction}
             onUploadPaper={uploadPaper}
-            onOpenPaper={(job) => openPaperById(job.paper_id, job.id)}
+              onOpenPaper={(job) => openPaperById(job.paper_id, job.id, job.source_url)}
           />
         )}
         {activeWindow === "queue" && (
@@ -816,6 +1018,7 @@ function App() {
           initial={bootstrap.model_config}
           onClose={() => setModelSettingsOpen(false)}
           onSaved={(settings) => {
+            setModelReachable(null);
             setBootstrap((current) => ({
               ...current,
               model_config: {
@@ -2128,7 +2331,7 @@ function AgentWindow({
   );
 }
 
-const reviewStages = ["validate", "parse", "evidence", "profile", "plan", "deterministic", "citation", "agents", "integrate", "await_confirmation", "finalize", "complete"];
+const reviewStages = ["queued", "prepare", "validate", "parse", "evidence", "profile", "plan", "deterministic", "citation", "agents", "integrate", "report", "await_confirmation", "finalize", "completed", "complete"];
 
 function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void; onOpenPaper: (job: ReviewJob) => void }) {
   const current = Math.max(0, reviewStages.indexOf(job.stage));
@@ -2148,7 +2351,7 @@ function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; b
           {job.status === "blocked" && job.required_consents?.includes("model") && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "consent")}>授权模型并继续</button>}
           {canCancel && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "cancel")}>取消</button>}
           {["failed", "cancelled", "interrupted"].includes(job.status) && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "retry")}>重试</button>}
-          {job.status === "awaiting_human_confirmation" && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "finalize")}>导出最终报告</button>}
+          {(job.status === "awaiting_human_confirmation" || (job.status === "blocked" && job.stage === "finalize")) && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "finalize")}>确认并完成报告</button>}
         </div>
       </div>
       <div className="job-stage-track" aria-label="审稿任务阶段">

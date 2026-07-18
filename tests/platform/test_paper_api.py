@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from services.api.app import create_app
 from services.api.composition import PlatformDependencies
 from services.api.routes.organizations import require_management_actor
+from services.api.routes.papers import _source_headers
 
 from common.config import PlatformSettings
 from peerassist.platform.models import (
     Actor,
     ActorKind,
     Organization,
+    PaperVersion,
     Project,
     ProjectMembership,
     Role,
@@ -108,3 +111,22 @@ def test_invalid_pdf_and_oversized_upload_have_stable_errors() -> None:
     assert invalid.json()["error"]["code"] == "invalid_upload"
     assert oversized.status_code == 413
     assert oversized.json()["error"]["code"] == "payload_too_large"
+
+
+def test_source_headers_accept_equivalent_utc_timezone_from_postgres() -> None:
+    now = datetime(2026, 7, 18, 13, 0, tzinfo=ZoneInfo("UTC"))
+    version = PaperVersion(
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        "paper/source",
+        "paper.pdf",
+        "application/pdf",
+        1,
+        "a" * 64,
+        uuid4(),
+        now,
+    )
+
+    assert _source_headers(version)["Last-Modified"].endswith("GMT")

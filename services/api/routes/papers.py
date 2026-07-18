@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from email.utils import format_datetime
 from typing import Annotated
 from urllib.parse import quote
@@ -149,7 +150,7 @@ def _source_headers(version: PaperVersion) -> dict[str, str]:
         "Accept-Ranges": "bytes",
         "Cache-Control": "private, max-age=3600, immutable",
         "ETag": f'"{version.sha256}"',
-        "Last-Modified": format_datetime(version.created_at, usegmt=True),
+        "Last-Modified": format_datetime(version.created_at.astimezone(UTC), usegmt=True),
         "Content-Disposition": (
             f'inline; filename="{ascii_filename}"; '
             f"filename*=UTF-8''{quote(version.filename, safe='')}"
