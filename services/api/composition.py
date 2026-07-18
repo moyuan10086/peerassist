@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from common.config import PlatformSettings
 from peerassist.platform.adapters import oidc
+from peerassist.platform.adapters.legacy import LocalLegacyReader
 from peerassist.platform.adapters.memory import (
     FakeIdentityProvider,
     MemoryObjectStore,
@@ -16,7 +18,7 @@ from peerassist.platform.adapters.memory import (
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_schema import PostgresSchemaReadiness
 from peerassist.platform.adapters.s3 import S3ObjectStore
-from peerassist.platform.ports import IdentityProvider, ObjectStore, UnitOfWorkFactory
+from peerassist.platform.ports import IdentityProvider, LegacyReader, ObjectStore, UnitOfWorkFactory
 from peerassist.platform.services.sessions import BrowserSessionService
 
 from .dependencies import LifecycleResource, ReadinessCheck
@@ -46,6 +48,7 @@ class PlatformDependencies:
     session_service: BrowserSessionService
     readiness_checks: tuple[ReadinessCheck, ...]
     lifecycle_resources: tuple[LifecycleResource, ...] = ()
+    legacy_reader: LegacyReader | None = None
     readiness_check_timeout_seconds: float = 2.0
     readiness_overall_timeout_seconds: float = 3.0
     lifecycle_stop_timeout_seconds: float = 2.0
@@ -148,6 +151,7 @@ def build_dependencies(settings: PlatformSettings) -> PlatformDependencies:
                 object_store,
             ),
             lifecycle_resources=(uow_factory, identity_provider, object_store),
+            legacy_reader=LocalLegacyReader(settings.legacy_root),
         )
     return _memory_dependencies(
         issuer=settings.oidc_issuer,
@@ -191,6 +195,7 @@ def _memory_dependencies(
         ),
         readiness_checks=checks,
         lifecycle_resources=lifecycle_resources,
+        legacy_reader=LocalLegacyReader(Path("./data/jobs")),
         readiness_check_timeout_seconds=readiness_check_timeout_seconds,
         readiness_overall_timeout_seconds=readiness_overall_timeout_seconds,
         lifecycle_stop_timeout_seconds=lifecycle_stop_timeout_seconds,

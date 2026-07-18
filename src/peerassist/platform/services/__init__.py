@@ -9,6 +9,7 @@ from .bootstrap import (
     ChangeIdentity,
     IdentityOperatorService,
 )
+from .legacy import LegacyJobView, LegacyService
 from .memberships import (
     CreateProject,
     GrantOrganizationMembership,
@@ -35,6 +36,8 @@ __all__ = [
     "GrantOrganizationMembership",
     "GrantProjectMembership",
     "IdentityOperatorService",
+    "LegacyJobView",
+    "LegacyService",
     "MembershipService",
     "PaperService",
     "PaperSource",

@@ -88,6 +88,7 @@ class PlatformSettings(BaseSettings):
     scratch_ttl_seconds: int = Field(default=86400, gt=0)
     internal_legacy_audience: str = Field(min_length=1)
     legacy_bind_host: str = "127.0.0.1"
+    legacy_root: Path = Path("./data/jobs")
 
     @model_validator(mode="before")
     @classmethod
