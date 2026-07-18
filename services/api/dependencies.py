@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import threading
 from typing import Protocol
 
@@ -95,7 +96,20 @@ def optional_request_actor(request: Request) -> Actor | None:
             session_token = request.cookies.get("peerassist_session", "")
             if not session_token:
                 return None
-            actor = service.resolve_session(session_token)
+            unsafe = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+            csrf_cookie = request.cookies.get("peerassist_csrf", "")
+            csrf_header = request.headers.get("x-csrf-token", "")
+            if unsafe and (
+                not csrf_cookie
+                or not csrf_header
+                or not hmac.compare_digest(csrf_cookie, csrf_header)
+            ):
+                raise AuthenticationRequired()
+            actor = service.resolve_session(
+                session_token,
+                csrf_token=csrf_header if unsafe else None,
+                require_csrf=unsafe,
+            )
     except AuthenticationRequired:
         return None
     if actor.kind is not ActorKind.USER:

@@ -371,6 +371,16 @@ function currentWindowFromPath(): WindowId {
   return "paper";
 }
 
+function cookieValue(name: string) {
+  const prefix = `${name}=`;
+  const value = document.cookie
+    .split(";")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(prefix))
+    ?.slice(prefix.length);
+  return value ? decodeURIComponent(value) : "";
+}
+
 function App() {
   const initial = useMemo(() => ({ ...fallbackBootstrap, ...readServerBootstrap() }), []);
   const [bootstrap, setBootstrap] = useState<Bootstrap>(initial as Bootstrap);
@@ -668,11 +678,7 @@ function App() {
   }
 
   async function logout() {
-    const csrf = document.cookie
-      .split(";")
-      .map((item) => item.trim())
-      .find((item) => item.startsWith("peerassist_csrf="))
-      ?.split("=", 2)[1];
+    const csrf = cookieValue("peerassist_csrf");
     if (!csrf) {
       await refreshSession();
       navigate("login", "/login");
@@ -680,7 +686,7 @@ function App() {
     }
     await fetch("/api/v1/auth/logout", {
       method: "POST",
-      headers: { "X-CSRF-Token": decodeURIComponent(csrf) },
+      headers: { "X-CSRF-Token": csrf },
       redirect: "manual",
     }).catch(() => undefined);
     await refreshSession();
@@ -904,7 +910,13 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
   const [error, setError] = useState("");
 
   const api = useCallback(async (path: string, init?: RequestInit) => {
-    const response = await fetch(path, { cache: "no-store", ...init });
+    const method = String(init?.method || "GET").toUpperCase();
+    const headers = new Headers(init?.headers);
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+      const csrf = cookieValue("peerassist_csrf");
+      if (csrf) headers.set("X-CSRF-Token", csrf);
+    }
+    const response = await fetch(path, { cache: "no-store", ...init, headers });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error?.message || payload.error || "管理操作失败");
     return payload;

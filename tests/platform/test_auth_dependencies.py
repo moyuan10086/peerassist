@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from services.api.app import create_app
@@ -57,9 +57,26 @@ def test_browser_login_installs_user_actor_for_management_routes() -> None:
         assert callback.headers["location"] == "/admin"
         session = client.get("/api/v1/auth/session")
         organizations = client.get("/api/v1/organizations")
+        organization_id = uuid4()
+        missing_csrf = client.post(
+            f"/api/v1/organizations/{organization_id}/projects",
+            headers={"Idempotency-Key": "csrf-missing"},
+            json={"name": "Rejected project"},
+        )
+        csrf_token = client.cookies.get("peerassist_csrf")
+        accepted_csrf = client.post(
+            f"/api/v1/organizations/{organization_id}/projects",
+            headers={
+                "Idempotency-Key": "csrf-present",
+                "X-CSRF-Token": csrf_token,
+            },
+            json={"name": "Authorized request"},
+        )
 
     assert session.status_code == 200
     assert session.json()["authenticated"] is True
     assert session.json()["user"]["display_name"] == "Admin User"
     assert organizations.status_code == 200
     assert organizations.json() == []
+    assert missing_csrf.status_code == 401
+    assert accepted_csrf.status_code == 404
