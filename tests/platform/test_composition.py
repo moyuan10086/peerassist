@@ -31,7 +31,7 @@ def test_test_and_development_composition_select_memory_providers_explicitly() -
 def test_production_composition_selects_postgres_without_memory_fallback() -> None:
     from services.api.composition import build_dependencies
 
-    from peerassist.platform.adapters.postgres_schema import PostgresUnitOfWorkFactory
+    from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 
     settings = _settings(
         environment="production",
@@ -66,7 +66,7 @@ def test_production_composition_fails_closed_without_database_driver(
 ) -> None:
     from services.api.composition import CompositionError, build_dependencies
 
-    import peerassist.platform.adapters.postgres_schema as postgres_schema
+    import peerassist.platform.adapters.postgres as postgres
 
     settings = _settings(
         environment="production",
@@ -83,7 +83,7 @@ def test_production_composition_fails_closed_without_database_driver(
         scratch_root=Path("/var/lib/peerassist/scratch"),
     )
     monkeypatch.setattr(
-        postgres_schema,
+        postgres,
         "create_engine",
         lambda *args, **kwargs: (_ for _ in ()).throw(ModuleNotFoundError("private-db-secret")),
     )

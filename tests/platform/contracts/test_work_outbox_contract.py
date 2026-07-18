@@ -184,7 +184,7 @@ def test_audit_is_append_only_and_tenant_scoped(uow_factory, clock) -> None:
         Action.REVIEW_JOB_CREATE,
         "review_job",
         uuid4(),
-        "allowed",
+        "succeeded",
         "request-1",
         clock(),
         project_id=scope.project_id,
@@ -215,7 +215,7 @@ def test_project_work_outbox_artifacts_and_audit_reject_organization_only_scope(
         item.job_id,
         "report",
         ObjectDescriptor("object-1", 3, "a" * 64, "application/pdf"),
-        "ready",
+        "available",
         clock(),
     )
     audit = AuditEvent(
@@ -225,7 +225,7 @@ def test_project_work_outbox_artifacts_and_audit_reject_organization_only_scope(
         Action.REVIEW_JOB_CREATE,
         "review_job",
         item.job_id,
-        "allowed",
+        "succeeded",
         "request-2",
         clock(),
         project_id=scope.project_id,
@@ -278,7 +278,7 @@ def test_organization_scoped_outbox_and_audit_are_visible_only_to_exact_org_scop
         Action.ORGANIZATION_MANAGE_MEMBERS,
         "organization",
         scope.organization_id,
-        "allowed",
+        "succeeded",
         "request-org",
         clock(),
     )

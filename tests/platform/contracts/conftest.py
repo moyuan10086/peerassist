@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 
 import pytest
@@ -36,9 +37,43 @@ def clock() -> MutableClock:
 @pytest.fixture
 def uow_factory(request: pytest.FixtureRequest, clock: MutableClock):
     adapter = request.config.getoption("--adapter")
+    if adapter == "postgresql":
+        from alembic import command
+        from alembic.config import Config
+        from sqlalchemy import event, text
+
+        from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
+        from peerassist.platform.adapters.postgres_schema import metadata
+
+        database_url = os.environ.get("PEERASSIST_TEST_DATABASE_URL")
+        if not database_url:
+            pytest.skip("PEERASSIST_TEST_DATABASE_URL is not configured")
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        root = request.config.rootpath
+        config = Config(root / "alembic.ini")
+        config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+        command.upgrade(config, "head")
+        factory = PostgresUnitOfWorkFactory.from_url(database_url, clock=clock)
+        with factory.engine.begin() as connection:
+            table_names = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
+            connection.execute(text(f"TRUNCATE TABLE {table_names} CASCADE"))
+
+        @event.listens_for(factory.engine, "begin")
+        def disable_relationship_triggers(connection) -> None:
+            connection.exec_driver_sql("SET LOCAL session_replication_role = replica")
+
+        request.addfinalizer(factory.engine.dispose)
+        return factory
     if adapter != "memory":
-        pytest.skip(f"unit-of-work adapter {adapter!r} is not implemented in Task 3")
+        pytest.skip(f"unit-of-work adapter {adapter!r} is not implemented")
     return MemoryUnitOfWorkFactory(clock=clock)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--adapter") == "postgresql":
+        for item in items:
+            if "/platform/contracts/" in str(item.path):
+                item.add_marker(pytest.mark.requires_docker)
 
 
 @pytest.fixture

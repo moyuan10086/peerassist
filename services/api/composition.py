@@ -12,10 +12,8 @@ from peerassist.platform.adapters.memory import (
     MemoryObjectStore,
     MemoryUnitOfWorkFactory,
 )
-from peerassist.platform.adapters.postgres_schema import (
-    PostgresSchemaReadiness,
-    PostgresUnitOfWorkFactory,
-)
+from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
+from peerassist.platform.adapters.postgres_schema import PostgresSchemaReadiness
 from peerassist.platform.ports import IdentityProvider, ObjectStore, UnitOfWorkFactory
 
 from .dependencies import LifecycleResource, ReadinessCheck

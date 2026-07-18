@@ -48,7 +48,7 @@ def job(scope: TenantScope, now, *, version: int = 1) -> ReviewJob:
         scope.organization_id,
         scope.project_id,
         uuid4(),
-        "standard",
+        "fast",
         "queued",
         "queued",
         version,
@@ -80,7 +80,7 @@ def paper(scope: TenantScope, now) -> tuple[Paper, PaperVersion]:
         scope.organization_id,
         scope.project_id,
         paper_id,
-        "object-1",
+        f"object-{version_id}",
         "paper.pdf",
         "application/pdf",
         3,
@@ -257,7 +257,13 @@ def test_paper_versions_advance_aggregate_pointer_version_and_timestamp(uow_fact
         uow.commit()
 
     clock.now += timedelta(seconds=1)
-    revision_two = replace(initial_version, id=uuid4(), revision=2, created_at=clock())
+    revision_two = replace(
+        initial_version,
+        id=uuid4(),
+        source_object_id=f"object-{uuid4()}",
+        revision=2,
+        created_at=clock(),
+    )
     with uow_factory(principal) as uow:
         uow.papers.add_version(scope, revision_two, expected_paper_version=1)
         uow.commit()
@@ -267,7 +273,13 @@ def test_paper_versions_advance_aggregate_pointer_version_and_timestamp(uow_fact
         )
 
     clock.now += timedelta(seconds=1)
-    revision_three = replace(revision_two, id=uuid4(), revision=3, created_at=clock())
+    revision_three = replace(
+        revision_two,
+        id=uuid4(),
+        source_object_id=f"object-{uuid4()}",
+        revision=3,
+        created_at=clock(),
+    )
     with uow_factory(principal) as uow:
         uow.papers.add_version(scope, revision_three, expected_paper_version=2)
         uow.commit()
@@ -600,7 +612,7 @@ def test_primary_create_paths_reject_conflicting_duplicate_ids(uow_factory, cloc
         review.id,
         "report",
         ObjectDescriptor("object-1", 3, "a" * 64, "application/pdf"),
-        "ready",
+        "available",
         clock(),
     )
     registration = LegacyRegistration(
