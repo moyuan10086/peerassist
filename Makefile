@@ -1,4 +1,4 @@
-.PHONY: verify verify-fast test lint frontend docs secrets dependencies dist compose-up compose-down
+.PHONY: verify verify-fast test lint frontend docs secrets dependencies dist compose-up compose-down m1-smoke m1-compose-config
 
 verify:
 	python scripts/verify_repository.py all
@@ -32,3 +32,9 @@ compose-up:
 
 compose-down:
 	docker compose -f infrastructure/compose/compose.yml down
+
+m1-smoke:
+	bash scripts/m1_compose_smoke.sh
+
+m1-compose-config:
+	docker compose -f infrastructure/compose/compose.m1.yml config --quiet

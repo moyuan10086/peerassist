@@ -17,6 +17,11 @@ each write, and use the current `revision_id` as an optimistic concurrency
 guard. Do not store API keys, GitHub tokens, model keys, private paths, paper
 secrets, provider responses, or reviewer-private material here.
 
+M1 synchronization must record the delivered login/admin/member/model configuration surfaces,
+PostgreSQL/Keycloak/MinIO authority, real PDF-to-summary workflow, 35-operation OpenAPI contract,
+317 focused platform tests and the 9-check real-provider smoke. Keep the existing ten headings and
+update in place; do not append another dated progress log.
+
 ## 2026-07-17 M0 baseline sync contract
 
 - The user authorized revision 137 as the new baseline. Task 6 was synchronized

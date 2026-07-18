@@ -37,3 +37,21 @@ docker compose -f infrastructure/compose/compose.yml down
 The loopback binding is a development boundary, not an internet deployment. Do not publish port
 8767 or change the Workspace binding to all interfaces without adding authentication, transport
 security, and an explicit production threat review.
+
+## M1 authorization platform
+
+M1 moves browser identity, tenant data, uploaded PDFs, review commands and artifacts to the
+FastAPI/PostgreSQL/Keycloak/MinIO boundary. The legacy workspace remains a browser shell and
+read-only compatibility surface; it is no longer the authority for new review writes.
+
+Run the focused real-provider acceptance with:
+
+```bash
+make m1-smoke
+```
+
+The script creates unique credentials and Compose resources, exercises PostgreSQL review commands,
+MinIO immutable objects and Keycloak identity contracts, then removes containers, volumes and the
+mode-0600 environment file. The reference profile is
+`infrastructure/compose/compose.m1.yml`; provide every required environment variable through an
+untracked secret manager or protected env file before running `make m1-compose-config`.

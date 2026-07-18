@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import signal
+import socket
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import requests
 from pypdf import PdfReader
@@ -327,3 +331,40 @@ def _fallback_documents(title: str, text: str) -> tuple[str, str]:
         "- 核对局限性与适用边界是否完整披露。"
     )
     return summary, report
+
+
+def main() -> int:
+    organization_id = os.environ.get("PEERASSIST_WORKER_ORGANIZATION_ID", "").strip()
+    project_id = os.environ.get("PEERASSIST_WORKER_PROJECT_ID", "").strip()
+    try:
+        scope = TenantScope(UUID(organization_id), UUID(project_id))
+    except ValueError:
+        return 2
+    from common.config import PlatformSettings
+    from services.api.composition import build_dependencies
+
+    settings = PlatformSettings()
+    dependencies = build_dependencies(settings)
+    worker = ReviewWorker(
+        dependencies.uow_factory,
+        dependencies.object_store,
+        settings.scratch_root,
+    )
+    stopping = False
+
+    def stop(_signum, _frame) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    worker_id = f"{socket.gethostname()}-{os.getpid()}"
+    while not stopping:
+        processed = worker.run_once(scope, worker_id=worker_id)
+        if processed is None:
+            time.sleep(1.0)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

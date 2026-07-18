@@ -1,0 +1,13 @@
+FROM python:3.12.10-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/src:/app
+WORKDIR /app
+RUN groupadd --system --gid 10001 peerassist && useradd --system --uid 10001 --gid peerassist peerassist
+COPY pyproject.toml README.md LICENSE /app/
+COPY src /app/src
+COPY services /app/services
+COPY alembic.ini /app/alembic.ini
+COPY infrastructure/migrations /app/infrastructure/migrations
+RUN pip install --no-cache-dir ".[platform]"
+USER 10001:10001
+CMD ["python", "-m", "uvicorn", "services.api.app:create_configured_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]

@@ -49,7 +49,7 @@ Run the narrowest relevant test while developing, then the repository verificati
 
 ## Security Boundaries
 
-- This alpha has no built-in authentication. Bind local services to loopback or place them behind a trusted authenticated reverse proxy.
+- M1 uses Keycloak PKCE login, server-side sessions, CSRF, tenant RBAC, PostgreSQL and immutable object storage. Keep the M0 compatibility profile loopback-only and read-only from M1.
 - Never commit manuscripts, credentials, access tokens, cookies, private keys, provider private responses, or production data.
 - Never place secrets in prompts, logs, fixtures, screenshots, reports, or browser state.
 - Tenant and project authorization belongs in repository/query boundaries, not only in UI or route checks.

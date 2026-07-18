@@ -1,4 +1,4 @@
-# PeerAssist M0 system review
+# PeerAssist system review
 
 This report records the verified M0 engineering baseline on 2026-07-17. It
 contains only public engineering evidence; credentials, manuscript text,
@@ -51,3 +51,25 @@ S3-compatible storage, tenant-aware RBAC, the Next.js application shell, the
 React Flow evidence canvas, production TLS and rate limiting, and full browser
 regression remain later milestones. The existing frontend chunk-size warning is
 accepted for M0 and should be addressed during the Next.js migration.
+
+## M1 platform delivery
+
+M1 adds real browser login, server sessions and CSRF; organization, project and member management;
+tenant-scoped PostgreSQL repositories; MinIO/S3 paper uploads and immutable artifacts; durable
+review commands, events, work leases and Worker publication; human decisions/finalization; and a
+digest-verified read-only M0 compatibility route. The current React workspace now calls the M1
+paper/review APIs for authenticated users and displays the generated Chinese paper summary and
+report artifacts.
+
+Focused platform verification is `317 passed, 18 deselected`. The real-provider smoke separately
+passed PostgreSQL review commands (1), the unchanged MinIO object contract (6), MinIO integration
+(1), and Keycloak discovery/JWKS token validation (1). OpenAPI has 35 unique operations with no
+drift, the frontend production build succeeds, and Playwright verified `/login`, `/admin`, model
+settings, real PDF upload, a durable Worker result, artifact reads, PDF `200/206` Range behavior,
+and visible “这篇论文讲了什么” content.
+
+The configured `gpt-5` credential in the current local environment is rejected by the upstream
+provider with HTTP 401. The workspace now verifies model discovery before enabling model actions
+and shows “连接失败” for this state; Worker publication falls back to evidence text extraction and
+marks the summary accordingly. A valid provider credential is still required for model-generated
+analysis.

@@ -13,7 +13,20 @@
       "serviceAccountsEnabled": true,
       "directAccessGrantsEnabled": true,
       "standardFlowEnabled": false,
-      "protocol": "openid-connect"
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "peerassist-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "${M1_TEST_OIDC_AUTOMATION_CLIENT_ID}",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
     },
     {
       "clientId": "${M1_TEST_OIDC_PKCE_CLIENT_ID}",

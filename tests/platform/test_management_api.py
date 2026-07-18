@@ -129,6 +129,10 @@ def test_management_dependency_fails_closed_and_registry_is_deterministic() -> N
         ["authentication"],
         ["organizations"],
         ["projects"],
+        ["papers"],
+        ["review-jobs"],
+        ["artifacts"],
+        ["legacy-compatibility"],
     )
 
     service_actor = Actor(admin_id := uuid4(), ActorKind.SERVICE)

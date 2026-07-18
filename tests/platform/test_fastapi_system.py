@@ -234,19 +234,17 @@ def test_http_exceptions_preserve_only_safe_standard_headers() -> None:
     assert "private-token" not in unsafe.text
 
 
-def test_unknown_route_and_auth_placeholders_use_the_stable_error_envelope() -> None:
+def test_unknown_route_and_browser_auth_use_the_stable_public_contract() -> None:
     from services.api.app import create_app
     from services.api.composition import PlatformDependencies
 
     with TestClient(create_app(_settings(), PlatformDependencies.for_test())) as client:
         missing = client.get("/api/v1/does-not-exist", headers={"X-Request-ID": "req-404"})
-        auth_responses = (
-            client.get("/api/v1/auth/login"),
-            client.get("/api/v1/auth/callback"),
-            client.get("/api/v1/auth/session"),
-            client.post("/api/v1/auth/logout"),
-            client.get("/api/v1/me"),
-        )
+        login = client.get("/api/v1/auth/login", follow_redirects=False)
+        callback = client.get("/api/v1/auth/callback")
+        session = client.get("/api/v1/auth/session")
+        logout = client.post("/api/v1/auth/logout")
+        me = client.get("/api/v1/me")
 
     assert missing.status_code == 404
     assert missing.json() == {
@@ -258,11 +256,16 @@ def test_unknown_route_and_auth_placeholders_use_the_stable_error_envelope() -> 
             "retryable": False,
         }
     }
-    for response in auth_responses:
-        assert response.status_code == 503
-        assert response.json()["error"]["code"] == "not_configured"
-        assert response.json()["error"]["details"] == {}
-        assert response.json()["error"]["retryable"] is False
+    assert login.status_code == 307
+    assert login.headers["location"].startswith("http://identity.test/")
+    assert callback.status_code == 422
+    assert session.status_code == 200 and session.json() == {
+        "authenticated": False,
+        "user": None,
+    }
+    assert logout.status_code == 422
+    assert me.status_code == 401
+    assert me.json()["error"]["code"] == "authentication_required"
 
 
 def test_fixed_router_registry_and_lifespan_include_all_platform_components() -> None:

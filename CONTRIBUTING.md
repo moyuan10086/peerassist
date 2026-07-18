@@ -16,6 +16,7 @@ Typical checks are:
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check src tests scripts
 cd web/peerassist-workspace && npm ci && npm run build
+make m1-smoke
 ```
 
 Develop behavior test-first. Observe the focused test fail for the intended reason, implement the smallest coherent change, and keep existing user changes intact.
@@ -28,6 +29,7 @@ Before opening or updating a pull request:
 - include tests for behavior, authorization, compatibility, and failure handling as applicable;
 - run focused tests, Ruff, and relevant frontend checks;
 - run `python scripts/verify_repository.py all` as the canonical final gate;
+- run `make m1-smoke` when changing platform identity, persistence, object storage or worker behavior;
 - review both the working-tree diff and staged diff for scope and generated artifacts;
 - update PRD, API conventions, ADRs, and operations guidance when contracts change;
 - disclose skipped or gated checks and the reason;

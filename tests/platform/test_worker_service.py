@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from services.worker.main import ReviewWorker
+from services.worker.main import ReviewWorker, main
 from tests.platform.test_paper_service import _seed
 
 from peerassist.platform.services.papers import UploadPaper
@@ -63,3 +63,10 @@ def test_worker_claims_review_and_publishes_summary_and_report(tmp_path: Path) -
     finally:
         source.stream.close()
     assert not any(tmp_path.rglob("object-000.bin"))
+
+
+def test_worker_entrypoint_rejects_missing_tenant_scope(monkeypatch) -> None:
+    monkeypatch.delenv("PEERASSIST_WORKER_ORGANIZATION_ID", raising=False)
+    monkeypatch.delenv("PEERASSIST_WORKER_PROJECT_ID", raising=False)
+
+    assert main() == 2

@@ -4,13 +4,13 @@ PeerAssist is an alpha research-review system. Report suspected vulnerabilities 
 
 ## Supported Deployment Boundary
 
-The current application has no built-in authentication. It is supported only when bound to loopback for a single trusted user or isolated behind a trusted reverse proxy that provides TLS, authentication, authorization, request limits, and audit logging.
+The M1 platform has Keycloak Authorization Code + PKCE login, server-side sessions, CSRF protection, organization/project RBAC, tenant-scoped repositories, PostgreSQL write authority, and immutable S3-compatible artifacts. The legacy M0 profile remains supported only on loopback for a single trusted user or as an explicitly registered read-only compatibility source.
 
-Do not expose the Python service or Vite compatibility workspace directly to an untrusted network. Resource identifiers are not authorization controls. A future public deployment must enforce organization and project scope in repositories and artifact access paths, use secure browser sessions, and pass the security and tenancy contract suites before launch.
+Do not expose development profiles directly to an untrusted network. Resource identifiers are not authorization controls. Public deployments still require TLS termination, request limits, secure secret injection, retention policy, monitoring, and the M1 system/tenancy gates.
 
 ## Confidential Manuscripts
 
-Do not process confidential manuscripts in production until authentication, tenant isolation, encrypted storage, retention controls, audited approvals, and provider data-transfer controls are implemented and verified.
+Do not process confidential manuscripts in production until deployment-specific encryption, retention controls, audited provider approvals and incident response are configured and verified. M1 supplies the application authorization boundary but cannot replace infrastructure policy.
 
 - Never commit manuscripts, credentials, private keys, access tokens, session cookies, provider private responses, or production artifacts.
 - Use synthetic fixtures and redact logs, screenshots, reports, and issue descriptions.
