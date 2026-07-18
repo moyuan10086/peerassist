@@ -127,6 +127,61 @@ def test_sixteen_concurrent_identical_commands_converge_and_changed_payload_conf
             uow.commands.reserve_or_replay(scope, replace(record, payload_digest="b" * 64))
 
 
+def test_command_replay_cannot_cross_project_scope_or_expose_stored_response(
+    seeded_factory: tuple[PostgresUnitOfWorkFactory, Actor, TenantScope, UUID, UUID],
+) -> None:
+    factory, actor, project_a, _, _ = seeded_factory
+    project_b = TenantScope(project_a.organization_id, uuid4())
+    now = datetime(2026, 7, 18, 8, tzinfo=UTC)
+    with factory.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects (id, organization_id, name, status, version, created_at, updated_at) "
+                "VALUES (:project, :organization, 'Project B', 'active', 1, :now, :now)"
+            ),
+            {
+                "project": project_b.project_id,
+                "organization": project_b.organization_id,
+                "now": now,
+            },
+        )
+    record = CommandRecord(
+        uuid4(),
+        project_a.organization_id,
+        actor.actor_id,
+        "project.update",
+        "cross-project-key",
+        "a" * 64,
+        now,
+        project_id=project_a.project_id,
+    )
+    completed = replace(
+        record,
+        response_status=200,
+        response_body={"private_result": "project-a"},
+        completed_at=now,
+    )
+    with factory(actor) as uow:
+        uow.commands.reserve(project_a, record)
+        uow.commands.complete(project_a, completed)
+        uow.commit()
+    project_b_attempt = replace(
+        record,
+        id=uuid4(),
+        project_id=project_b.project_id,
+        created_at=now.replace(microsecond=1),
+    )
+    with factory(actor) as uow:
+        with pytest.raises(IdempotencyConflict):
+            uow.commands.reserve_or_replay(project_b, project_b_attempt)
+        assert uow.commands.get(project_b, actor.actor_id, record.operation, record.idempotency_key) is None
+    with factory(actor) as uow:
+        assert uow.commands.reserve_or_replay(
+            project_a,
+            replace(record, id=uuid4(), created_at=now.replace(microsecond=2)),
+        ) == completed
+
+
 def test_competing_workers_never_receive_the_same_active_claim(
     seeded_factory: tuple[PostgresUnitOfWorkFactory, Actor, TenantScope, UUID, UUID],
 ) -> None:

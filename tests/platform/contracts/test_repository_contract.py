@@ -557,6 +557,53 @@ def test_command_retry_ignores_generated_presentation_fields(uow_factory, clock)
         )
 
 
+def test_command_replay_is_isolated_to_the_exact_project_scope(uow_factory, clock) -> None:
+    principal = actor()
+    project_a = TenantScope(uuid4(), uuid4())
+    project_b = TenantScope(project_a.organization_id, uuid4())
+    record = CommandRecord(
+        uuid4(),
+        project_a.organization_id,
+        principal.actor_id,
+        "project.update",
+        "same-key",
+        "a" * 64,
+        clock(),
+        project_id=project_a.project_id,
+    )
+    completed = replace(
+        record,
+        response_status=200,
+        response_body={"project": "a"},
+        completed_at=clock(),
+    )
+    with uow_factory(principal) as uow:
+        uow.commands.reserve(project_a, record)
+        uow.commands.complete(project_a, completed)
+        uow.commit()
+    project_b_attempt = replace(
+        record,
+        id=uuid4(),
+        project_id=project_b.project_id,
+        created_at=clock() + timedelta(seconds=1),
+    )
+    with uow_factory(principal) as uow:
+        with pytest.raises(IdempotencyConflict):
+            uow.commands.reserve_or_replay(project_b, project_b_attempt)
+        assert uow.commands.get(
+            project_b,
+            principal.actor_id,
+            record.operation,
+            record.idempotency_key,
+        ) is None
+    with uow_factory(principal) as uow:
+        replay = uow.commands.reserve_or_replay(
+            project_a,
+            replace(record, id=uuid4(), created_at=clock() + timedelta(seconds=2)),
+        )
+        assert replay == completed
+
+
 def test_aggregate_events_are_strictly_ordered_and_unique(uow_factory, clock) -> None:
     principal = actor()
     scope = TenantScope(uuid4(), uuid4())

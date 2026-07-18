@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import delete, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from peerassist.platform.errors import DependencyUnavailable, IdempotencyConflict, NotFound
+from peerassist.platform.errors import IdempotencyConflict, NotFound
 from peerassist.platform.models import (
     AuditEvent,
     CommandRecord,
@@ -87,7 +87,7 @@ class _Commands(_Repository):
         row = self._one(
             select(schema.commands)
             .where(
-                schema.commands.c.organization_id == command.organization_id,
+                _record_filter(schema.commands, scope),
                 schema.commands.c.actor_id == command.actor_id,
                 schema.commands.c.operation == command.operation,
                 schema.commands.c.idempotency_key == command.idempotency_key,
@@ -95,9 +95,12 @@ class _Commands(_Repository):
             .with_for_update()
         )
         if row is None:
-            raise DependencyUnavailable()
+            raise IdempotencyConflict()
         existing = _command(row)
-        if self._identity(existing) != self._identity(command):
+        if (
+            existing.project_id != command.project_id
+            or self._identity(existing) != self._identity(command)
+        ):
             raise IdempotencyConflict()
         return existing
 

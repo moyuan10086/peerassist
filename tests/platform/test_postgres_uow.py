@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError
 from peerassist.platform.adapters import postgres_schema as schema
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_core import _project_filter, _record_filter
-from peerassist.platform.adapters.postgres_queue import _Audit, _Outbox, _WorkItems
+from peerassist.platform.adapters.postgres_queue import _Audit, _Commands, _Outbox, _WorkItems
 from peerassist.platform.adapters.postgres_repositories import _Projects
 from peerassist.platform.adapters.postgres_review import (
     _Artifacts,
@@ -203,10 +203,11 @@ def test_project_repository_sql_ast_uses_tenant_predicates_for_every_resource_pa
         _Artifacts: {"get", "list_for_job", "add"},
         _LegacyRegistrations: {"get", "add"},
         _WorkItems: {"enqueue", "get", "claim", "renew", "complete", "fail", "_active"},
+        _Commands: {"get", "_reserve", "complete"},
         _Outbox: {"append", "claim_batch", "mark_published"},
         _Audit: {"append", "list"},
     }
-    record_scoped = {_Outbox, _Audit}
+    record_scoped = {_Commands, _Outbox, _Audit}
     for repository, methods in expected.items():
         predicate = "_record_filter" if repository in record_scoped else "_project_filter"
         for method_name in methods:
