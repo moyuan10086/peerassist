@@ -25,6 +25,14 @@ def test_openapi_has_versioned_paths_operation_ids_and_no_provider_schemas() -> 
         "/api/v1/auth/session",
         "/api/v1/health",
         "/api/v1/me",
+        "/api/v1/organizations",
+        "/api/v1/organizations/{organization_id}/audit-events",
+        "/api/v1/organizations/{organization_id}/members",
+        "/api/v1/organizations/{organization_id}/members/{membership_id}",
+        "/api/v1/organizations/{organization_id}/projects",
+        "/api/v1/projects/{project_id}",
+        "/api/v1/projects/{project_id}/members",
+        "/api/v1/projects/{project_id}/members/{membership_id}",
         "/api/v1/ready",
     }
     operation_ids = {
@@ -32,7 +40,7 @@ def test_openapi_has_versioned_paths_operation_ids_and_no_provider_schemas() -> 
         for methods in schema["paths"].values()
         for operation in methods.values()
     }
-    assert len(operation_ids) == 7
+    assert len(operation_ids) == 18
     assert all(operation_id.startswith("v1_") for operation_id in operation_ids)
     serialized = json.dumps(schema).casefold()
     assert "postgres" not in serialized

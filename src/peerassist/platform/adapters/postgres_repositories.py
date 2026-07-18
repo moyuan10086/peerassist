@@ -91,6 +91,29 @@ class _Users(_Repository):
             "external identity already exists or is invalid",
         )
 
+    def save_identity(self, identity: ExternalIdentity, expected_version: int) -> None:
+        if identity.version != expected_version + 1:
+            raise StaleVersion(
+                details={"expected_version": expected_version + 1, "current_version": identity.version}
+            )
+        result = self.connection.execute(
+            update(schema.external_identities)
+            .where(
+                schema.external_identities.c.id == identity.id,
+                schema.external_identities.c.issuer == identity.issuer,
+                schema.external_identities.c.subject == identity.subject,
+                schema.external_identities.c.version == expected_version,
+            )
+            .values(
+                verified_claims=_json(identity.verified_claims),
+                last_seen_at=identity.last_seen_at,
+                disabled_at=identity.disabled_at,
+                version=identity.version,
+            )
+        )
+        if result.rowcount != 1:
+            raise StaleVersion(details={"expected_version": expected_version, "current_version": None})
+
 
 class _Organizations(_Repository):
     def get(self, scope: TenantScope) -> Organization | None:
@@ -98,6 +121,24 @@ class _Organizations(_Repository):
             return None
         row = self._one(select(schema.organizations).where(schema.organizations.c.id == scope.organization_id))
         return None if row is None else _organization(row)
+
+    def list_for_user(self, user_id: UUID) -> tuple[OrganizationMembership, ...]:
+        rows = self.connection.execute(
+            select(schema.organization_memberships)
+            .where(schema.organization_memberships.c.user_id == user_id)
+            .order_by(schema.organization_memberships.c.id)
+        ).mappings()
+        return tuple(_organization_membership(row) for row in rows)
+
+    def list_memberships(self, scope: TenantScope) -> tuple[OrganizationMembership, ...]:
+        if scope.project_id is not None:
+            return ()
+        rows = self.connection.execute(
+            select(schema.organization_memberships)
+            .where(schema.organization_memberships.c.organization_id == scope.organization_id)
+            .order_by(schema.organization_memberships.c.id)
+        ).mappings()
+        return tuple(_organization_membership(row) for row in rows)
 
     def add(self, scope: TenantScope, organization: Organization) -> None:
         if scope.project_id is not None or organization.id != scope.organization_id:
@@ -129,6 +170,19 @@ class _Organizations(_Repository):
             select(schema.organization_memberships).where(
                 schema.organization_memberships.c.organization_id == scope.organization_id,
                 schema.organization_memberships.c.user_id == user_id,
+            )
+        )
+        return None if row is None else _organization_membership(row)
+
+    def get_membership_by_id(
+        self, scope: TenantScope, membership_id: UUID
+    ) -> OrganizationMembership | None:
+        if scope.project_id is not None:
+            return None
+        row = self._one(
+            select(schema.organization_memberships).where(
+                schema.organization_memberships.c.organization_id == scope.organization_id,
+                schema.organization_memberships.c.id == membership_id,
             )
         )
         return None if row is None else _organization_membership(row)
@@ -175,6 +229,32 @@ class _Projects(_Repository):
         ).mappings()
         return tuple(_project(row) for row in rows)
 
+    def list_for_organization(self, scope: TenantScope) -> tuple[Project, ...]:
+        if scope.project_id is not None:
+            return ()
+        rows = self.connection.execute(
+            select(schema.projects)
+            .where(schema.projects.c.organization_id == scope.organization_id)
+            .order_by(schema.projects.c.id)
+        ).mappings()
+        return tuple(_project(row) for row in rows)
+
+    def list_for_user(self, user_id: UUID) -> tuple[ProjectMembership, ...]:
+        rows = self.connection.execute(
+            select(schema.project_memberships)
+            .where(schema.project_memberships.c.user_id == user_id)
+            .order_by(schema.project_memberships.c.id)
+        ).mappings()
+        return tuple(_project_membership(row) for row in rows)
+
+    def list_memberships(self, scope: TenantScope) -> tuple[ProjectMembership, ...]:
+        rows = self.connection.execute(
+            select(schema.project_memberships)
+            .where(_project_filter(schema.project_memberships, scope))
+            .order_by(schema.project_memberships.c.id)
+        ).mappings()
+        return tuple(_project_membership(row) for row in rows)
+
     def add(self, scope: TenantScope, project: Project) -> None:
         _require_project(scope, project)
         _require_initial(project)
@@ -210,6 +290,17 @@ class _Projects(_Repository):
             select(schema.project_memberships).where(
                 _project_filter(schema.project_memberships, scope),
                 schema.project_memberships.c.user_id == user_id,
+            )
+        )
+        return None if row is None else _project_membership(row)
+
+    def get_membership_by_id(
+        self, scope: TenantScope, membership_id: UUID
+    ) -> ProjectMembership | None:
+        row = self._one(
+            select(schema.project_memberships).where(
+                _project_filter(schema.project_memberships, scope),
+                schema.project_memberships.c.id == membership_id,
             )
         )
         return None if row is None else _project_membership(row)

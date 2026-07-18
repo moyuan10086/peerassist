@@ -3,12 +3,22 @@ from __future__ import annotations
 import inspect
 
 from peerassist.platform import ports
+from peerassist.platform.adapters.memory import _Audit as MemoryAudit
 from peerassist.platform.adapters.memory import _Commands as MemoryCommands
+from peerassist.platform.adapters.memory import _Organizations as MemoryOrganizations
 from peerassist.platform.adapters.memory import _Papers as MemoryPapers
+from peerassist.platform.adapters.memory import _Projects as MemoryProjects
 from peerassist.platform.adapters.memory import _ReviewJobs as MemoryReviewJobs
+from peerassist.platform.adapters.memory import _Users as MemoryUsers
 from peerassist.platform.adapters.memory import _WorkItems as MemoryWorkItems
+from peerassist.platform.adapters.postgres_queue import _Audit as PostgresAudit
 from peerassist.platform.adapters.postgres_queue import _Commands as PostgresCommands
 from peerassist.platform.adapters.postgres_queue import _WorkItems as PostgresWorkItems
+from peerassist.platform.adapters.postgres_repositories import (
+    _Organizations as PostgresOrganizations,
+)
+from peerassist.platform.adapters.postgres_repositories import _Projects as PostgresProjects
+from peerassist.platform.adapters.postgres_repositories import _Users as PostgresUsers
 from peerassist.platform.adapters.postgres_review import _Papers as PostgresPapers
 from peerassist.platform.adapters.postgres_review import _ReviewJobs as PostgresReviewJobs
 
@@ -32,10 +42,14 @@ def test_repository_protocols_include_all_shared_contract_operations() -> None:
 
 def test_memory_and_postgres_repositories_conform_to_protocol_method_signatures() -> None:
     pairs = (
+        (ports.UserRepository, MemoryUsers, PostgresUsers),
+        (ports.OrganizationRepository, MemoryOrganizations, PostgresOrganizations),
+        (ports.ProjectRepository, MemoryProjects, PostgresProjects),
         (ports.PaperRepository, MemoryPapers, PostgresPapers),
         (ports.ReviewJobRepository, MemoryReviewJobs, PostgresReviewJobs),
         (ports.CommandRepository, MemoryCommands, PostgresCommands),
         (ports.WorkItemRepository, MemoryWorkItems, PostgresWorkItems),
+        (ports.AuditRepository, MemoryAudit, PostgresAudit),
     )
     for protocol, *implementations in pairs:
         for name, method in protocol.__dict__.items():

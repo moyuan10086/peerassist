@@ -396,3 +396,13 @@ class _Audit(_Repository):
             .order_by(schema.audit_events.c.created_at, schema.audit_events.c.id)
         ).mappings()
         return tuple(_audit(row) for row in rows)
+
+    def list_for_organization(self, scope: TenantScope) -> tuple[AuditEvent, ...]:
+        if scope.project_id is not None:
+            return ()
+        rows = self.connection.execute(
+            select(schema.audit_events)
+            .where(schema.audit_events.c.organization_id == scope.organization_id)
+            .order_by(schema.audit_events.c.created_at, schema.audit_events.c.id)
+        ).mappings()
+        return tuple(_audit(row) for row in rows)

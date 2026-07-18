@@ -250,11 +250,13 @@ class Role(StrEnum):
 
 
 class Action(StrEnum):
+    ORGANIZATION_BOOTSTRAP = "organization.bootstrap"
     ORGANIZATION_READ = "organization.read"
     ORGANIZATION_MANAGE_POLICY = "organization.manage_policy"
     ORGANIZATION_MANAGE_MEMBERS = "organization.manage_members"
     ORGANIZATION_READ_AUDIT = "organization.read_audit"
     PROJECT_READ = "project.read"
+    PROJECT_CREATE = "project.create"
     PROJECT_MANAGE_SETTINGS = "project.manage_settings"
     PROJECT_MANAGE_MEMBERS = "project.manage_members"
     PAPER_READ = "paper.read"
@@ -275,6 +277,14 @@ class Action(StrEnum):
     INTERNAL_TOOL_EXECUTE = "internal.tool_execute"
     INTERNAL_WORK_CLAIM = "internal.work_claim"
     INTERNAL_WORK_COMPLETE = "internal.work_complete"
+    ORGANIZATION_MEMBERSHIP_GRANT = "organization_membership.grant"
+    ORGANIZATION_MEMBERSHIP_CHANGE = "organization_membership.change"
+    ORGANIZATION_MEMBERSHIP_REVOKE = "organization_membership.revoke"
+    PROJECT_MEMBERSHIP_GRANT = "project_membership.grant"
+    PROJECT_MEMBERSHIP_CHANGE = "project_membership.change"
+    PROJECT_MEMBERSHIP_REVOKE = "project_membership.revoke"
+    IDENTITY_DISABLE = "identity.disable"
+    IDENTITY_UNLINK = "identity.unlink"
 
 
 class Decision(StrEnum):

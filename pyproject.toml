@@ -138,6 +138,7 @@ Homepage = "https://github.com/DEFENSE-SEU/FactReview"
 peerassist-confirm = "peerassist.confirmation_cli:main"
 peerassist-confirm-server = "peerassist.confirmation_server:main"
 peerassist-eval = "peerassist.eval_cli:main"
+peerassist-platform = "peerassist.platform.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [

@@ -155,6 +155,14 @@ class _Users:
             raise ValueError("external identity ID already exists")
         self._state.identities[key] = identity
 
+    def save_identity(self, identity: ExternalIdentity, expected_version: int) -> None:
+        key = (identity.issuer, identity.subject)
+        current = self._state.identities.get(key)
+        _check_replacement_version(current, identity, expected_version)
+        if current is not None and current.id != identity.id:
+            raise ValueError("external identity identity cannot change")
+        self._state.identities[key] = identity
+
 
 class _Organizations:
     def __init__(self, state: _State) -> None:
@@ -162,6 +170,28 @@ class _Organizations:
 
     def get(self, scope: TenantScope) -> Organization | None:
         return self._state.organizations.get(scope.organization_id)
+
+    def list_for_user(self, user_id: UUID) -> tuple[OrganizationMembership, ...]:
+        return tuple(
+            sorted(
+                (item for item in self._state.organization_memberships.values() if item.user_id == user_id),
+                key=lambda item: item.id.int,
+            )
+        )
+
+    def list_memberships(self, scope: TenantScope) -> tuple[OrganizationMembership, ...]:
+        if scope.project_id is not None:
+            return ()
+        return tuple(
+            sorted(
+                (
+                    item
+                    for item in self._state.organization_memberships.values()
+                    if item.organization_id == scope.organization_id
+                ),
+                key=lambda item: item.id.int,
+            )
+        )
 
     def add(self, scope: TenantScope, organization: Organization) -> None:
         if not _organization_scope_matches(scope, organization.id):
@@ -176,6 +206,14 @@ class _Organizations:
 
     def get_membership(self, scope: TenantScope, user_id: UUID) -> OrganizationMembership | None:
         return self._state.organization_memberships.get((scope.organization_id, user_id))
+
+    def get_membership_by_id(
+        self, scope: TenantScope, membership_id: UUID
+    ) -> OrganizationMembership | None:
+        return next(
+            (item for item in self.list_memberships(scope) if item.id == membership_id),
+            None,
+        )
 
     def save_membership(
         self,
@@ -240,6 +278,42 @@ class _Projects:
             if _project_scope_matches(scope, item.organization_id, item.id)
         )
 
+    def list_for_organization(self, scope: TenantScope) -> tuple[Project, ...]:
+        if scope.project_id is not None:
+            return ()
+        return tuple(
+            sorted(
+                (
+                    item
+                    for item in self._state.projects.values()
+                    if item.organization_id == scope.organization_id
+                ),
+                key=lambda item: item.id.int,
+            )
+        )
+
+    def list_for_user(self, user_id: UUID) -> tuple[ProjectMembership, ...]:
+        return tuple(
+            sorted(
+                (item for item in self._state.project_memberships.values() if item.user_id == user_id),
+                key=lambda item: item.id.int,
+            )
+        )
+
+    def list_memberships(self, scope: TenantScope) -> tuple[ProjectMembership, ...]:
+        if scope.project_id is None:
+            return ()
+        return tuple(
+            sorted(
+                (
+                    item
+                    for item in self._state.project_memberships.values()
+                    if _project_scope_matches(scope, item.organization_id, item.project_id)
+                ),
+                key=lambda item: item.id.int,
+            )
+        )
+
     def add(self, scope: TenantScope, project: Project) -> None:
         _require_project_scope(scope, project)
         _require_initial_version(project)
@@ -260,6 +334,11 @@ class _Projects:
             if item is not None and _project_scope_matches(scope, item.organization_id, item.project_id)
             else None
         )
+
+    def get_membership_by_id(
+        self, scope: TenantScope, membership_id: UUID
+    ) -> ProjectMembership | None:
+        return next((item for item in self.list_memberships(scope) if item.id == membership_id), None)
 
     def save_membership(
         self,
@@ -661,6 +740,13 @@ class _Audit:
             item
             for item in self._state.audits
             if _record_scope_matches(scope, item.organization_id, item.project_id)
+        )
+
+    def list_for_organization(self, scope: TenantScope) -> tuple[AuditEvent, ...]:
+        if scope.project_id is not None:
+            return ()
+        return tuple(
+            item for item in self._state.audits if item.organization_id == scope.organization_id
         )
 
 
