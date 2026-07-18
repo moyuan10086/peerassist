@@ -118,6 +118,7 @@ def _extract_from_auth_json(path: Path) -> CodexAuth | None:
         return None
 
     token_candidates = [
+        data.get("OPENAI_API_KEY"),
         data.get("access_token"),
         data.get("token"),
         (data.get("auth") or {}).get("access_token") if isinstance(data.get("auth"), dict) else None,

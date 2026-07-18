@@ -20,6 +20,10 @@ from common.config import get_settings
 from common.pipeline_context import peerassist_stage_dir, write_json_file
 from peerassist.confirmation_workflow import apply_confirmation_decision, load_confirmation_state
 from peerassist.confirmations import build_confirmation_bundle, build_confirmation_review_queue
+from peerassist.model_review import (
+    resolve_model_review_config,
+    run_model_review_text,
+)
 from peerassist.review_context import build_review_context
 from peerassist.review_job_api import create_review_job_server as create_review_job_server
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
@@ -5537,10 +5541,9 @@ def _run_agent_review(
 ) -> dict[str, Any]:
     selected_text = selected_text.strip()
     review_mode = _normalize_review_mode(review_mode)
-    config = _resolve_model_config()
-    api_key = _resolve_model_api_key()
-    if not api_key:
-        raise ValueError("模型 API Key 未配置。请在服务环境变量中设置 PEERASSIST_OPENAI_API_KEY。")
+    config = resolve_model_review_config()
+    if config is None:
+        raise ValueError("模型供应商凭据未配置。请配置 Codex 登录或 PEERASSIST_OPENAI_API_KEY。")
     context = _build_full_paper_review_context(
         run_dir=run_dir,
         paper_id=paper_id,
@@ -5548,22 +5551,26 @@ def _run_agent_review(
         state=state,
         review_mode=review_mode,
     )
-    response = _chat_completion(
-        api_key=api_key,
-        base_url=config["base_url"],
-        model=config["model"],
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是 PeerAssist 的证据忠实论文审稿辅助智能体。你不能替代审稿人作录用决定，"
-                    "不能使用造假、实锤、定罪式语言。所有主要意见必须绑定原文证据位置，"
-                    "包含影响、可能的善意解释和作者可执行修改建议。证据不足时只能写待人工核查。"
-                ),
-            },
-            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-        ],
+    system_prompt = (
+        "你是 PeerAssist 的证据忠实论文审稿辅助智能体。你不能替代审稿人作录用决定，"
+        "不能使用造假、实锤、定罪式语言。所有主要意见必须绑定原文证据位置，"
+        "包含影响、可能的善意解释和作者可执行修改建议。证据不足时只能写待人工核查。"
     )
+    prompt = json.dumps(context, ensure_ascii=False)
+    if config.provider == "openai-codex":
+        response = run_model_review_text(system=system_prompt, prompt=prompt, config=config)
+        if not isinstance(response, str):
+            response = response[0]
+    else:
+        response = _chat_completion(
+            api_key=str(config.api_key or ""),
+            base_url=config.base_url,
+            model=config.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+        )
     response_payload = _extract_agent_review_payload(response)
     report_markdown = str(response_payload.get("report_markdown") or response).strip()
     draft_path = peerassist_stage_dir(run_dir) / "agent_review_draft.md"
@@ -5571,13 +5578,13 @@ def _run_agent_review(
     structured = _persist_agent_review_concerns(
         run_dir=run_dir,
         paper_id=paper_id,
-        model=config["model"],
+        model=config.model,
         response_text=response,
     )
     return {
         "schema_version": "peerassist.agent_review_result.v1",
-        "model": config["model"],
-        "base_url": config["base_url"],
+        "model": config.model,
+        "base_url": config.base_url,
         "review_mode": review_mode,
         "selected_text_chars": len(selected_text),
         "context": context["context_summary"],
@@ -6101,12 +6108,12 @@ def _resolve_model_api_key() -> str:
 
 def _resolve_model_config() -> dict[str, str]:
     settings = get_settings()
-    api_key = _resolve_model_api_key()
+    config = resolve_model_review_config()
     return {
-        "provider": "openai-compatible",
-        "model": settings.peerassist_openai_model.strip(),
-        "base_url": settings.peerassist_openai_base_url,
-        "api_key_configured": "true" if api_key else "false",
+        "provider": config.provider if config is not None else "unavailable",
+        "model": config.model if config is not None else settings.peerassist_openai_model.strip(),
+        "base_url": config.base_url if config is not None else settings.peerassist_openai_base_url,
+        "api_key_configured": "true" if config is not None else "false",
     }
 
 

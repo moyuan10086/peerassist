@@ -79,3 +79,35 @@ def test_batched_model_review_enforces_fast_token_budget_and_returns_usage() -> 
     assert result["concerns"][0]["agent_id"] == "structure_agent"
     assert result["usage"]["total_tokens"] == 150
     assert "runtime-test-key" not in str(result)
+
+
+def test_batched_model_review_uses_codex_responses_without_peerassist_api_key(
+    monkeypatch,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_get_auth(*, allow_browser_login: bool):
+        observed["allow_browser_login"] = allow_browser_login
+        return object()
+
+    def fake_invoke(prompt: str, system: str, **kwargs: Any):
+        observed.update({"prompt": prompt, "system": system, **kwargs})
+        return '{"concerns":[]}', {"total_tokens": 17}
+
+    monkeypatch.setattr("peerassist.model_review.get_codex_auth", fake_get_auth)
+    monkeypatch.setattr("peerassist.model_review.invoke_codex", fake_invoke)
+
+    result = run_batched_model_review(
+        {"selected_evidence": []},
+        ModelReviewConfig(
+            api_key=None,
+            base_url="https://provider.example/v1",
+            model="gpt-codex",
+            provider="openai-codex",
+        ),
+    )
+
+    assert observed["allow_browser_login"] is False
+    assert observed["base_url"] == "https://provider.example/v1"
+    assert observed["model"] == "gpt-codex"
+    assert result["usage"]["total_tokens"] == 17

@@ -14,6 +14,7 @@ from peerassist.confirmation_server import (
     render_confirmation_page,
     render_workspace_app,
 )
+from peerassist.model_review import ModelReviewConfig
 from schemas.peerassist import Concern, ConcernLevel, ConcernStatus
 
 
@@ -700,7 +701,14 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "运行时间线" in source
 
 
-def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> None:
+def test_confirmation_server_state_and_decision_endpoints(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.delenv("PEERASSIST_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("EXECUTION_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    confirmation_server.get_settings.cache_clear()
     run_dir = tmp_path / "run"
     out_dir = _seed_peerassist_stage(run_dir)
     server = create_confirmation_server(
@@ -788,11 +796,12 @@ def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path) -> Non
             error_payload = json.loads(exc.read().decode("utf-8"))
         else:  # pragma: no cover
             raise AssertionError("agent review should require a configured model key")
-        assert "模型 API Key 未配置" in error_payload["error"]
+        assert "模型供应商凭据未配置" in error_payload["error"]
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        confirmation_server.get_settings.cache_clear()
 
 
 def test_manual_pdf_selection_concern_endpoint_writes_queue(tmp_path: Path) -> None:
@@ -993,6 +1002,39 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
         server.server_close()
         thread.join(timeout=5)
         confirmation_server.get_settings.cache_clear()
+
+
+def test_agent_review_uses_configured_model_gateway_without_direct_api_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _seed_peerassist_stage(run_dir)
+    observed: dict[str, object] = {}
+    config = ModelReviewConfig(
+        api_key=None,
+        base_url="https://provider.example/v1",
+        model="gpt-codex",
+        provider="openai-codex",
+    )
+
+    monkeypatch.setattr(confirmation_server, "resolve_model_review_config", lambda: config)
+
+    def fake_run_model_review_text(*, system: str, prompt: str, config) -> str:
+        observed.update({"system": system, "prompt": prompt, "config": config})
+        return '{"report_markdown":"# 可用","concerns":[]}'
+
+    monkeypatch.setattr(confirmation_server, "run_model_review_text", fake_run_model_review_text)
+
+    result = confirmation_server._run_agent_review(
+        run_dir=run_dir,
+        selected_text="",
+        paper_id="demo",
+        state=confirmation_server.load_confirmation_state(run_dir=run_dir),
+    )
+
+    assert observed["config"] is config
+    assert result["model"] == "gpt-codex"
+    assert result["suggestion"] == "# 可用"
 
 
 def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:

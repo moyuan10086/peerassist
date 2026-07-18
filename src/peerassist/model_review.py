@@ -10,13 +10,17 @@ from typing import Any
 import requests
 
 from common.config import get_settings
+from llm.codex_auth import get_codex_auth, load_cached_codex_auth
+from llm.codex_client import invoke_codex
+from llm.provider_capabilities import is_codex_provider
 
 
 @dataclass(frozen=True)
 class ModelReviewConfig:
-    api_key: str
+    api_key: str | None
     base_url: str
     model: str
+    provider: str = "openai"
     max_tokens: int = 900
     timeout_seconds: float = 240
 
@@ -24,14 +28,47 @@ class ModelReviewConfig:
 def resolve_model_review_config() -> ModelReviewConfig | None:
     settings = get_settings()
     api_key = str(settings.peerassist_openai_api_key or "").strip()
-    if not api_key:
-        return None
-    return ModelReviewConfig(
-        api_key=api_key,
-        base_url=settings.peerassist_openai_base_url,
-        model=settings.peerassist_openai_model.strip(),
-        max_tokens=min(1200, max(256, settings.peerassist_review_max_tokens)),
-        timeout_seconds=min(300.0, max(10.0, settings.peerassist_openai_timeout_seconds)),
+    common = {
+        "max_tokens": min(1200, max(256, settings.peerassist_review_max_tokens)),
+        "timeout_seconds": min(300.0, max(10.0, settings.peerassist_openai_timeout_seconds)),
+    }
+    if api_key:
+        return ModelReviewConfig(
+            api_key=api_key,
+            base_url=settings.peerassist_openai_base_url,
+            model=settings.peerassist_openai_model.strip(),
+            **common,
+        )
+    if is_codex_provider(settings.model_provider) and load_cached_codex_auth() is not None:
+        return ModelReviewConfig(
+            api_key=None,
+            base_url=settings.peerassist_openai_base_url,
+            model=settings.peerassist_openai_model.strip(),
+            provider="openai-codex",
+            **common,
+        )
+    return None
+
+
+def run_model_review_text(
+    *,
+    system: str,
+    prompt: str,
+    config: ModelReviewConfig,
+    return_usage: bool = False,
+) -> str | tuple[str, dict[str, int]]:
+    """Invoke the configured review provider without retaining reusable credentials."""
+
+    if config.provider != "openai-codex":
+        raise ValueError("model_review_provider_not_supported")
+    auth = get_codex_auth(allow_browser_login=False)
+    return invoke_codex(
+        prompt=prompt,
+        system=system,
+        auth=auth,
+        model=config.model,
+        base_url=config.base_url,
+        return_usage=return_usage,
     )
 
 
@@ -114,6 +151,27 @@ def run_batched_model_review(
         },
         "context": context,
     }
+    if config.provider == "openai-codex":
+        codex_result = run_model_review_text(
+            system=system,
+            prompt=json.dumps(task, ensure_ascii=False),
+            config=config,
+            return_usage=True,
+        )
+        if not isinstance(codex_result, tuple):
+            raise ValueError("model_review_empty_response")
+        content, usage = codex_result
+        result = _extract_json(content)
+        concerns = result.get("concerns") if isinstance(result.get("concerns"), list) else []
+        return {
+            "concerns": concerns[:10],
+            "usage": usage,
+            "model": config.model,
+            "prompt_version": "peerassist.professional_agents.v1",
+        }
+
+    if not config.api_key:
+        raise ValueError("model_review_credentials_missing")
     response = post(
         endpoint,
         headers={
