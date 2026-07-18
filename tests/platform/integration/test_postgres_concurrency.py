@@ -4,12 +4,13 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from peerassist.platform.adapters.postgres import PostgresUnitOfWorkFactory
 from peerassist.platform.adapters.postgres_schema import metadata
@@ -267,8 +268,10 @@ def test_outbox_locked_head_blocks_next_sequence_but_not_another_aggregate(
         )
 
 
+@pytest.mark.parametrize("collision", ("nonce", "state"))
 def test_concurrent_oidc_transactions_enforce_nonce_and_state_uniqueness(
     seeded_factory: tuple[PostgresUnitOfWorkFactory, Actor, TenantScope, UUID, UUID],
+    collision: str,
 ) -> None:
     factory, actor, _, _, _ = seeded_factory
     now = datetime(2026, 7, 18, 8, tzinfo=UTC)
@@ -276,12 +279,21 @@ def test_concurrent_oidc_transactions_enforce_nonce_and_state_uniqueness(
         uuid4(), "a" * 64, "b" * 64, b"ciphertext-a", "key-1", "/compat/",
         now + timedelta(minutes=10), now,
     )
-    same_nonce = replace(
+    competing = replace(
         first,
         id=uuid4(),
-        state_digest="c" * 64,
+        state_digest=first.state_digest if collision == "state" else "c" * 64,
+        nonce_digest=first.nonce_digest if collision == "nonce" else "d" * 64,
         encrypted_pkce_verifier=b"ciphertext-b",
     )
+    insert_barrier = Barrier(2)
+
+    def synchronize_oidc_inserts(
+        _connection, _cursor, statement, _parameters, _context, _executemany,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("insert into oidc_transactions"):
+            insert_barrier.wait(timeout=10)
 
     def add(transaction: OidcTransaction) -> bool:
         try:
@@ -292,22 +304,11 @@ def test_concurrent_oidc_transactions_enforce_nonce_and_state_uniqueness(
         except ValueError:
             return False
 
-    candidates = (first, same_nonce)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(executor.map(add, candidates))
+    candidates = (first, competing)
+    event.listen(factory.engine, "before_cursor_execute", synchronize_oidc_inserts)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = tuple(executor.map(add, candidates))
+    finally:
+        event.remove(factory.engine, "before_cursor_execute", synchronize_oidc_inserts)
     assert sum(results) == 1
-
-    winner = next(
-        transaction
-        for transaction, inserted in zip(candidates, results, strict=True)
-        if inserted
-    )
-    same_state = replace(
-        winner,
-        id=uuid4(),
-        nonce_digest="d" * 64,
-        encrypted_pkce_verifier=b"ciphertext-c",
-    )
-    with factory(actor) as uow:
-        with pytest.raises(ValueError, match="already exists"):
-            uow.oidc_transactions.add(same_state)

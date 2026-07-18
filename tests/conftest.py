@@ -23,7 +23,12 @@ def postgres_database_lock(request: pytest.FixtureRequest):
     """Serialize every shared-M1-database test across pytest workers."""
 
     path = str(request.node.path).replace("\\", "/")
-    guarded = "/platform/contracts/" in path or "/platform/integration/" in path
+    integration_test = "/platform/integration/" in path
+    postgresql_contract = (
+        "/platform/contracts/" in path
+        and request.config.getoption("--adapter", default=None) == "postgresql"
+    )
+    guarded = integration_test or postgresql_contract
     raw_url = os.environ.get("PEERASSIST_TEST_DATABASE_URL")
     if not guarded or not raw_url:
         yield None
