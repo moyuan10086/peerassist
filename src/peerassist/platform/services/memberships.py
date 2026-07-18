@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -32,6 +32,108 @@ def _now() -> datetime:
 
 def _active(status: str) -> bool:
     return status == "active"
+
+
+def _time(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _parsed_time(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise IdempotencyConflict()
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise IdempotencyConflict() from None
+
+
+def _project_response(project: Project) -> dict[str, object]:
+    return {
+        "id": str(project.id),
+        "organization_id": str(project.organization_id),
+        "name": project.name,
+        "status": project.status,
+        "version": project.version,
+        "created_at": project.created_at.isoformat(),
+        "updated_at": project.updated_at.isoformat(),
+    }
+
+
+def _project_from_response(response: object) -> Project:
+    if not isinstance(response, Mapping):
+        raise IdempotencyConflict()
+    try:
+        return Project(
+            UUID(str(response["id"])),
+            UUID(str(response["organization_id"])),
+            str(response["name"]),
+            str(response["status"]),
+            int(response["version"]),
+            _parsed_time(response["created_at"]),
+            _parsed_time(response["updated_at"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise IdempotencyConflict() from None
+
+
+def _membership_response(
+    membership: OrganizationMembership | ProjectMembership,
+) -> dict[str, object]:
+    response: dict[str, object] = {
+        "id": str(membership.id),
+        "organization_id": str(membership.organization_id),
+        "user_id": str(membership.user_id),
+        "role": membership.role.value,
+        "status": membership.status,
+        "version": membership.version,
+        "created_at": membership.created_at.isoformat(),
+        "updated_at": membership.updated_at.isoformat(),
+        "revoked_at": _time(membership.revoked_at),
+    }
+    if isinstance(membership, ProjectMembership):
+        response["project_id"] = str(membership.project_id)
+    return response
+
+
+def _organization_membership_from_response(response: object) -> OrganizationMembership:
+    if not isinstance(response, Mapping):
+        raise IdempotencyConflict()
+    try:
+        return OrganizationMembership(
+            UUID(str(response["id"])),
+            UUID(str(response["organization_id"])),
+            UUID(str(response["user_id"])),
+            Role(str(response["role"])),
+            str(response["status"]),
+            int(response["version"]),
+            _parsed_time(response["created_at"]),
+            _parsed_time(response["updated_at"]),
+            _parsed_time(response.get("revoked_at")),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise IdempotencyConflict() from None
+
+
+def _project_membership_from_response(response: object) -> ProjectMembership:
+    if not isinstance(response, Mapping):
+        raise IdempotencyConflict()
+    try:
+        return ProjectMembership(
+            UUID(str(response["id"])),
+            UUID(str(response["organization_id"])),
+            UUID(str(response["project_id"])),
+            UUID(str(response["user_id"])),
+            Role(str(response["role"])),
+            str(response["status"]),
+            int(response["version"]),
+            _parsed_time(response["created_at"]),
+            _parsed_time(response["updated_at"]),
+            _parsed_time(response.get("revoked_at")),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise IdempotencyConflict() from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,10 +263,7 @@ class MembershipService:
             project_id = uuid5(reserved.id, "project")
             project_scope = TenantScope(request.organization_id, project_id)
             if reserved.completed_at is not None:
-                project = uow.projects.get(project_scope)
-                if project is None:
-                    raise IdempotencyConflict()
-                return project
+                return _project_from_response(reserved.response_body)
             now = self._clock()
             project = Project(project_id, request.organization_id, request.name, "active", 1, now, now)
             uow.projects.add(project_scope, project)
@@ -179,7 +278,7 @@ class MembershipService:
                 request.request_id,
                 {},
             )
-            self._complete(uow, scope, reserved, 201, {"project_id": str(project.id)})
+            self._complete(uow, scope, reserved, 201, _project_response(project))
             uow.commit()
             return project
 
@@ -201,9 +300,7 @@ class MembershipService:
             )
             current = uow.organizations.get_membership(scope, request.user_id)
             if reserved.completed_at is not None:
-                if current is None:
-                    raise IdempotencyConflict()
-                return current
+                return _organization_membership_from_response(reserved.response_body)
             now = self._clock()
             membership = OrganizationMembership(
                 current.id if current else uuid5(scope.organization_id, f"member:{request.user_id}"),
@@ -228,7 +325,7 @@ class MembershipService:
                 request.request_id,
                 {"role": membership.role.value, "version": membership.version},
             )
-            self._complete(uow, scope, reserved, 201, {"membership_id": str(membership.id)})
+            self._complete(uow, scope, reserved, 201, _membership_response(membership))
             uow.commit()
             return membership
 
@@ -255,7 +352,7 @@ class MembershipService:
             )
             reserved = self._reserve(uow, actor, scope, operation, request.idempotency_key, payload)
             if reserved.completed_at is not None:
-                return current
+                return _organization_membership_from_response(reserved.response_body)
             now = self._clock()
             updated = replace(
                 current,
@@ -281,7 +378,7 @@ class MembershipService:
                 request.request_id,
                 {"status": updated.status, "version": updated.version},
             )
-            self._complete(uow, scope, reserved, 200, {"membership_id": str(updated.id)})
+            self._complete(uow, scope, reserved, 200, _membership_response(updated))
             uow.commit()
             return updated
 
@@ -303,9 +400,7 @@ class MembershipService:
             )
             current = uow.projects.get_membership(scope, request.user_id)
             if reserved.completed_at is not None:
-                if current is None:
-                    raise IdempotencyConflict()
-                return current
+                return _project_membership_from_response(reserved.response_body)
             now = self._clock()
             membership = ProjectMembership(
                 current.id if current else uuid5(project.id, f"member:{request.user_id}"),
@@ -331,7 +426,7 @@ class MembershipService:
                 request.request_id,
                 {"role": membership.role.value, "version": membership.version},
             )
-            self._complete(uow, scope, reserved, 201, {"membership_id": str(membership.id)})
+            self._complete(uow, scope, reserved, 201, _membership_response(membership))
             uow.commit()
             return membership
 
@@ -357,7 +452,7 @@ class MembershipService:
             )
             reserved = self._reserve(uow, actor, scope, operation, request.idempotency_key, payload)
             if reserved.completed_at is not None:
-                return current
+                return _project_membership_from_response(reserved.response_body)
             now = self._clock()
             updated = replace(
                 current,
@@ -384,7 +479,7 @@ class MembershipService:
                 request.request_id,
                 {"role": updated.role.value, "status": updated.status, "version": updated.version},
             )
-            self._complete(uow, scope, reserved, 200, {"membership_id": str(updated.id)})
+            self._complete(uow, scope, reserved, 200, _membership_response(updated))
             uow.commit()
             return updated
 
@@ -500,7 +595,7 @@ class MembershipService:
                 action,
                 resource_type,
                 resource_id,
-                "success",
+                "succeeded",
                 request_id,
                 self._clock(),
                 project_id=scope.project_id,

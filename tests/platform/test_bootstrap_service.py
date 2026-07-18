@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,12 @@ class Clock:
 
     def __call__(self) -> datetime:
         return self.now
+
+
+def _operator_credential(password: str) -> str:
+    salt = bytes.fromhex("00112233445566778899aabbccddeeff")
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
+    return f"pbkdf2-sha256$100000${salt.hex()}${digest.hex()}"
 
 
 def _seed_identity(factory: MemoryUnitOfWorkFactory, clock: Clock) -> tuple[User, ExternalIdentity]:
@@ -89,6 +96,19 @@ def test_concurrent_operator_bootstrap_converges_and_changed_payload_conflicts()
                 name="Changed Name",
                 idempotency_key=command.idempotency_key,
                 request_id="req-bootstrap-changed",
+            ),
+        )
+
+    with pytest.raises(IdempotencyConflict):
+        service.execute(
+            operator,
+            BootstrapOrganization(
+                issuer="https://unknown.example/realms/peerassist",
+                subject="unknown-subject",
+                slug="first-org",
+                name="Changed Again",
+                idempotency_key=command.idempotency_key,
+                request_id="req-bootstrap-unknown-changed",
             ),
         )
 
@@ -156,6 +176,21 @@ def test_identity_disable_and_unlink_are_versioned_and_revoke_sessions() -> None
     assert unlinked.version == 3
     assert dict(unlinked.verified_claims) == {}
     assert unlinked.disabled_at is not None
+    with factory(operator) as uow:
+        assert uow.users.get_identity(identity.issuer, identity.subject) is None
+
+    replayed_disable = service.disable(
+        operator,
+        ChangeIdentity(
+            identity.issuer,
+            identity.subject,
+            expected_version=1,
+            idempotency_key="disable-identity",
+            request_id="req-disable-replay",
+            audit_organization_id=bootstrap.organization.id,
+        ),
+    )
+    assert replayed_disable == disabled
 
 
 def test_cli_never_exposes_protected_inputs_or_persists_them_in_audit() -> None:
@@ -168,6 +203,9 @@ def test_cli_never_exposes_protected_inputs_or_persists_them_in_audit() -> None:
     protected = {
         "PEERASSIST_OPERATOR_ID": str(operator_id),
         "PEERASSIST_OPERATOR_PASSWORD": "password-do-not-print",
+        "PEERASSIST_OPERATOR_PASSWORD_CREDENTIAL": _operator_credential(
+            "password-do-not-print"
+        ),
         "PEERASSIST_OPERATOR_CLIENT_SECRET": "client-secret-do-not-print",
         "PEERASSIST_OPERATOR_RAW_TOKEN": "raw-token-do-not-print",
         "PEERASSIST_PRIVATE_ROOT": "/private/customer/manuscripts",
@@ -206,6 +244,38 @@ def test_cli_never_exposes_protected_inputs_or_persists_them_in_audit() -> None:
     for secret in (*protected.values(), "stdin-password-do-not-print"):
         if secret != str(operator_id):
             assert secret not in audit_text
+
+    wrong_password = dict(protected)
+    wrong_password["PEERASSIST_OPERATOR_PASSWORD"] = "wrong-password-do-not-print"
+    wrong_stdout = io.StringIO()
+    wrong_stderr = io.StringIO()
+    rejected_credentials = run_cli(
+        [
+            "bootstrap-organization",
+            "--issuer",
+            identity.issuer,
+            "--subject",
+            identity.subject,
+            "--slug",
+            "wrong-password-org",
+            "--name",
+            "Wrong Password Organization",
+            "--idempotency-key",
+            "wrong-password-bootstrap",
+        ],
+        uow_factory=factory,
+        clock=clock,
+        environ=wrong_password,
+        stdin=io.StringIO(),
+        stdout=wrong_stdout,
+        stderr=wrong_stderr,
+    )
+    assert rejected_credentials == 2
+    assert wrong_stdout.getvalue() == ""
+    assert __import__("json").loads(wrong_stderr.getvalue()) == {
+        "error": {"code": "invalid_operator_input"}
+    }
+    assert "wrong-password-do-not-print" not in wrong_stderr.getvalue()
 
     failed_stdout = io.StringIO()
     failed_stderr = io.StringIO()
@@ -265,3 +335,51 @@ def test_cli_never_exposes_protected_inputs_or_persists_them_in_audit() -> None:
     assert rejected == 2
     assert rejected_stdout.getvalue() == ""
     assert "password-do-not-print" not in rejected_stderr.getvalue()
+
+    class ExplodingFactory:
+        def __call__(self, actor):
+            del actor
+            raise RuntimeError(
+                " ".join(
+                    (
+                        protected["PEERASSIST_OPERATOR_CLIENT_SECRET"],
+                        protected["PEERASSIST_OPERATOR_RAW_TOKEN"],
+                        protected["PEERASSIST_PRIVATE_ROOT"],
+                    )
+                )
+            )
+
+    exception_stdout = io.StringIO()
+    exception_stderr = io.StringIO()
+    exception_status = run_cli(
+        [
+            "bootstrap-organization",
+            "--issuer",
+            identity.issuer,
+            "--subject",
+            identity.subject,
+            "--slug",
+            "exception-org",
+            "--name",
+            "Exception Organization",
+            "--idempotency-key",
+            "exception-bootstrap",
+        ],
+        uow_factory=ExplodingFactory(),
+        clock=clock,
+        environ=protected,
+        stdin=io.StringIO(),
+        stdout=exception_stdout,
+        stderr=exception_stderr,
+    )
+    assert exception_status == 1
+    assert exception_stdout.getvalue() == ""
+    assert __import__("json").loads(exception_stderr.getvalue()) == {
+        "error": {"code": "platform_error"}
+    }
+    for secret in (
+        protected["PEERASSIST_OPERATOR_CLIENT_SECRET"],
+        protected["PEERASSIST_OPERATOR_RAW_TOKEN"],
+        protected["PEERASSIST_PRIVATE_ROOT"],
+    ):
+        assert secret not in exception_stderr.getvalue()

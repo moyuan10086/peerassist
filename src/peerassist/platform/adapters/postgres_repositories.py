@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -51,6 +52,14 @@ class _Users(_Repository):
             select(schema.external_identities).where(
                 schema.external_identities.c.issuer == issuer,
                 schema.external_identities.c.subject == subject,
+            )
+        )
+        return None if row is None else _identity(row)
+
+    def get_identity_by_id(self, identity_id: UUID) -> ExternalIdentity | None:
+        row = self._one(
+            select(schema.external_identities).where(
+                schema.external_identities.c.id == identity_id
             )
         )
         return None if row is None else _identity(row)
@@ -113,6 +122,35 @@ class _Users(_Repository):
         )
         if result.rowcount != 1:
             raise StaleVersion(details={"expected_version": expected_version, "current_version": None})
+
+    def unlink_identity(
+        self,
+        identity: ExternalIdentity,
+        expected_version: int,
+        unlinked_at: datetime,
+    ) -> ExternalIdentity:
+        row = self.connection.execute(
+            update(schema.external_identities)
+            .where(
+                schema.external_identities.c.id == identity.id,
+                schema.external_identities.c.issuer == identity.issuer,
+                schema.external_identities.c.subject == identity.subject,
+                schema.external_identities.c.version == expected_version,
+            )
+            .values(
+                issuer=f"urn:peerassist:unlinked:{identity.id}",
+                subject=identity.id.hex,
+                verified_claims={},
+                disabled_at=identity.disabled_at or unlinked_at,
+                version=expected_version + 1,
+            )
+            .returning(schema.external_identities)
+        ).mappings().one_or_none()
+        if row is None:
+            raise StaleVersion(
+                details={"expected_version": expected_version, "current_version": None}
+            )
+        return _identity(row)
 
 
 class _Organizations(_Repository):

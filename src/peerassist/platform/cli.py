@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -70,7 +72,25 @@ def _authenticate_operator(
     )
     if not password:
         raise _UsageError
-    operator_id = UUID(environ["PEERASSIST_OPERATOR_ID"])
+    credential = environ.get("PEERASSIST_OPERATOR_PASSWORD_CREDENTIAL", "")
+    try:
+        scheme, iterations_text, salt_hex, expected_hex = credential.split("$", 3)
+        iterations = int(iterations_text)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(expected_hex)
+        if (
+            scheme != "pbkdf2-sha256"
+            or not 100_000 <= iterations <= 2_000_000
+            or not 16 <= len(salt) <= 64
+            or len(expected) != 32
+        ):
+            raise ValueError
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        if not hmac.compare_digest(actual, expected):
+            raise ValueError
+        operator_id = UUID(environ["PEERASSIST_OPERATOR_ID"])
+    except (KeyError, UnicodeEncodeError, ValueError):
+        raise _UsageError from None
     del password
     return Actor(operator_id, ActorKind.OPERATOR)
 

@@ -110,6 +110,19 @@ def test_organization_and_project_grant_change_revoke_use_expected_versions_imme
     assert changed.role is Role.VIEWER
     assert changed.version == 2
 
+    replayed_grant = service.grant_project_membership(
+        admin,
+        GrantProjectMembership(
+            project.id,
+            member.actor_id,
+            Role.REVIEWER,
+            expected_version=None,
+            idempotency_key="grant-project-member",
+            request_id="req-grant-project-replay",
+        ),
+    )
+    assert replayed_grant == project_membership
+
     with pytest.raises(StaleVersion):
         service.update_project_membership(
             admin,
@@ -191,7 +204,7 @@ def test_cross_tenant_is_not_found_visible_denial_is_forbidden_and_audit_filters
     audit = AuditService(factory).list_events(
         admin,
         organization.id,
-        AuditFilter(project_id=created.id, outcome="success"),
+        AuditFilter(project_id=created.id, outcome="succeeded"),
     )
     assert audit
-    assert all(event.project_id == created.id and event.outcome == "success" for event in audit)
+    assert all(event.project_id == created.id and event.outcome == "succeeded" for event in audit)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -21,11 +21,126 @@ from ..models import (
     OutboxEvent,
     Role,
     TenantScope,
+    mutable_json,
 )
 from ..ports import UnitOfWorkFactory
 
 Clock = Callable[[], datetime]
 UuidFactory = Callable[[], UUID]
+
+
+def _timestamp(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise IdempotencyConflict()
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise IdempotencyConflict() from None
+    return parsed
+
+
+def _identity_response(identity: ExternalIdentity) -> dict[str, object]:
+    return {
+        "id": str(identity.id),
+        "user_id": str(identity.user_id),
+        "issuer": identity.issuer,
+        "subject": identity.subject,
+        "verified_claims": mutable_json(identity.verified_claims),
+        "last_seen_at": identity.last_seen_at.isoformat(),
+        "created_at": identity.created_at.isoformat(),
+        "disabled_at": _timestamp(identity.disabled_at),
+        "version": identity.version,
+    }
+
+
+def _identity_from_response(response: object) -> ExternalIdentity:
+    if not isinstance(response, Mapping):
+        raise IdempotencyConflict()
+    try:
+        claims = response["verified_claims"]
+        if not isinstance(claims, Mapping):
+            raise ValueError
+        return ExternalIdentity(
+            UUID(str(response["id"])),
+            UUID(str(response["user_id"])),
+            str(response["issuer"]),
+            str(response["subject"]),
+            dict(claims),
+            _parse_timestamp(response["last_seen_at"]),
+            _parse_timestamp(response["created_at"]),
+            _parse_timestamp(response.get("disabled_at")),
+            int(response["version"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise IdempotencyConflict() from None
+
+
+def _bootstrap_response(
+    organization: Organization,
+    membership: OrganizationMembership,
+) -> dict[str, object]:
+    return {
+        "organization": {
+            "id": str(organization.id),
+            "slug": organization.slug,
+            "name": organization.name,
+            "status": organization.status,
+            "version": organization.version,
+            "created_at": organization.created_at.isoformat(),
+            "updated_at": organization.updated_at.isoformat(),
+        },
+        "membership": {
+            "id": str(membership.id),
+            "organization_id": str(membership.organization_id),
+            "user_id": str(membership.user_id),
+            "role": membership.role.value,
+            "status": membership.status,
+            "version": membership.version,
+            "created_at": membership.created_at.isoformat(),
+            "updated_at": membership.updated_at.isoformat(),
+            "revoked_at": _timestamp(membership.revoked_at),
+        },
+    }
+
+
+def _bootstrap_from_response(response: object) -> BootstrapOrganizationResult:
+    if not isinstance(response, Mapping):
+        raise IdempotencyConflict()
+    organization = response.get("organization")
+    membership = response.get("membership")
+    if not isinstance(organization, Mapping) or not isinstance(membership, Mapping):
+        raise IdempotencyConflict()
+    try:
+        return BootstrapOrganizationResult(
+            Organization(
+                UUID(str(organization["id"])),
+                str(organization["slug"]),
+                str(organization["name"]),
+                str(organization["status"]),
+                int(organization["version"]),
+                _parse_timestamp(organization["created_at"]),
+                _parse_timestamp(organization["updated_at"]),
+            ),
+            OrganizationMembership(
+                UUID(str(membership["id"])),
+                UUID(str(membership["organization_id"])),
+                UUID(str(membership["user_id"])),
+                Role(str(membership["role"])),
+                str(membership["status"]),
+                int(membership["version"]),
+                _parse_timestamp(membership["created_at"]),
+                _parse_timestamp(membership["updated_at"]),
+                _parse_timestamp(membership.get("revoked_at")),
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise IdempotencyConflict() from None
 
 
 def _now() -> datetime:
@@ -124,6 +239,17 @@ class BootstrapOrganizationService:
             created_at=now,
         )
         with self._uow_factory(actor) as uow:
+            existing = uow.commands.get(
+                scope,
+                actor.actor_id,
+                candidate.operation,
+                candidate.idempotency_key,
+            )
+            if existing is not None:
+                if existing.payload_digest != candidate.payload_digest:
+                    raise IdempotencyConflict()
+                if existing.completed_at is not None:
+                    return _bootstrap_from_response(existing.response_body)
             identity = uow.users.get_identity(request.issuer, request.subject)
             if identity is None:
                 raise NotFound()
@@ -156,10 +282,7 @@ class BootstrapOrganizationService:
             if reserved.payload_digest != candidate.payload_digest:
                 raise IdempotencyConflict()
             if reserved.completed_at is not None:
-                membership = uow.organizations.get_membership(scope, identity.user_id)
-                if membership is None:
-                    raise IdempotencyConflict()
-                return BootstrapOrganizationResult(organization, membership)
+                return _bootstrap_from_response(reserved.response_body)
 
             membership = uow.organizations.get_membership(scope, identity.user_id)
             if membership is None:
@@ -173,7 +296,7 @@ class BootstrapOrganizationService:
                     Action.ORGANIZATION_BOOTSTRAP,
                     "organization",
                     organization_id,
-                    "success",
+                    "succeeded",
                     request.request_id,
                     now,
                     identity_id=identity.id,
@@ -200,10 +323,7 @@ class BootstrapOrganizationService:
                 replace(
                     reserved,
                     response_status=201,
-                    response_body={
-                        "organization_id": str(organization.id),
-                        "membership_id": str(membership.id),
-                    },
+                    response_body=_bootstrap_response(organization, membership),
                     completed_at=now,
                 ),
             )
@@ -268,11 +388,11 @@ class IdentityOperatorService:
             reserved = uow.commands.reserve_or_replay(scope, candidate)
             if reserved.payload_digest != candidate.payload_digest:
                 raise IdempotencyConflict()
+            if reserved.completed_at is not None:
+                return _identity_from_response(reserved.response_body)
             identity = uow.users.get_identity(request.issuer, request.subject)
             if identity is None:
                 raise NotFound()
-            if reserved.completed_at is not None:
-                return identity
             if identity.version != request.expected_version:
                 raise StaleVersion(
                     details={
@@ -280,13 +400,19 @@ class IdentityOperatorService:
                         "current_version": identity.version,
                     }
                 )
-            updated = replace(
-                identity,
-                verified_claims={} if unlink else identity.verified_claims,
-                disabled_at=identity.disabled_at or now,
-                version=identity.version + 1,
-            )
-            uow.users.save_identity(updated, request.expected_version)
+            if unlink:
+                updated = uow.users.unlink_identity(
+                    identity,
+                    request.expected_version,
+                    now,
+                )
+            else:
+                updated = replace(
+                    identity,
+                    disabled_at=identity.disabled_at or now,
+                    version=identity.version + 1,
+                )
+                uow.users.save_identity(updated, request.expected_version)
             uow.browser_sessions.revoke_for_user(identity.user_id)
             action = Action.IDENTITY_UNLINK if unlink else Action.IDENTITY_DISABLE
             uow.audit.append(
@@ -298,7 +424,7 @@ class IdentityOperatorService:
                     action,
                     "external_identity",
                     identity.id,
-                    "success",
+                    "succeeded",
                     request.request_id,
                     now,
                     identity_id=identity.id,
@@ -311,7 +437,7 @@ class IdentityOperatorService:
                 replace(
                     reserved,
                     response_status=200,
-                    response_body={"identity_id": str(identity.id), "version": updated.version},
+                    response_body=_identity_response(updated),
                     completed_at=now,
                 ),
             )

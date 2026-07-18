@@ -19,10 +19,18 @@ from peerassist.platform.models import (
     Actor,
     ActorKind,
     CommandRecord,
+    ExternalIdentity,
     OidcTransaction,
     OutboxEvent,
     TenantScope,
+    User,
     WorkItem,
+)
+from peerassist.platform.services.bootstrap import (
+    BootstrapOrganization,
+    BootstrapOrganizationService,
+    ChangeIdentity,
+    IdentityOperatorService,
 )
 
 pytestmark = pytest.mark.requires_docker
@@ -312,3 +320,70 @@ def test_concurrent_oidc_transactions_enforce_nonce_and_state_uniqueness(
     finally:
         event.remove(factory.engine, "before_cursor_execute", synchronize_oidc_inserts)
     assert sum(results) == 1
+
+
+def test_concurrent_operator_bootstrap_converges_on_real_postgres(
+    seeded_factory: tuple[PostgresUnitOfWorkFactory, Actor, TenantScope, UUID, UUID],
+) -> None:
+    factory, _, _, _, _ = seeded_factory
+    now = datetime(2026, 7, 18, 8, tzinfo=UTC)
+    operator = Actor(uuid4(), ActorKind.OPERATOR)
+    user = User(uuid4(), "active", "Bootstrap Admin", now, now)
+    identity = ExternalIdentity(
+        uuid4(),
+        user.id,
+        "https://identity.example/realms/peerassist",
+        "postgres-bootstrap-admin",
+        {"sub": "postgres-bootstrap-admin"},
+        now,
+        now,
+    )
+    with factory(operator) as uow:
+        uow.users.add(user)
+        uow.users.add_identity(identity)
+        uow.commit()
+    service = BootstrapOrganizationService(factory, clock=lambda: now)
+    request = BootstrapOrganization(
+        identity.issuer,
+        identity.subject,
+        "postgres-bootstrap",
+        "PostgreSQL Bootstrap",
+        "postgres-bootstrap-key",
+        "req-postgres-bootstrap",
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = tuple(executor.map(lambda _: service.execute(operator, request), range(8)))
+
+    assert len({result.organization.id for result in results}) == 1
+    assert len({result.membership.id for result in results}) == 1
+    scope = TenantScope(results[0].organization.id)
+    with factory(operator) as uow:
+        assert len(tuple(uow.audit.list(scope))) == 1
+
+    identity_service = IdentityOperatorService(factory, clock=lambda: now)
+    identity_service.disable(
+        operator,
+        ChangeIdentity(
+            identity.issuer,
+            identity.subject,
+            1,
+            "postgres-disable-key",
+            "req-postgres-disable",
+            scope.organization_id,
+        ),
+    )
+    identity_service.unlink(
+        operator,
+        ChangeIdentity(
+            identity.issuer,
+            identity.subject,
+            2,
+            "postgres-unlink-key",
+            "req-postgres-unlink",
+            scope.organization_id,
+        ),
+    )
+    with factory(operator) as uow:
+        assert uow.users.get_identity(identity.issuer, identity.subject) is None
+        assert len(tuple(uow.audit.list(scope))) == 3

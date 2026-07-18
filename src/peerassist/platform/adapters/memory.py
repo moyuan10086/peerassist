@@ -141,6 +141,12 @@ class _Users:
     def get_identity(self, issuer: str, subject: str) -> ExternalIdentity | None:
         return self._state.identities.get((issuer, subject))
 
+    def get_identity_by_id(self, identity_id: UUID) -> ExternalIdentity | None:
+        return next(
+            (identity for identity in self._state.identities.values() if identity.id == identity_id),
+            None,
+        )
+
     def add(self, user: User) -> None:
         _insert_immutable(self._state.users, user.id, user)
 
@@ -162,6 +168,30 @@ class _Users:
         if current is not None and current.id != identity.id:
             raise ValueError("external identity identity cannot change")
         self._state.identities[key] = identity
+
+    def unlink_identity(
+        self,
+        identity: ExternalIdentity,
+        expected_version: int,
+        unlinked_at: datetime,
+    ) -> ExternalIdentity:
+        key = (identity.issuer, identity.subject)
+        current = self._state.identities.get(key)
+        if current != identity or current.version != expected_version:
+            raise StaleVersion(
+                details={"expected_version": expected_version, "current_version": None}
+            )
+        unlinked = replace(
+            current,
+            issuer=f"urn:peerassist:unlinked:{current.id}",
+            subject=current.id.hex,
+            verified_claims={},
+            disabled_at=current.disabled_at or unlinked_at,
+            version=current.version + 1,
+        )
+        del self._state.identities[key]
+        self._state.identities[(unlinked.issuer, unlinked.subject)] = unlinked
+        return unlinked
 
 
 class _Organizations:

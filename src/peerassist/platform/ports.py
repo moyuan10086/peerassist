@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Protocol, Self
@@ -41,9 +42,16 @@ from .models import (
 class UserRepository(Protocol):
     def get(self, user_id: UUID) -> User | None: ...
     def get_identity(self, issuer: str, subject: str) -> ExternalIdentity | None: ...
+    def get_identity_by_id(self, identity_id: UUID) -> ExternalIdentity | None: ...
     def add(self, user: User) -> None: ...
     def add_identity(self, identity: ExternalIdentity) -> None: ...
     def save_identity(self, identity: ExternalIdentity, expected_version: int) -> None: ...
+    def unlink_identity(
+        self,
+        identity: ExternalIdentity,
+        expected_version: int,
+        unlinked_at: datetime,
+    ) -> ExternalIdentity: ...
 
 
 class OrganizationRepository(Protocol):
