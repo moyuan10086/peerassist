@@ -434,6 +434,29 @@ async def _assert_readiness_detects_catalog_drift(
         connection.execute(text(live_schema.AUDIT_TRIGGER_SQL))
     assert await readiness.check() is True
 
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION peerassist_reject_audit_mutation() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$"
+            )
+        )
+    assert await readiness.check() is False
+    with engine.begin() as connection:
+        result = connection.execute(
+            text("UPDATE audit_events SET outcome = 'failed' WHERE request_id = 'valid-org'")
+        )
+        assert result.rowcount == 1
+
+    with engine.begin() as connection:
+        connection.execute(text(live_schema.AUDIT_FUNCTION_SQL))
+    assert await readiness.check() is True
+    with pytest.raises(Exception, match="append-only"):
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE audit_events SET outcome = 'succeeded' WHERE request_id = 'valid-org'")
+            )
+
 
 def _expect_integrity_error(
     engine: object,

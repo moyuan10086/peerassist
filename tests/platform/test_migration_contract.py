@@ -290,7 +290,12 @@ def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
         "constraints",
         "indexes",
         "triggers",
+        "functions",
     }
+    assert len(EXPECTED_CATALOG_SIGNATURE["functions"]) == 1
+    assert EXPECTED_CATALOG_SIGNATURE["functions"][0].startswith(
+        "peerassist_reject_audit_mutation||plpgsql|"
+    )
     assert len(EXPECTED_CATALOG_FINGERPRINT) == 64
     normalized = " ".join(CATALOG_INSPECTION_SQL.lower().split())
     for expression in (
@@ -299,12 +304,14 @@ def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
         "pg_get_constraintdef",
         "pg_get_indexdef",
         "pg_get_triggerdef",
+        "pg_get_functiondef",
+        "pg_get_function_identity_arguments",
         "attnotnull",
         "attidentity",
         "attgenerated",
     ):
         assert expression in normalized
-    for catalog in ("pg_constraint", "pg_index", "pg_trigger", "pg_attribute"):
+    for catalog in ("pg_constraint", "pg_index", "pg_trigger", "pg_attribute", "pg_proc"):
         assert catalog in normalized
     assert "statement_timeout" in normalized
 
