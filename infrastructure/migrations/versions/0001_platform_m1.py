@@ -6,10 +6,9 @@ unrelated M0/file-backed resources untouched.
 """
 
 from alembic import op
-
-from peerassist.platform.adapters.postgres_schema import (
-    create_platform_schema,
-    drop_platform_schema,
+from infrastructure.migrations.v0001_schema import (
+    downgrade_v0001,
+    upgrade_v0001,
 )
 
 revision = "0001_platform_m1"
@@ -19,8 +18,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    create_platform_schema(op.get_bind())
+    upgrade_v0001(op.get_bind())
 
 
 def downgrade() -> None:
-    drop_platform_schema(op.get_bind())
+    downgrade_v0001(op.get_bind())

@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+import peerassist.platform.adapters.postgres_schema as live_schema
 from peerassist.platform.adapters.postgres_schema import PostgresSchemaReadiness
 
 pytestmark = pytest.mark.requires_docker
@@ -39,7 +40,12 @@ async def test_real_postgres_upgrade_downgrade_and_repeat(
         connection.execute(text("CREATE TABLE m0_legacy_marker (id integer PRIMARY KEY)"))
     readiness = PostgresSchemaReadiness(engine)
     assert await readiness.check() is False
-    command.upgrade(alembic_config, "head")
+    original_metadata = live_schema.metadata
+    live_schema.metadata = MetaData()
+    try:
+        command.upgrade(alembic_config, "head")
+    finally:
+        live_schema.metadata = original_metadata
     command.upgrade(alembic_config, "head")
     assert "audit_events" in inspect(engine).get_table_names()
     assert await readiness.check() is True
@@ -64,11 +70,21 @@ async def test_real_postgres_upgrade_downgrade_and_repeat(
         assert connection.scalar(text("SELECT count(*) FROM alembic_version")) == 0
     assert await readiness.check() is False
 
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE users (id uuid PRIMARY KEY)"))
+    with pytest.raises(Exception):
+        command.upgrade(alembic_config, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM alembic_version")) == 0
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE users"))
+
     command.upgrade(alembic_config, "head")
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0001_platform_m1"
     assert await readiness.check() is True
     _assert_relationship_integrity(engine)
+    await _assert_readiness_detects_catalog_drift(engine, readiness)
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE m0_legacy_marker"))
     engine.dispose()
@@ -138,7 +154,6 @@ def _assert_relationship_integrity(engine: object) -> None:
         "now() + interval '30 minutes', now(), now())",
         ids,
     )
-
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -195,7 +210,6 @@ def _assert_relationship_integrity(engine: object) -> None:
         "UPDATE papers SET current_version_id = :version_b WHERE id = :paper_a",
         ids,
     )
-
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -315,6 +329,54 @@ def _assert_relationship_integrity(engine: object) -> None:
         "'invalid.project', 'command', 'project-b', 'failed', 'invalid-project', '{}', now())",
         ids,
     )
+    _expect_integrity_error(
+        engine,
+        "INSERT INTO audit_events "
+        "(id, actor_id, actor_kind, organization_id, project_id, command_id, action, resource_type, "
+        "resource_id, outcome, request_id, metadata, created_at) VALUES "
+        "(gen_random_uuid(), :user_a, 'user', :org_a, :project_a, :command_org_a, "
+        "'invalid.project-to-org', 'command', 'org-a', 'failed', 'invalid-project-to-org', '{}', now())",
+        ids,
+    )
+    _expect_integrity_error(
+        engine,
+        "INSERT INTO audit_events "
+        "(id, actor_id, actor_kind, organization_id, command_id, action, resource_type, resource_id, "
+        "outcome, request_id, metadata, created_at) VALUES "
+        "(gen_random_uuid(), :user_a, 'user', :org_a, :command_project_a, 'invalid.org-to-project', "
+        "'command', 'project-a', 'failed', 'invalid-org-to-project', '{}', now())",
+        ids,
+    )
+
+
+async def _assert_readiness_detects_catalog_drift(
+    engine: object,
+    readiness: PostgresSchemaReadiness,
+) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE browser_sessions "
+                "DROP CONSTRAINT fk_browser_sessions_user_identity"
+            )
+        )
+    assert await readiness.check() is False
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE browser_sessions ADD CONSTRAINT "
+                "fk_browser_sessions_user_identity FOREIGN KEY (user_id, identity_id) "
+                "REFERENCES external_identities (user_id, id)"
+            )
+        )
+    assert await readiness.check() is True
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER trg_audit_events_append_only ON audit_events"))
+    assert await readiness.check() is False
+    with engine.begin() as connection:
+        connection.execute(text(live_schema.AUDIT_TRIGGER_SQL))
+    assert await readiness.check() is True
 
 
 def _expect_integrity_error(

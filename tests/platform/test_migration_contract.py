@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,27 @@ def test_audit_command_reference_preserves_organization_and_optional_project_sco
     assert "ix_audit_events_command" in {index.name for index in audit.indexes}
 
 
+def test_audit_command_reference_uses_an_exact_nullable_project_scope_key() -> None:
+    from peerassist.platform.adapters.postgres_schema import metadata
+
+    commands = metadata.tables["commands"]
+    audit = metadata.tables["audit_events"]
+    assert commands.c.scope_project_id.computed is not None
+    assert audit.c.scope_project_id.computed is not None
+    assert commands.c.scope_project_id.nullable is False
+    assert audit.c.scope_project_id.nullable is False
+    assert _column_names(_constraint(metadata, "uq_commands_scope_id")) == {
+        "organization_id",
+        "scope_project_id",
+        "id",
+    }
+    assert _column_names(_constraint(metadata, "fk_audit_events_command_scope")) == {
+        "organization_id",
+        "scope_project_id",
+        "command_id",
+    }
+
+
 def test_browser_session_identity_reference_preserves_user_scope() -> None:
     from peerassist.platform.adapters.postgres_schema import metadata
 
@@ -221,7 +243,8 @@ def test_alembic_configuration_is_deterministic_and_revision_is_reversible() -> 
     root = Path(__file__).parents[2]
     config = (root / "alembic.ini").read_text(encoding="utf-8")
     environment = (root / "infrastructure/migrations/env.py").read_text(encoding="utf-8")
-    revision = (root / "infrastructure/migrations/versions/0001_platform_m1.py").read_text(
+    revision_path = root / "infrastructure/migrations/versions/0001_platform_m1.py"
+    revision = revision_path.read_text(
         encoding="utf-8"
     )
 
@@ -232,9 +255,48 @@ def test_alembic_configuration_is_deterministic_and_revision_is_reversible() -> 
     assert f'revision = "{HEAD_REVISION}"' in revision
     assert "def upgrade()" in revision
     assert "def downgrade()" in revision
-    assert "create_platform_schema" in revision
-    assert "drop_platform_schema" in revision
+    imports = {
+        node.module
+        for node in ast.walk(ast.parse(revision))
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert "peerassist.platform.adapters.postgres_schema" not in imports
+    assert "infrastructure.migrations.v0001_schema" in imports
+    assert "upgrade_v0001" in revision
+    assert "downgrade_v0001" in revision
     assert "drop_all" not in revision
+
+
+def test_frozen_v0001_schema_does_not_depend_on_live_application_metadata() -> None:
+    root = Path(__file__).parents[2]
+    snapshot = (root / "infrastructure/migrations/v0001_schema.py").read_text(encoding="utf-8")
+
+    assert "peerassist.platform.adapters.postgres_schema" not in snapshot
+    assert "checkfirst=False" in snapshot
+    assert "REVISION_TABLES" in snapshot
+
+
+def test_readiness_has_a_fingerprinted_bounded_catalog_signature() -> None:
+    from peerassist.platform.adapters.postgres_schema import (
+        EXPECTED_SCHEMA_COLUMNS,
+        EXPECTED_SCHEMA_CONSTRAINTS,
+        EXPECTED_SCHEMA_INDEXES,
+        EXPECTED_SCHEMA_TABLES,
+        SCHEMA_FINGERPRINT,
+        SCHEMA_INSPECTION_SQL,
+    )
+
+    assert len(EXPECTED_SCHEMA_TABLES) == 22
+    assert {"audit_events.command_id", "commands.scope_project_id"}.issubset(
+        EXPECTED_SCHEMA_COLUMNS
+    )
+    assert "fk_audit_events_command_scope" in EXPECTED_SCHEMA_CONSTRAINTS
+    assert "ix_audit_events_command" in EXPECTED_SCHEMA_INDEXES
+    assert len(SCHEMA_FINGERPRINT) == 64
+    normalized = " ".join(SCHEMA_INSPECTION_SQL.lower().split())
+    for catalog in ("pg_constraint", "pg_indexes", "pg_trigger", "information_schema.columns"):
+        assert catalog in normalized
+    assert "statement_timeout" in normalized
 
 
 def test_audit_table_is_protected_from_update_and_delete() -> None:

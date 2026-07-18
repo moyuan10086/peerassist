@@ -1,10 +1,9 @@
-"""PostgreSQL schema primitives shared by the authoritative Alembic revision."""
+"""Immutable PostgreSQL schema snapshot owned by Alembic revision 0001."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import (
@@ -21,11 +20,10 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
-    create_engine,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection
 
 HEAD_REVISION = "0001_platform_m1"
 
@@ -798,61 +796,14 @@ SCHEMA_FINGERPRINT = hashlib.sha256(
     json.dumps(_SCHEMA_FINGERPRINT_PAYLOAD, separators=(",", ":"), sort_keys=True).encode("ascii")
 ).hexdigest()
 
-SCHEMA_INSPECTION_SQL = """
-WITH timeout_setting AS (
-    SELECT set_config('statement_timeout', '2000', true)
-), expected_tables AS (
-    SELECT unnest(CAST(:expected_tables AS text[])) AS table_name
-)
-SELECT
-    (SELECT version_num FROM alembic_version LIMIT 1) AS alembic_revision,
-    (SELECT value FROM schema_metadata WHERE key = 'platform_revision') AS schema_revision,
-    (SELECT value FROM schema_metadata WHERE key = 'platform_fingerprint') AS schema_fingerprint,
-    ARRAY(
-        SELECT tablename
-        FROM pg_tables
-        WHERE schemaname = current_schema()
-        ORDER BY tablename
-    ) AS table_names,
-    ARRAY(
-        SELECT columns.table_name || '.' || columns.column_name
-        FROM information_schema.columns AS columns
-        JOIN expected_tables ON expected_tables.table_name = columns.table_name
-        WHERE columns.table_schema = current_schema()
-        ORDER BY columns.table_name, columns.ordinal_position
-    ) AS column_names,
-    ARRAY(
-        SELECT constraints.conname
-        FROM pg_constraint AS constraints
-        JOIN pg_class AS relations ON relations.oid = constraints.conrelid
-        JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
-        JOIN expected_tables ON expected_tables.table_name = relations.relname
-        WHERE namespaces.nspname = current_schema()
-        ORDER BY constraints.conname
-    ) AS constraint_names,
-    ARRAY(
-        SELECT indexes.indexname
-        FROM pg_indexes AS indexes
-        JOIN expected_tables ON expected_tables.table_name = indexes.tablename
-        WHERE indexes.schemaname = current_schema()
-        ORDER BY indexes.indexname
-    ) AS index_names,
-    ARRAY(
-        SELECT triggers.tgname || '|' || pg_get_triggerdef(triggers.oid)
-        FROM pg_trigger AS triggers
-        JOIN pg_class AS relations ON relations.oid = triggers.tgrelid
-        JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
-        WHERE namespaces.nspname = current_schema() AND NOT triggers.tgisinternal
-        ORDER BY triggers.tgname
-    ) AS trigger_definitions
-FROM timeout_setting
-"""
+
+REVISION_TABLES = tuple(metadata.tables)
 
 
-def create_platform_schema(connection: Connection) -> None:
-    """Create only M1-owned tables; Alembic remains the migration authority."""
+def upgrade_v0001(connection: Connection) -> None:
+    """Create the frozen v0001 schema and fail on any pre-existing owned table."""
 
-    metadata.create_all(connection, checkfirst=True)
+    metadata.create_all(connection, checkfirst=False)
     connection.execute(text(AUDIT_FUNCTION_SQL))
     connection.execute(text("DROP TRIGGER IF EXISTS trg_audit_events_append_only ON audit_events"))
     connection.execute(text(AUDIT_TRIGGER_SQL))
@@ -867,68 +818,9 @@ def create_platform_schema(connection: Connection) -> None:
     )
 
 
-def drop_platform_schema(connection: Connection) -> None:
+def downgrade_v0001(connection: Connection) -> None:
     """Drop only tables and database objects introduced by the M1 revision."""
 
     connection.execute(text("DROP TRIGGER IF EXISTS trg_audit_events_append_only ON audit_events"))
     connection.execute(text("DROP FUNCTION IF EXISTS peerassist_reject_audit_mutation()"))
-    metadata.drop_all(connection, checkfirst=True)
-
-
-@dataclass(frozen=True)
-class PostgresUnitOfWorkFactory:
-    """Validated engine boundary; repositories are added by the next M1 task."""
-
-    engine: Engine
-
-    @classmethod
-    def from_url(cls, database_url: str) -> PostgresUnitOfWorkFactory:
-        return cls(create_engine(database_url, pool_pre_ping=True))
-
-    def __call__(self, actor: object) -> object:
-        del actor
-        raise RuntimeError("PostgreSQL repositories are not available in this schema checkpoint.")
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        self.engine.dispose()
-
-
-@dataclass(frozen=True)
-class PostgresSchemaReadiness:
-    """Report ready only when the configured database is at the M1 Alembic head."""
-
-    engine: Engine
-    name: str = "database"
-
-    async def check(self) -> bool:
-        try:
-            with self.engine.connect() as connection:
-                result = connection.execute(
-                    text(SCHEMA_INSPECTION_SQL),
-                    {"expected_tables": sorted(EXPECTED_SCHEMA_TABLES)},
-                ).mappings().one()
-            triggers = tuple(result["trigger_definitions"] or ())
-            audit_trigger = next(
-                (
-                    definition
-                    for definition in triggers
-                    if definition.startswith("trg_audit_events_append_only|")
-                ),
-                "",
-            ).upper()
-            return (
-                result["alembic_revision"] == HEAD_REVISION
-                and result["schema_revision"] == HEAD_REVISION
-                and result["schema_fingerprint"] == SCHEMA_FINGERPRINT
-                and EXPECTED_SCHEMA_TABLES.issubset(result["table_names"] or ())
-                and set(result["column_names"] or ()) == EXPECTED_SCHEMA_COLUMNS
-                and EXPECTED_SCHEMA_CONSTRAINTS.issubset(result["constraint_names"] or ())
-                and EXPECTED_SCHEMA_INDEXES.issubset(result["index_names"] or ())
-                and "BEFORE DELETE OR UPDATE" in audit_trigger
-                and "PEERASSIST_REJECT_AUDIT_MUTATION" in audit_trigger
-            )
-        except Exception:
-            return False
+    metadata.drop_all(connection, checkfirst=False)
