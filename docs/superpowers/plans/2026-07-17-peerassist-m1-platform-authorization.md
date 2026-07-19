@@ -1,5 +1,7 @@
 # PeerAssist M1 Platform Authorization Implementation Plan
 
+> **2026-07-19 产品排期调整：** 本计划保留为已建设平台底座的技术参考，不再作为当前产品主线。当前主线以 `docs/product/peerassist-teacher-first-roadmap.md` 为准，优先完成老师从上传 PDF 到编辑、导出审稿意见的可用闭环。除修复登录、稿件保护、模型配置和数据持久化的阻塞问题外，暂停扩展复杂 RBAC、跨租户矩阵和平台化验收。
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the complete M1 authenticated platform boundary with FastAPI, PostgreSQL, generic OIDC/Keycloak, tenant-enforced RBAC, S3/MinIO persistence, PostgreSQL-backed review execution, and an authorized read-only legacy fallback.

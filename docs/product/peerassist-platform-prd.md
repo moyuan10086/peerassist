@@ -1,88 +1,86 @@
-# PeerAssist Platform Product Requirements
+# PeerAssist 教师智能审稿系统产品需求
 
-**Status:** Approved direction for incremental delivery
-**Product stage:** Alpha, controlled deployment only
+**状态：** 教师优先产品基线
+**阶段：** 可用性闭环优先，平台化能力后置
+**主用户：** 需要审阅课程论文、学位论文、投稿论文和科研稿件的高校教师
 
-## Product Goals
+## 1. 产品目标
 
-PeerAssist turns an evidence-grounded review prototype into a production-oriented platform without discarding its existing review pipeline. It helps reviewers move from an uploaded paper to traceable evidence, concerns, human decisions, and a versioned report draft.
+PeerAssist 的第一目标不是建设一个技术完整的平台，而是帮助老师更省力、更有把握地完成一次真实审稿。
 
-The primary experience remains PDF reading: reviewers inspect the manuscript, select text, navigate evidence, and resolve findings in source context. A persistent canvas relationship view complements the PDF by showing how papers, sections, claims, evidence, citations, concerns, notes, Agents, and reports relate. The canvas must never replace authoritative review facts with presentation copies.
+老师上传 PDF 后，系统应当快速回答三个问题：这篇论文讲了什么、哪些地方最值得仔细看、我可以给作者什么具体意见。老师能从每条意见回到原文证据，修改或删除 AI 建议，并导出一份可以继续使用的审稿意见。
 
-The platform must support private deployments and future public SaaS through the same domain contracts. It must preserve recoverable jobs, immutable evidence and report versions, auditable Agent actions, and human approval for high-risk work.
+一句话目标：**让老师从上传论文到获得一份有原文依据、可编辑、可导出的审稿初稿，首次使用无需学习系统。**
 
-## Users
+## 2. 第一性原理
 
-- **Reviewer:** reads PDFs, runs reviews, inspects evidence, edits canvas layout, confirms concerns, and prepares report drafts.
-- **Project Owner:** controls project membership, papers, publication, sharing, retention, and high-risk approvals.
-- **Organization Administrator:** manages identity, organization policy, quotas, and audit access.
-- **Viewer:** reads authorized papers, canvases, and published artifacts without mutation rights.
-- **Service Agent:** performs bounded, short-lived, tool-scoped work with an auditable actor and budget.
+老师购买的不是 Agent、画布、权限系统或模型调用，而是更快完成高质量审稿的结果。产品价值只在以下链路成立时产生：
 
-## Core Workflow
+1. 论文能可靠上传并打开。
+2. 系统能给出准确、易懂的论文概要和重点阅读路线。
+3. 审稿意见具体、克制，并能定位到原文。
+4. 老师能快速确认、改写、删除和补充意见。
+5. 最终结果能导出到老师已有的工作方式中。
 
-1. An authorized user uploads a PDF and binds it to a project and paper version.
-2. A recoverable ReviewJob parses the paper and produces stable claims, evidence, citation findings, and concerns.
-3. The PDF workspace presents findings at their source locations.
-4. Domain entities project into the canvas relationship view; reviewers arrange presentation state without changing evidence truth.
-5. Agents may research, challenge, verify, organize, and draft through audited tools.
-6. Reviewers resolve concerns and approval requests.
-7. A final report becomes an immutable published version only after human approval.
+任何不直接改善这五步的工作都不进入当前关键路径。登录只用于保护稿件和保存工作；管理员只负责模型配置和基础运维；组织、项目、复杂角色、审计、画布和多租户隔离保留为后台能力，不占用老师的主要界面和近期排期。
 
-## Constraints
+## 3. 核心用户任务
 
-- Migrate incrementally from React/Vite and standard-library HTTP services; do not perform a one-time rewrite.
-- Use a progressive modular monolith with framework-independent Python domain services.
-- Keep one write authority for each aggregate at every migration milestone.
-- Use replaceable OIDC, PostgreSQL, and S3-compatible ports. Supabase may implement ports but is never required by the domain.
-- Enforce organization and project authorization in data access boundaries.
-- Use SSE first for ordered progress events and recover through cursors and bounded polling.
-- Persist canvas commands with idempotency keys and optimistic aggregate versions.
-- Keep PDF review usable throughout migration; the Vite route remains a tested fallback until parity is proven.
-- Require approval for external data transfer, destructive human-content changes, final publication, and external sharing.
-- Do not use confidential manuscripts in production until the documented security boundary is satisfied.
+**开始审稿。** 老师进入首页后直接拖入 PDF，选择“快速审稿”或“完整审稿”。系统立即显示上传与解析进度，不要求老师先理解组织、项目或 Agent 配置。
 
-## Milestones
+**快速理解论文。** 在 PDF 可阅读后，首屏显示一句话总结、研究问题、方法、主要发现、局限和建议优先阅读的页码。摘要没有生成时显示明确进度和预计下一步，不展示空白占位文案。
 
-### M0 - Engineering baseline
+**核对 AI 意见。** 每条意见包含问题、影响、原文证据、页码和修改建议。点击证据可回到 PDF；证据不足的内容只能标为“待老师核查”，不能伪装成确定结论。
 
-Establish repository guidance, executable verification, clean lint and test baselines, API conventions, ADRs, secure defaults, CI, and a reproducible local environment.
+**形成自己的意见。** 老师可以接受、改写、删除、降级或新增意见，系统自动组织为总体评价、主要问题、次要问题和修改建议。
 
-### M1 - Platform and authorization
+**交付结果。** 老师可以复制正文或导出 Word、Markdown 和 PDF。刷新页面或暂时离开后，论文、进度和已编辑内容仍然存在。
 
-Introduce the FastAPI compatibility boundary, PostgreSQL tenancy, legacy read registration, OIDC/RBAC, S3-compatible artifacts, audit events, and idempotent commands. Prove cross-tenant isolation and adapter parity.
+## 4. 信息架构
 
-### M2 - Next.js application shell
+产品近期只保留四个面向老师的一级入口：
 
-Deliver authentication, organization/project navigation, paper upload, job timeline, approvals, generated API clients, and incremental review-workspace migration while retaining a tested compatibility route.
+| 入口 | 老师要完成的事 | 默认内容 |
+|---|---|---|
+| 首页 | 开始或继续一篇论文 | 上传区、最近论文、任务状态 |
+| 论文工作台 | 阅读和核对证据 | PDF、论文概要、重点阅读、意见卡片 |
+| 审稿意见 | 编辑最终内容 | 总体评价、主要问题、次要问题、修改建议 |
+| 历史记录 | 找回以前的工作 | 论文、状态、时间、导出记录 |
 
-### M3 - Infinite evidence canvas
+模型设置只对管理员显示，放在设置中。成员与权限、工具追踪、事件流和产物路径不作为老师的一级导航；诊断信息在发生错误时按需展开。
 
-Deliver persistent paper, claim, evidence, concern, and note nodes; PDF-to-canvas navigation; command history; conflict handling; remaining node types; deterministic layout; search; and bounded performance. Mobile editing follows a read-only first slice.
+## 5. 最小权限原则
 
-### M4 - Autonomous review Agent
+当前只保留三类行为：
 
-Deliver policy-classified tools, durable orchestration, approval center, evidence verification, canvas curation, and grounded report synthesis. Agents may produce drafts autonomously; high-risk actions wait for approval.
+- 未登录用户只能看到登录和产品入口，不能读取论文。
+- 已登录老师可以上传、审稿、编辑和导出自己的论文。
+- 管理员额外配置模型、查看服务状态和处理账号问题。
 
-### M5 - Migration closure and hardening
+后端继续保留必要的数据隔离和访问校验，但不继续投入复杂角色、跨组织治理和细粒度审批，直到真实使用证明存在需求。
 
-Remove legacy entrypoints after parity, complete browser/security/restore coverage, add release provenance and operations guides, and validate private and SaaS deployment profiles and rollback.
+## 6. 产品成功指标
 
-## Success Criteria
+| 指标 | P0 目标 | 含义 |
+|---|---:|---|
+| 首次任务成功率 | 不低于 90% | 上传后能打开 PDF 并生成审稿初稿 |
+| 首次可见价值时间 | 摘要 60 秒内，初稿 5 分钟内 | 老师不面对无反馈等待 |
+| 核心流程完成率 | 不低于 80% | 上传用户最终进入意见编辑或导出 |
+| AI 意见保留率 | 不低于 50% | 建议经接受或改写后进入最终稿 |
+| 证据可定位率 | 不低于 95% | 主要意见能跳回原文页码或片段 |
+| 可恢复率 | 100% | 刷新、重登和普通失败不丢论文与编辑结果 |
 
-- Reviewers can complete the primary PDF review flow with source-linked evidence.
-- Canvas nodes resolve to authoritative domain entities and preserve manual layout across reruns.
-- Interrupted jobs and Agent runs resume without duplicating committed work.
-- Tenant, approval, idempotency, conflict, and artifact-access tests pass.
-- Private and SaaS adapters satisfy the same port contracts.
-- Published reports are immutable, traceable, and human approved.
+测试通过数、接口数量、Agent 数量和画布节点数是工程指标，不作为产品成功指标。
 
-## Non-Goals
+## 7. 当前非目标
 
-- Replacing PDF reading with a canvas-first product.
-- Realtime multiplayer cursors or CRDT synchronization in the first canvas delivery.
-- A microservice split or wholesale rewrite.
-- Image or video generation workflows.
-- Autonomous final-report publication or external sharing.
-- Direct Agent access to databases, object stores, or provider credentials.
-- Making Supabase, Next.js, or FastAPI a domain dependency.
+- 不做自动接收、拒稿或学术不端判定。
+- 不以无限画布作为首要交互。
+- 不优先迁移全部页面到 Next.js。
+- 不优先建设复杂组织、角色和审批体系。
+- 不同时支持大量输入格式；P0 先把可选择文本的 PDF 做可靠。
+- 不向老师暴露模型、任务队列、对象存储和内部产物等技术概念。
+
+## 8. 决策原则
+
+发生排期冲突时，按以下顺序取舍：主流程能否完成、结果是否可信、错误是否可恢复、操作是否简单、工程是否优雅。技术重构只有在它直接解除前三项阻塞时才进入当前迭代。
