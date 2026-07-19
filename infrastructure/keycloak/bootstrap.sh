@@ -19,7 +19,7 @@ do
   require_safe "$name"
 done
 
-if [[ ! "${M1_TEST_PUBLIC_ORIGIN-}" =~ ^http://127\.0\.0\.1:[0-9]{4,5}$ ]]; then
+if [[ ! "${M1_TEST_PUBLIC_ORIGIN-}" =~ ^http://[A-Za-z0-9.-]+:[0-9]{4,5}$ ]]; then
   printf 'invalid generated Keycloak input: M1_TEST_PUBLIC_ORIGIN\n' >&2
   exit 2
 fi

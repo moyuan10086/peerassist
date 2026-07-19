@@ -178,7 +178,7 @@ services:
     environment: *platform-environment
     command: [python, -m, uvicorn, services.api.app:create_configured_app, --factory, --host, 0.0.0.0, --port, "${PEERASSIST_M1_PORT:?}"]
     ports:
-      - "127.0.0.1:${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
+      - "${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
     <<: *service-security
     depends_on:
       migrate: {condition: service_completed_successfully}

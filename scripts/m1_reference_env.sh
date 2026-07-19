@@ -29,7 +29,7 @@ load_env() {
   [[ "${PEERASSIST_REFERENCE_FORMAT-}" == peerassist-m1-reference-v1 ]] || fail "reference environment format is invalid"
   [[ "${PEERASSIST_REFERENCE_PROJECT-}" =~ ^peerassist-m1-ref-[0-9a-f]{16}$ ]] || fail "reference project is invalid"
   [[ "${PEERASSIST_M1_PORT-}" =~ ^[1-9][0-9]{3,4}$ ]] || fail "reference port is invalid"
-  [[ "${PEERASSIST_PUBLIC_ORIGIN-}" == "http://127.0.0.1:$PEERASSIST_M1_PORT" ]] || fail "reference origin is invalid"
+  [[ "${PEERASSIST_PUBLIC_ORIGIN-}" =~ ^http://[A-Za-z0-9.-]+:$PEERASSIST_M1_PORT$ ]] || fail "reference origin is invalid"
 }
 
 compose() {
