@@ -2,6 +2,10 @@
   "realm": "${M1_TEST_OIDC_REALM}",
   "enabled": true,
   "sslRequired": "none",
+  "loginTheme": "peerassist",
+  "internationalizationEnabled": true,
+  "supportedLocales": ["zh-CN", "en"],
+  "defaultLocale": "zh-CN",
   "registrationAllowed": true,
   "loginWithEmailAllowed": false,
   "clients": [

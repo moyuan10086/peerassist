@@ -3,5 +3,6 @@ FROM quay.io/keycloak/keycloak:26.3.1
 USER 0
 ENV KC_HTTP_RELATIVE_PATH=/identity \
     KC_HEALTH_ENABLED=true
+COPY infrastructure/keycloak/theme/peerassist /opt/keycloak/themes/peerassist
 RUN /opt/keycloak/bin/kc.sh build
 USER 1000
