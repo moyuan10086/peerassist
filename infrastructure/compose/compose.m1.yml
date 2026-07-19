@@ -1,8 +1,10 @@
 x-platform-environment: &platform-environment
-  PEERASSIST_PLATFORM_ENVIRONMENT: production
+  PEERASSIST_M1_PORT: ${PEERASSIST_M1_PORT:?}
+  PEERASSIST_PLATFORM_ENVIRONMENT: development
   PEERASSIST_PLATFORM_PROVIDER_PROFILE: external
   PEERASSIST_PLATFORM_DATABASE_URL: postgresql+psycopg://${PEERASSIST_DB_USER:?}:${PEERASSIST_DB_PASSWORD:?}@postgres:5432/${PEERASSIST_DB_NAME:?}
-  PEERASSIST_PLATFORM_OIDC_ISSUER: ${PEERASSIST_OIDC_ISSUER:?}
+  PEERASSIST_PLATFORM_OIDC_ISSUER: ${PEERASSIST_PUBLIC_ORIGIN:?}/identity/realms/${PEERASSIST_OIDC_REALM:?}
+  PEERASSIST_PLATFORM_IDENTITY_GATEWAY_URL: http://keycloak:8080/identity
   PEERASSIST_PLATFORM_OIDC_AUDIENCE: peerassist-api
   PEERASSIST_PLATFORM_OIDC_CLIENT_ID: ${PEERASSIST_OIDC_CLIENT_ID:?}
   PEERASSIST_PLATFORM_S3_ENDPOINT: http://minio:9000
@@ -13,6 +15,7 @@ x-platform-environment: &platform-environment
   PEERASSIST_PLATFORM_PUBLIC_BASE_URL: ${PEERASSIST_PUBLIC_ORIGIN:?}
   PEERASSIST_PLATFORM_ALLOWED_ORIGINS: '["${PEERASSIST_PUBLIC_ORIGIN:?}"]'
   PEERASSIST_PLATFORM_SESSION_KEY_RING: '["${PEERASSIST_SESSION_KEY:?}"]'
+  PEERASSIST_PLATFORM_SCRATCH_ROOT: /var/lib/peerassist/scratch
   PEERASSIST_PLATFORM_INTERNAL_LEGACY_AUDIENCE: peerassist-legacy
   PEERASSIST_PLATFORM_LEGACY_ROOT: /var/lib/peerassist/legacy
 
@@ -42,7 +45,9 @@ services:
       retries: 30
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.3.1
+    build:
+      context: ../..
+      dockerfile: infrastructure/compose/Dockerfile.keycloak
     user: "1000:0"
     entrypoint: [/bin/bash, /bootstrap/bootstrap.sh]
     environment:
@@ -56,6 +61,7 @@ services:
       M1_TEST_OIDC_USER_PASSWORD: ${PEERASSIST_OIDC_USER_PASSWORD:?}
       M1_TEST_PUBLIC_ORIGIN: ${PEERASSIST_PUBLIC_ORIGIN:?}
       M1_TEST_OIDC_REDIRECT_URI: ${PEERASSIST_PUBLIC_ORIGIN:?}/api/v1/auth/callback
+      M1_TEST_IDENTITY_PATH_PREFIX: /identity
     volumes:
       - ../keycloak/bootstrap.sh:/bootstrap/bootstrap.sh:ro
       - ../keycloak/realm-template.json:/bootstrap/realm-template.json:ro
@@ -63,6 +69,18 @@ services:
       - /tmp:uid=1000,gid=0,mode=0700
       - /opt/keycloak/data:uid=1000,gid=0,mode=0700
     <<: *service-security
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf "GET /identity/health/ready HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3 &&
+          grep -q "200 OK" <&3
+      interval: 3s
+      timeout: 3s
+      retries: 40
 
   minio:
     image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
@@ -76,11 +94,22 @@ services:
     tmpfs:
       - /tmp:uid=1000,gid=1000,mode=0700
     <<: *service-security
+    depends_on:
+      minio-init: {condition: service_completed_successfully}
     healthcheck:
       test: [CMD, curl, --fail, --silent, http://127.0.0.1:9000/minio/health/ready]
       interval: 3s
       timeout: 3s
       retries: 30
+
+  minio-init:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    user: "0:0"
+    entrypoint: [sh, -c]
+    command: ["chown -R 1000:1000 /data"]
+    volumes:
+      - minio-data:/data
+    restart: "no"
 
   minio-bootstrap:
     image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
@@ -90,6 +119,8 @@ services:
       M1_TEST_S3_ACCESS_KEY: ${PEERASSIST_S3_ACCESS_KEY:?}
       M1_TEST_S3_SECRET_KEY: ${PEERASSIST_S3_SECRET_KEY:?}
       M1_TEST_S3_BUCKET: ${PEERASSIST_S3_BUCKET:?}
+      HOME: /home/mc
+      MC_CONFIG_DIR: /home/mc/.mc
     volumes:
       - ../minio/bootstrap.sh:/bootstrap/bootstrap.sh:ro
     tmpfs:
@@ -104,7 +135,9 @@ services:
     build:
       context: ../..
       dockerfile: infrastructure/compose/Dockerfile.api
-    environment: *platform-environment
+    environment:
+      <<: *platform-environment
+      PEERASSIST_TEST_DATABASE_URL: postgresql+psycopg://${PEERASSIST_DB_USER:?}:${PEERASSIST_DB_PASSWORD:?}@postgres:5432/${PEERASSIST_DB_NAME:?}
     command: [python, -m, alembic, upgrade, head]
     <<: *service-security
     depends_on:
@@ -115,12 +148,26 @@ services:
     build:
       context: ../..
       dockerfile: infrastructure/compose/Dockerfile.api
-    environment: *platform-environment
-    command: [python, -c, "from common.config import PlatformSettings; PlatformSettings(); print('platform configuration ready')"]
+    environment:
+      <<: *platform-environment
+      PEERASSIST_BOOTSTRAP_API_BASE_URL: http://api:${PEERASSIST_M1_PORT:?}
+      PEERASSIST_BOOTSTRAP_TOKEN_URL: http://api:${PEERASSIST_M1_PORT:?}/identity/realms/${PEERASSIST_OIDC_REALM:?}/protocol/openid-connect/token
+      PEERASSIST_BOOTSTRAP_CLIENT_ID: ${PEERASSIST_OIDC_AUTOMATION_CLIENT_ID:?}
+      PEERASSIST_BOOTSTRAP_CLIENT_SECRET: ${PEERASSIST_OIDC_AUTOMATION_CLIENT_SECRET:?}
+      PEERASSIST_BOOTSTRAP_USERNAME: ${PEERASSIST_OIDC_USERNAME:?}
+      PEERASSIST_BOOTSTRAP_PASSWORD: ${PEERASSIST_OIDC_USER_PASSWORD:?}
+      PEERASSIST_BOOTSTRAP_OPERATOR_ID: ${PEERASSIST_BOOTSTRAP_OPERATOR_ID:?}
+      PEERASSIST_BOOTSTRAP_ORGANIZATION_SLUG: peerassist
+      PEERASSIST_BOOTSTRAP_ORGANIZATION_NAME: PeerAssist
+      PEERASSIST_BOOTSTRAP_PROJECT_NAME: ReviewWorkspace
+      PEERASSIST_BOOTSTRAP_SCOPE_FILE: /run/peerassist/scope.json
+    command: [python, -m, services.bootstrap.main]
+    volumes:
+      - ${PEERASSIST_BOOTSTRAP_STATE_DIR:?}:/run/peerassist
     <<: *service-security
     depends_on:
-      migrate: {condition: service_completed_successfully}
-      keycloak: {condition: service_started}
+      api: {condition: service_healthy}
+      keycloak: {condition: service_healthy}
       minio-bootstrap: {condition: service_completed_successfully}
     restart: "no"
 
@@ -129,14 +176,16 @@ services:
       context: ../..
       dockerfile: infrastructure/compose/Dockerfile.api
     environment: *platform-environment
+    command: [python, -m, uvicorn, services.api.app:create_configured_app, --factory, --host, 0.0.0.0, --port, "${PEERASSIST_M1_PORT:?}"]
     ports:
-      - "127.0.0.1:${PEERASSIST_M1_PORT:-8080}:8080"
+      - "127.0.0.1:${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
     <<: *service-security
     depends_on:
       migrate: {condition: service_completed_successfully}
-      platform-bootstrap: {condition: service_completed_successfully}
+      keycloak: {condition: service_healthy}
+      minio-bootstrap: {condition: service_completed_successfully}
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/ready', timeout=2)"]
+      test: [CMD, python, -c, "import os, urllib.request; port=os.environ['PEERASSIST_M1_PORT']; urllib.request.urlopen(f'http://127.0.0.1:{port}/api/v1/ready', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -147,11 +196,13 @@ services:
       dockerfile: infrastructure/compose/Dockerfile.worker
     environment:
       <<: *platform-environment
-      PEERASSIST_WORKER_ORGANIZATION_ID: ${PEERASSIST_WORKER_ORGANIZATION_ID:?}
-      PEERASSIST_WORKER_PROJECT_ID: ${PEERASSIST_WORKER_PROJECT_ID:?}
+      PEERASSIST_WORKER_SCOPE_FILE: /run/peerassist/scope.json
     volumes:
       - worker-scratch:/var/lib/peerassist/scratch
+      - ${PEERASSIST_BOOTSTRAP_STATE_DIR:?}:/run/peerassist:ro
       - ${PEERASSIST_LEGACY_ROOT:?}:/var/lib/peerassist/legacy:ro
+    group_add:
+      - "10001"
     tmpfs:
       - /tmp:uid=10002,gid=10002,mode=0700
     <<: *service-security

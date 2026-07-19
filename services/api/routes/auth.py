@@ -18,6 +18,15 @@ def login(request: Request, return_path: str = Query(default="/")) -> RedirectRe
     return RedirectResponse(started.authorization_url, status_code=307)
 
 
+@router.get("/auth/register", operation_id="v1_auth_register")
+def register(request: Request, return_path: str = Query(default="/admin")) -> RedirectResponse:
+    started = request.app.state.dependencies.session_service.begin(
+        return_path,
+        screen_hint="signup",
+    )
+    return RedirectResponse(started.authorization_url, status_code=307)
+
+
 @router.get("/auth/callback", operation_id="v1_auth_callback")
 def callback(request: Request, state: str, code: str) -> RedirectResponse:
     completed = request.app.state.dependencies.session_service.complete(state, code)
@@ -70,7 +79,17 @@ def logout(
 
 @router.get("/me", operation_id="v1_me")
 def me(request: Request) -> dict[str, object]:
-    return _user_payload(request, require_request_actor(request))
+    actor = require_request_actor(request)
+    payload = _user_payload(request, actor)
+    with request.app.state.dependencies.uow_factory(actor) as uow:
+        identity = (
+            uow.users.get_identity_by_id(actor.identity_id)
+            if actor.identity_id is not None
+            else None
+        )
+        if identity is not None:
+            payload["identity"] = {"issuer": identity.issuer, "subject": identity.subject}
+    return payload
 
 
 def _user_payload(request: Request, actor) -> dict[str, object]:

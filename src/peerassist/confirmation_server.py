@@ -5473,7 +5473,8 @@ def _load_workspace_state(*, run_dir: Path, paper_id: str) -> dict[str, Any]:
             {"id": "trace", "label": "工具追踪", "path": "/trace"},
             {"id": "confirm", "label": "人工确认", "path": "/confirm"},
             {"id": "artifacts", "label": "产物导出", "path": "/artifacts"},
-            {"id": "admin", "label": "成员管理", "path": "/admin"},
+            {"id": "login", "label": "账号登录", "path": "/login"},
+            {"id": "admin", "label": "管理后台", "path": "/admin"},
         ],
     }
 
@@ -6228,8 +6229,11 @@ def _resolve_model_api_key() -> str:
 def _resolve_model_config() -> dict[str, str]:
     settings = get_settings()
     config = resolve_model_review_config()
+    provider = config.provider if config is not None else "unavailable"
+    if provider == "openai":
+        provider = "openai-compatible"
     return {
-        "provider": config.provider if config is not None else "unavailable",
+        "provider": provider,
         "model": config.model if config is not None else settings.peerassist_openai_model.strip(),
         "base_url": config.base_url if config is not None else settings.peerassist_openai_base_url,
         "api_key_configured": "true" if config is not None else "false",

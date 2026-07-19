@@ -480,6 +480,11 @@ h1 {
   color: var(--muted);
 }
 
+.login-actions {
+  display: grid;
+  gap: 10px;
+}
+
 .admin-layout {
   min-height: calc(100vh - 100px);
   display: grid;
@@ -2283,7 +2288,7 @@ input:focus {
   .window-nav {
     height: 100%;
     display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: 2px;
     overflow: visible;
   }

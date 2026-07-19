@@ -28,6 +28,11 @@ if [[ "${M1_TEST_OIDC_REDIRECT_URI-}" != \
   printf 'invalid generated Keycloak input: M1_TEST_OIDC_REDIRECT_URI\n' >&2
   exit 2
 fi
+identity_path=${M1_TEST_IDENTITY_PATH_PREFIX-}
+if [[ -n "$identity_path" && "$identity_path" != "/identity" ]]; then
+  printf 'invalid generated Keycloak input: M1_TEST_IDENTITY_PATH_PREFIX\n' >&2
+  exit 2
+fi
 
 umask 077
 install -d -m 0700 /opt/keycloak/data/import
@@ -47,4 +52,11 @@ done
 printf '%s\n' "$realm" > /opt/keycloak/data/import/peerassist-m1-realm.json
 unset realm
 
-exec /opt/keycloak/bin/kc.sh start-dev --import-realm --http-host=0.0.0.0
+args=(start --optimized --import-realm --http-enabled=true --http-host=0.0.0.0)
+if [[ -n "$identity_path" ]]; then
+  args+=(
+    --hostname="$M1_TEST_PUBLIC_ORIGIN$identity_path"
+    --hostname-backchannel-dynamic=true
+  )
+fi
+exec /opt/keycloak/bin/kc.sh "${args[@]}"

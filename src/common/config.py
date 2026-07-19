@@ -72,6 +72,7 @@ class PlatformSettings(BaseSettings):
     provider_profile: Literal["memory", "external"] = "memory"
     database_url: SecretStr
     oidc_issuer: str
+    identity_gateway_url: str | None = None
     oidc_audience: str
     oidc_client_id: str = Field(default="peerassist-browser", min_length=1, max_length=255)
     oidc_algorithms: list[str] = Field(default_factory=lambda: ["RS256"], min_length=1)
@@ -147,6 +148,13 @@ class PlatformSettings(BaseSettings):
         ):
             raise ValueError(f"production {info.field_name} must use HTTPS")
         return normalized
+
+    @field_validator("identity_gateway_url")
+    @classmethod
+    def validate_identity_gateway_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _http_url(value, field_name="identity_gateway_url")
 
     @field_validator("s3_access_key_id", "s3_secret_access_key")
     @classmethod

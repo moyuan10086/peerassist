@@ -4,8 +4,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/src:/app
 WORKDIR /app
 RUN groupadd --system --gid 10002 peerassist && useradd --system --uid 10002 --gid peerassist peerassist
 COPY pyproject.toml README.md LICENSE /app/
-COPY src /app/src
-COPY services /app/services
+COPY --chown=10002:10002 src /app/src
+COPY --chown=10002:10002 services /app/services
+COPY --chown=10002:10002 RefCopilot/src/refcopilot /app/RefCopilot/src/refcopilot
+COPY --chown=10002:10002 web/peerassist-workspace/dist /app/web/peerassist-workspace/dist
 RUN pip install --no-cache-dir ".[platform]"
 USER 10002:10002
 CMD ["python", "-m", "services.worker.main"]

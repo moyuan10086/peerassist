@@ -80,3 +80,19 @@ def test_browser_login_installs_user_actor_for_management_routes() -> None:
     assert organizations.json() == []
     assert missing_csrf.status_code == 401
     assert accepted_csrf.status_code == 404
+
+
+def test_browser_registration_requests_the_identity_provider_signup_screen() -> None:
+    dependencies = PlatformDependencies.for_test()
+    app = create_app(_settings(), dependencies)
+
+    with TestClient(app) as client:
+        registration = client.get(
+            "/api/v1/auth/register",
+            params={"return_path": "/admin"},
+            follow_redirects=False,
+        )
+
+    assert registration.status_code == 307
+    query = parse_qs(urlsplit(registration.headers["location"]).query)
+    assert query["screen_hint"] == ["signup"]

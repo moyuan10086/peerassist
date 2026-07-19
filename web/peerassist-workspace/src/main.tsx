@@ -395,7 +395,8 @@ const fallbackBootstrap: Bootstrap = {
     { id: "trace", label: "工具追踪", path: "/trace" },
     { id: "confirm", label: "人工确认", path: "/confirm" },
     { id: "artifacts", label: "产物导出", path: "/artifacts" },
-    { id: "admin", label: "成员管理", path: "/admin" },
+    { id: "login", label: "账号登录", path: "/login" },
+    { id: "admin", label: "管理后台", path: "/admin" },
   ],
 };
 
@@ -1006,9 +1007,14 @@ function App() {
                 </button>
               </>
             ) : (
-              <button className="ghost-button" type="button" onClick={() => navigate("login", "/login")}>
-                <LogIn size={16} /> 登录 / 注册
-              </button>
+              <>
+                <button className="ghost-button" type="button" onClick={() => navigate("login", "/login")}>
+                  <LogIn size={16} /> 登录 / 注册
+                </button>
+                <button className="ghost-button" type="button" onClick={() => navigate("admin", "/admin")}>
+                  <Users size={16} /> 成员与权限
+                </button>
+              </>
             )}
             <button className="ghost-button" type="button" onClick={() => setModelSettingsOpen(true)}>
               <Settings2 size={16} /> 模型设置
@@ -1095,9 +1101,9 @@ function App() {
 function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
   const facts = [
     ["研究问题", overview?.objective],
-    ["方法", overview?.method],
+    ["研究方法", overview?.method],
     ["主要结果", overview?.result],
-    ["局限", overview?.limitation],
+    ["局限性", overview?.limitation],
   ].filter((item) => item[1]);
   return (
     <details className="paper-overview" open>
@@ -1110,7 +1116,7 @@ function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
       </summary>
       <div className="paper-overview-body">
         <div className="paper-overview-summary">
-          <small>这篇论文讲了什么</small>
+          <small>这篇论文讲了什么 · 一句话结论</small>
           <p>{overview?.summary || "摘要正在生成，完成后会在这里显示论文的问题、方法、发现与局限。"}</p>
         </div>
         {facts.map(([label, value]) => (
@@ -1136,16 +1142,26 @@ function LoginWindow({ available }: { available: boolean }) {
       <div className="login-panel">
         <span className="login-mark"><ShieldCheck size={28} /></span>
         <p className="eyebrow">PeerAssist Identity</p>
-        <h2>登录 / 注册</h2>
-        <p>使用统一身份进入审稿工作区；首次使用可在身份页创建账号。</p>
-        <button
-          className="primary-button wide"
-          type="button"
-          disabled={!available}
-          onClick={() => window.location.assign("/api/v1/auth/login?return_path=/admin")}
-        >
-          <LogIn size={17} /> {available ? "继续登录 / 注册" : "身份服务启动中"}
-        </button>
+        <h2>账号登录</h2>
+        <p>登录后进入管理后台，维护组织、项目、成员和角色权限。</p>
+        <div className="login-actions">
+          <button
+            className="primary-button wide"
+            type="button"
+            disabled={!available}
+            onClick={() => window.location.assign("/api/v1/auth/login?return_path=/admin")}
+          >
+            <LogIn size={17} /> {available ? "登录" : "身份服务启动中"}
+          </button>
+          <button
+            className="ghost-button wide"
+            type="button"
+            disabled={!available}
+            onClick={() => window.location.assign("/api/v1/auth/register?return_path=/admin")}
+          >
+            <Plus size={17} /> 创建账号
+          </button>
+        </div>
       </div>
     </section>
   );
@@ -1560,7 +1576,7 @@ function ModelSettingsDrawer({
             </span>
             <button className="ghost-button" type="button" disabled={loading} onClick={() => void pullModels()}>
               <RefreshCw size={15} className={loading ? "spin" : ""} />
-              {loading ? "正在拉取" : "刷新模型"}
+              {loading ? "正在拉取" : "自动拉取模型"}
             </button>
           </div>
           {models.length > 0 && <p className="settings-result">已发现 {models.length} 个模型</p>}

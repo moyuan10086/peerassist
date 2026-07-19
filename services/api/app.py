@@ -7,8 +7,11 @@ import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from ipaddress import ip_address, ip_network
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from common.config import PlatformSettings
@@ -16,6 +19,7 @@ from common.config import PlatformSettings
 from .composition import PlatformDependencies, build_dependencies
 from .dependencies import IsolatedReadinessProbe
 from .errors import install_exception_handlers, new_request_id
+from .identity_gateway import IdentityGatewayMiddleware
 from .routes import platform_routers
 
 _IDENTITY_HEADERS = frozenset(
@@ -34,6 +38,18 @@ _FORWARDED_HEADERS = frozenset(
 
 class LifecycleError(RuntimeError):
     """Safe startup or shutdown failure with provider details suppressed."""
+
+
+class FrontendStaticFiles(StaticFiles):
+    """Serve the built workspace and fall back to index.html for SPA routes."""
+
+    async def get_response(self, path: str, scope: Scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and not path.startswith(("api/", "identity/")):
+                return await super().get_response("index.html", scope)
+            raise
 
 
 async def _stop_resources(
@@ -188,6 +204,14 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
         PublicBoundaryMiddleware,
         trusted_proxy_cidrs=tuple(settings.trusted_proxy_cidrs),
     )
+    app.add_middleware(
+        IdentityGatewayMiddleware,
+        upstream=settings.identity_gateway_url,
+    )
+    frontend_root = Path(__file__).resolve().parents[2] / "web" / "peerassist-workspace" / "dist"
+    if (frontend_root / "index.html").is_file():
+        app.mount("/workspace", FrontendStaticFiles(directory=frontend_root, html=True), name="workspace-assets")
+        app.mount("/", FrontendStaticFiles(directory=frontend_root, html=True), name="frontend")
     return app
 
 

@@ -175,6 +175,8 @@ class OidcIdentityProvider:
                 'code_challenge': code_challenge,
                 'code_challenge_method': 'S256',
             }
+            if kwargs.get("screen_hint") == "signup":
+                parameters["screen_hint"] = "signup"
             return f"{discovery.authorization_endpoint}?{urlencode(parameters)}"
         except AuthenticationRequired:
             raise

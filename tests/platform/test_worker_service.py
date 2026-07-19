@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
+from uuid import uuid4
 
-from services.worker.main import ReviewWorker, main
+from services.worker.main import ReviewWorker, _worker_scope_from_environment, main
 from tests.platform.test_paper_service import _seed
 
+from peerassist.platform.models import TenantScope
 from peerassist.platform.services.papers import UploadPaper
 from peerassist.platform.services.reviews import CreateReviewJob, ReviewService
 
@@ -70,3 +73,19 @@ def test_worker_entrypoint_rejects_missing_tenant_scope(monkeypatch) -> None:
     monkeypatch.delenv("PEERASSIST_WORKER_PROJECT_ID", raising=False)
 
     assert main() == 2
+
+
+def test_worker_scope_can_be_loaded_from_private_bootstrap_file(tmp_path: Path) -> None:
+    organization_id = uuid4()
+    project_id = uuid4()
+    scope_file = tmp_path / "scope.json"
+    scope_file.write_text(
+        json.dumps({"organization_id": str(organization_id), "project_id": str(project_id)}),
+        encoding="utf-8",
+    )
+
+    scope = _worker_scope_from_environment(
+        {"PEERASSIST_WORKER_SCOPE_FILE": str(scope_file)}
+    )
+
+    assert scope == TenantScope(organization_id, project_id)

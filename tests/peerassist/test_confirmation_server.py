@@ -708,8 +708,12 @@ def test_workspace_frontend_exposes_account_admin_and_summary_surfaces() -> None
 
     assert "登录 / 注册" in source
     assert "成员与权限" in source
+    assert "账号登录" in source
+    assert "管理后台" in source
+    assert "/api/v1/auth/register?return_path=/admin" in source
     assert "function parsePaperSummaryMarkdown" in source
     assert "这篇论文讲了什么" in source
+    assert "一句话结论" in source
     assert "摘要正在生成" in source
 
 
@@ -1047,6 +1051,22 @@ def test_agent_review_uses_configured_model_gateway_without_direct_api_key(
     assert observed["config"] is config
     assert result["model"] == "gpt-codex"
     assert result["suggestion"] == "# 可用"
+
+
+def test_workspace_bootstrap_uses_the_public_openai_compatible_provider_name(
+    monkeypatch,
+) -> None:
+    config = ModelReviewConfig(
+        api_key="synthetic-key",
+        base_url="https://provider.example/v1",
+        model="gpt-test",
+        provider="openai",
+    )
+    monkeypatch.setattr(confirmation_server, "resolve_model_review_config", lambda: config)
+
+    public = confirmation_server._resolve_model_config()
+
+    assert public["provider"] == "openai-compatible"
 
 
 def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:

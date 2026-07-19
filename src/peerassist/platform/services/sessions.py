@@ -76,8 +76,15 @@ class BrowserSessionService:
         self._absolute_ttl = absolute_ttl
         self._idle_ttl = idle_ttl
 
-    def begin(self, return_path: str = "/") -> SessionStarted:
+    def begin(
+        self,
+        return_path: str = "/",
+        *,
+        screen_hint: str | None = None,
+    ) -> SessionStarted:
         return_path = _return_path(return_path)
+        if screen_hint not in {None, "signup"}:
+            raise ValueError("screen_hint must be signup when provided")
         now = self._clock()
         transaction_id = uuid4()
         state_secret = secrets.token_bytes(32)
@@ -102,12 +109,17 @@ class BrowserSessionService:
         with self._uow_factory(_SYSTEM_ACTOR) as uow:
             uow.oidc_transactions.add(transaction)
             uow.commit()
+        authorization_parameters = {
+            "redirect_uri": self._redirect_uri,
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": challenge,
+        }
+        if screen_hint is not None:
+            authorization_parameters["screen_hint"] = screen_hint
         authorization_url = self._identity_provider.build_authorization_url(
             transaction_id,
-            redirect_uri=self._redirect_uri,
-            state=state,
-            nonce=nonce,
-            code_challenge=challenge,
+            **authorization_parameters,
         )
         return SessionStarted(transaction_id, authorization_url, state)
 
@@ -226,9 +238,31 @@ class BrowserSessionService:
 
     def resolve_bearer(self, bearer: str) -> Actor:
         claims = self._identity_provider.validate_bearer(bearer)
+        now = self._clock()
         with self._uow_factory(_SYSTEM_ACTOR) as uow:
             identity = uow.users.get_identity(claims.issuer, claims.subject)
-            if identity is None or identity.disabled_at is not None:
+            if identity is None:
+                user = User(
+                    uuid5(NAMESPACE_URL, f"peerassist:user:{claims.issuer}:{claims.subject}"),
+                    "active",
+                    _display_name(claims.claims, claims.subject),
+                    now,
+                    now,
+                )
+                identity = ExternalIdentity(
+                    uuid5(user.id, f"identity:{claims.issuer}:{claims.subject}"),
+                    user.id,
+                    claims.issuer,
+                    claims.subject,
+                    claims.claims,
+                    now,
+                    now,
+                )
+                uow.users.add(user)
+                uow.users.add_identity(identity)
+                uow.commit()
+                return Actor(user.id, ActorKind.USER, identity.id)
+            if identity.disabled_at is not None:
                 raise AuthenticationRequired()
             user = uow.users.get(identity.user_id)
             if user is None or user.status != "active":
