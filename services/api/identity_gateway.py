@@ -49,6 +49,11 @@ class IdentityGatewayMiddleware:
             for name, value in scope.get("headers", [])
             if name.lower() in _REQUEST_HEADERS
         ]
+        # Keycloak keeps a long-lived gzip cache for theme resources. Asking for
+        # an identity response here prevents an old compressed stylesheet from
+        # surviving a theme deployment while the browser still gets a normal
+        # same-origin response from this gateway.
+        headers.append(("accept-encoding", "identity"))
         try:
             async with httpx.AsyncClient(follow_redirects=False, timeout=20.0) as client:
                 response = await client.request(
