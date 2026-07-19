@@ -364,7 +364,13 @@ function parsePaperSummaryMarkdown(markdown: string): PaperOverview {
 }
 
 type AuthUser = { id: string; display_name: string; status: string };
-type AuthSession = { authenticated: boolean; user: AuthUser | null; available: boolean };
+type AuthSession = {
+  authenticated: boolean;
+  user: AuthUser | null;
+  available: boolean;
+  roles: string[];
+  is_admin: boolean;
+};
 type OrganizationRow = { id: string; slug: string; name: string; status: string; version: number };
 type ProjectRow = { id: string; organization_id: string; name: string; status: string; version: number };
 type MembershipRow = {
@@ -454,7 +460,13 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [modelReachable, setModelReachable] = useState<boolean | null>(null);
-  const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false, user: null, available: false });
+  const [authSession, setAuthSession] = useState<AuthSession>({
+    authenticated: false,
+    user: null,
+    available: false,
+    roles: [],
+    is_admin: false,
+  });
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
@@ -571,16 +583,21 @@ function App() {
     try {
       const response = await fetch("/api/v1/auth/session", { cache: "no-store" });
       if (!response.ok) throw new Error("身份服务不可用");
-      const payload = (await response.json()) as { authenticated?: boolean; user?: AuthUser | null };
+      const payload = (await response.json()) as {
+        authenticated?: boolean;
+        user?: (AuthUser & { roles?: string[]; is_admin?: boolean }) | null;
+      };
       const next = {
         authenticated: Boolean(payload.authenticated),
         user: payload.user || null,
         available: true,
+        roles: payload.user?.roles || [],
+        is_admin: Boolean(payload.user?.is_admin),
       };
       setAuthSession(next);
       return next;
     } catch {
-      const next = { authenticated: false, user: null, available: false };
+      const next = { authenticated: false, user: null, available: false, roles: [], is_admin: false };
       setAuthSession(next);
       return next;
     }
@@ -657,15 +674,25 @@ function App() {
   }, [reviewJobs]);
 
   useEffect(() => {
-    Promise.all([refresh(), refreshJobs(), refreshSession()]).catch(() =>
-      setStreamLines((lines) => [...lines, "初始状态读取失败，保留本地壳"]),
-    );
-  }, [refresh, refreshJobs, refreshSession]);
+    void refreshSession();
+  }, [refreshSession]);
 
   useEffect(() => {
+    if (!authSession.authenticated) {
+      setReviewJobs([]);
+      setJobWorkspace(null);
+      return;
+    }
+    Promise.all([refresh(), refreshJobs()]).catch(() =>
+      setStreamLines((lines) => [...lines, "初始状态读取失败，保留本地壳"]),
+    );
+  }, [authSession.authenticated, refresh, refreshJobs]);
+
+  useEffect(() => {
+    if (!authSession.authenticated) return;
     const timer = window.setInterval(() => refreshJobs().catch(() => undefined), 3000);
     return () => window.clearInterval(timer);
-  }, [refreshJobs]);
+  }, [authSession.authenticated, refreshJobs]);
 
   useEffect(() => {
     if (!activeJobId) {
@@ -678,7 +705,7 @@ function App() {
   }, [activeJobId, refreshJobWorkspace]);
 
   useEffect(() => {
-    if (!window.EventSource) return;
+    if (!authSession.authenticated || !window.EventSource) return;
     const eventsSource = new EventSource("/api/events");
     eventsSource.addEventListener("state", (event) => {
       const statePayload = JSON.parse((event as MessageEvent).data) as ConfirmationState;
@@ -693,7 +720,13 @@ function App() {
       eventsSource.close();
     };
     return () => eventsSource.close();
-  }, []);
+  }, [authSession.authenticated]);
+
+  useEffect(() => {
+    if (!authSession.available || authSession.authenticated || activeWindow === "login") return;
+    window.history.replaceState({}, "", "/login");
+    setActiveWindow("login");
+  }, [activeWindow, authSession.available, authSession.authenticated]);
 
   const navigate = (windowId: WindowId, path: string) => {
     window.history.pushState({}, "", path);
@@ -943,9 +976,26 @@ function App() {
       redirect: "manual",
     }).catch(() => undefined);
     await refreshSession();
+    window.localStorage.removeItem("peerassist.activePaperId");
+    window.localStorage.removeItem("peerassist.activeJobId");
+    window.localStorage.removeItem("peerassist.activePdfUrl");
+    setActivePaperId("");
+    setActiveJobId("");
+    setActivePdfUrl("");
+    setJobWorkspace(null);
     navigate("login", "/login");
   }
 
+  const visibleWindows = bootstrap.windows.filter((item) => {
+    if (item.id === "login") return !authSession.authenticated;
+    if (!authSession.authenticated) return false;
+    return item.id !== "admin" || authSession.is_admin;
+  });
+  const roleLabel = authSession.is_admin
+    ? "组织管理员"
+    : authSession.roles.length
+      ? "项目成员"
+      : "待授权成员";
   const activeLabel = activeWindow === "login"
     ? "登录"
     : bootstrap.windows.find((item) => item.id === activeWindow)?.label || "论文阅读";
@@ -961,7 +1011,7 @@ function App() {
           </span>
         </button>
         <nav className="window-nav">
-          {bootstrap.windows.map((item) => (
+          {visibleWindows.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -977,10 +1027,14 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <button className="model-status-button" type="button" onClick={() => setModelSettingsOpen(true)} title="模型设置">
-            <Settings2 size={14} />
-            <span>{modelDisplay}</span>
-          </button>
+          {authSession.is_admin ? (
+            <button className="model-status-button" type="button" onClick={() => setModelSettingsOpen(true)} title="模型设置">
+              <Settings2 size={14} />
+              <span>{modelDisplay}</span>
+            </button>
+          ) : (
+            <span className="sidebar-access-state">{authSession.authenticated ? roleLabel : "登录后可用"}</span>
+          )}
           <span>证据约束 · 人工确认</span>
         </div>
       </aside>
@@ -994,14 +1048,15 @@ function App() {
           <div className="topbar-actions">
             {authSession.authenticated ? (
               <>
-                <button
+                {authSession.is_admin && <button
                   className="ghost-button"
                   type="button"
                   title={`当前账号：${authSession.user?.display_name || "已登录"}`}
                   onClick={() => navigate("admin", "/admin")}
                 >
                   <Users size={16} /> 成员与权限
-                </button>
+                </button>}
+                <span className="role-chip"><ShieldCheck size={14} /> {roleLabel}</span>
                 <button className="icon-button" type="button" onClick={() => void logout()} title="退出登录" aria-label="退出登录">
                   <LogOut size={16} />
                 </button>
@@ -1011,26 +1066,26 @@ function App() {
                 <button className="ghost-button" type="button" onClick={() => navigate("login", "/login")}>
                   <LogIn size={16} /> 登录 / 注册
                 </button>
-                <button className="ghost-button" type="button" onClick={() => navigate("admin", "/admin")}>
-                  <Users size={16} /> 成员与权限
-                </button>
+                <span className="role-chip"><ShieldCheck size={14} /> 登录后查看工作区</span>
               </>
             )}
-            <button className="ghost-button" type="button" onClick={() => setModelSettingsOpen(true)}>
+            {authSession.is_admin && <button className="ghost-button" type="button" onClick={() => setModelSettingsOpen(true)}>
               <Settings2 size={16} /> 模型设置
-            </button>
-            <button className="ghost-button" type="button" onClick={() => refresh().then(() => showToast("状态已刷新"))}>
-              <RefreshCw size={16} /> 刷新状态
-            </button>
-            <button className="primary-button" type="button" disabled={busy} onClick={() => navigate("agent", "/agent")}>
-              <Bot size={16} /> 上传论文 / 智能审稿
-            </button>
+            </button>}
+            {authSession.authenticated && <>
+              <button className="ghost-button" type="button" onClick={() => refresh().then(() => showToast("状态已刷新"))}>
+                <RefreshCw size={16} /> 刷新状态
+              </button>
+              <button className="primary-button" type="button" disabled={busy} onClick={() => navigate("agent", "/agent")}>
+                <Bot size={16} /> 上传论文 / 智能审稿
+              </button>
+            </>}
           </div>
         </header>
 
-        {activeWindow !== "paper" && <StatusStrip state={state} model={modelDisplay} />}
+        {activeWindow !== "paper" && authSession.authenticated && <StatusStrip state={state} model={modelDisplay} />}
 
-        {activeWindow === "paper" && (
+        {activeWindow === "paper" && (authSession.authenticated ? (
           <>
             <PaperOverviewPanel overview={bootstrap.paper_overview} />
             <PaperWindow
@@ -1045,8 +1100,9 @@ function App() {
               onDecision={submitDecision}
             />
           </>
-        )}
+        ) : <AccessGate title="论文内容已锁定" detail="登录并获得项目成员授权后，才能查看论文、摘要和审稿证据。" />)}
         {activeWindow === "agent" && (
+          authSession.authenticated ?
           <AgentWindow
             busy={busy}
             model={modelDisplay}
@@ -1060,19 +1116,17 @@ function App() {
             onJobAction={runJobAction}
             onUploadPaper={uploadPaper}
               onOpenPaper={(job) => openPaperById(job.paper_id, job.id, job.source_url)}
-          />
+          /> : <AccessGate title="智能审稿需要登录" detail="登录后才能上传论文、启动任务和查看模型结果。" />
         )}
-        {activeWindow === "queue" && (
-          <QueueWindow items={queueItems} onDecision={submitDecision} onOpenConfirm={() => navigate("confirm", "/confirm")} />
-        )}
-        {activeWindow === "trace" && <TraceWindow events={events} streamLines={streamLines} />}
-        {activeWindow === "confirm" && <ConfirmWindow items={queueItems} busy={busy} onDecision={submitDecision} />}
-        {activeWindow === "artifacts" && <ArtifactsWindow paths={paths} reports={state.artifacts} />}
+        {activeWindow === "queue" && (authSession.authenticated ? <QueueWindow items={queueItems} onDecision={submitDecision} onOpenConfirm={() => navigate("confirm", "/confirm")} /> : <AccessGate title="证据队列需要登录" detail="登录后才能查看项目证据和待确认项。" />)}
+        {activeWindow === "trace" && (authSession.authenticated ? <TraceWindow events={events} streamLines={streamLines} /> : <AccessGate title="工具追踪需要登录" detail="登录后才能查看审稿事件和工具调用。" />)}
+        {activeWindow === "confirm" && (authSession.authenticated ? <ConfirmWindow items={queueItems} busy={busy} onDecision={submitDecision} /> : <AccessGate title="人工确认需要登录" detail="登录后才能处理审稿意见。" />)}
+        {activeWindow === "artifacts" && (authSession.authenticated ? <ArtifactsWindow paths={paths} reports={state.artifacts} /> : <AccessGate title="产物导出需要登录" detail="登录后才能下载审阅报告和产物。" />)}
         {activeWindow === "login" && <LoginWindow available={authSession.available} />}
         {activeWindow === "admin" && (
-          authSession.authenticated
+          authSession.is_admin
             ? <AdminWindow showToast={showToast} />
-            : <LoginWindow available={authSession.available} />
+            : <AccessGate title="需要管理员权限" detail="只有组织管理员可以维护项目、成员和角色权限。" />
         )}
         <ModelSettingsDrawer
           open={modelSettingsOpen}
@@ -1095,6 +1149,20 @@ function App() {
         {toast && <div className="toast">{toast}</div>}
       </main>
     </div>
+  );
+}
+
+function AccessGate({ title, detail }: { title: string; detail: string }) {
+  return (
+    <section className="access-gate" role="status">
+      <span className="access-gate-icon"><ShieldCheck size={28} /></span>
+      <p className="eyebrow">访问控制</p>
+      <h2>{title}</h2>
+      <p>{detail}</p>
+      <button className="primary-button" type="button" onClick={() => window.location.assign("/api/v1/auth/login?return_path=/paper")}>
+        <LogIn size={16} /> 登录后继续
+      </button>
+    </section>
   );
 }
 
@@ -1358,10 +1426,7 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
           <section className="admin-section admin-project-members">
             <header><h3>项目成员</h3><span>{projectMembers.length}</span></header>
             <form className="admin-member-form" onSubmit={grantProjectMember}>
-              <select value={projectUserId} onChange={(event) => setProjectUserId(event.target.value)}>
-                <option value="">选择组织成员</option>
-                {organizationMembers.map((row) => <option key={row.user_id} value={row.user_id}>{row.user_id}</option>)}
-              </select>
+              <input value={projectUserId} onChange={(event) => setProjectUserId(event.target.value)} placeholder="普通用户 ID" />
               <select value={projectRole} onChange={(event) => setProjectRole(event.target.value)}>
                 <option value="project_owner">项目所有者</option>
                 <option value="reviewer">审稿人</option>

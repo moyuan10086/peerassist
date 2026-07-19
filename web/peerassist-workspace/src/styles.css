@@ -485,6 +485,69 @@ h1 {
   gap: 10px;
 }
 
+.access-gate {
+  min-height: calc(100vh - 138px);
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #f4f8f6;
+  padding: 40px 24px;
+  text-align: center;
+}
+
+.access-gate-icon {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #9ccfc3;
+  border-radius: 50%;
+  background: #e3f2ed;
+  color: var(--accent);
+}
+
+.access-gate h2,
+.access-gate p {
+  margin: 0;
+}
+
+.access-gate h2 {
+  font-size: 22px;
+}
+
+.access-gate > p:not(.eyebrow) {
+  max-width: 440px;
+  color: var(--muted);
+}
+
+.role-chip {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #f3f8f6;
+  color: var(--accent);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
+.sidebar-access-state {
+  display: block;
+  border: 1px solid rgba(210, 232, 226, 0.14);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbe3dd;
+  padding: 8px 4px;
+  text-align: center;
+}
+
 .admin-layout {
   min-height: calc(100vh - 100px);
   display: grid;
@@ -522,6 +585,7 @@ h1 {
 
 .admin-command-bar select,
 .admin-inline-form input,
+.admin-member-form input,
 .admin-member-form select,
 .member-row select {
   min-height: 38px;

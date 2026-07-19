@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import RedirectResponse
 
 from peerassist.platform.errors import AuthenticationRequired
+from peerassist.platform.models import Role
 
 from ..dependencies import optional_request_actor, require_request_actor
 
@@ -97,8 +98,20 @@ def _user_payload(request: Request, actor) -> dict[str, object]:
         user = uow.users.get(actor.actor_id)
         if user is None:
             raise AuthenticationRequired()
+        roles = sorted(
+            {
+                membership.role.value
+                for membership in (
+                    *uow.organizations.list_for_user(user.id),
+                    *uow.projects.list_for_user(user.id),
+                )
+                if membership.status == "active"
+            }
+        )
         return {
             "id": str(user.id),
             "display_name": user.display_name,
             "status": user.status,
+            "roles": roles,
+            "is_admin": Role.ORGANIZATION_ADMIN.value in roles,
         }
