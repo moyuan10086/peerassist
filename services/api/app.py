@@ -8,10 +8,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from ipaddress import ip_address, ip_network
 from pathlib import Path
+from types import MethodType
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from common.config import PlatformSettings
@@ -212,6 +214,24 @@ def create_app(settings: PlatformSettings, dependencies: PlatformDependencies) -
     if (frontend_root / "index.html").is_file():
         app.mount("/workspace", FrontendStaticFiles(directory=frontend_root, html=True), name="workspace-assets")
         app.mount("/", FrontendStaticFiles(directory=frontend_root, html=True), name="frontend")
+
+        # Keep API routes added by integration tests and embedding applications ahead of
+        # the root SPA mount. Starlette mounts are prefix matches, so a route appended
+        # after ``create_app`` would otherwise be swallowed by the frontend fallback.
+        original_add_api_route = app.add_api_route
+
+        def add_api_route_before_frontend(self: FastAPI, *args, **kwargs):
+            result = original_add_api_route(*args, **kwargs)
+            route = self.router.routes.pop()
+            mount_index = next(
+                index
+                for index, candidate in enumerate(self.router.routes)
+                if isinstance(candidate, Mount) and candidate.name in {"workspace-assets", "frontend"}
+            )
+            self.router.routes.insert(mount_index, route)
+            return result
+
+        app.add_api_route = MethodType(add_api_route_before_frontend, app)
     return app
 
 

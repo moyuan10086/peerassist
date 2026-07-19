@@ -6,6 +6,8 @@ PeerAssist is an alpha research-review system. Report suspected vulnerabilities 
 
 The M1 platform has Keycloak Authorization Code + PKCE login, server-side sessions, CSRF protection, organization/project RBAC, tenant-scoped repositories, PostgreSQL write authority, and immutable S3-compatible artifacts. The legacy M0 profile remains supported only on loopback for a single trusted user or as an explicitly registered read-only compatibility source.
 
+The legacy M0 profile has no built-in authentication; it must stay on loopback or behind a trusted reverse proxy that supplies the deployment's authentication boundary.
+
 Do not expose development profiles directly to an untrusted network. Resource identifiers are not authorization controls. Public deployments still require TLS termination, request limits, secure secret injection, retention policy, monitoring, and the M1 system/tenancy gates.
 
 ## Confidential Manuscripts

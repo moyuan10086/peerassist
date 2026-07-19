@@ -36,6 +36,24 @@ _PASSWORD_RE = re.compile(
 )
 _PLACEHOLDERS = {"", "example", "changeme", "change-me", "password", "secret", "test"}
 _ENV_REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+_ENV_REQUIRED_REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:\?\}$")
+_UI_EXTENSIONS = {".css", ".ftl", ".html", ".js", ".jsx", ".properties", ".ts", ".tsx"}
+_CODE_REFERENCE_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]+\]|\.[A-Za-z_][A-Za-z0-9_]*|\([^)]*\))+\s*$"
+)
+_NON_LITERAL_PREFIXES = (
+    "args.",
+    "environ.",
+    "environ[",
+    "os.environ",
+    "parsed.",
+    "request.",
+    "settings.",
+    "stdin.",
+    "unquote(",
+    "values[",
+)
+_STRUCTURED_SUFFIXES = {".ini", ".json", ".toml", ".yaml", ".yml"}
 
 
 class RepositoryScanError(Exception):
@@ -70,7 +88,15 @@ def _default_files(root: Path) -> list[Path]:
     if result.returncode != 0:
         raise RepositoryScanError
     paths = [root / item.decode("utf-8", errors="surrogateescape") for item in result.stdout.split(b"\0") if item]
-    return [path for path in paths if _relative(root, path) not in _POLICY_IMPLEMENTATION_PATHS]
+    return [
+        path
+        for path in paths
+        if (
+            (relative := _relative(root, path)) is not None
+            and relative not in _POLICY_IMPLEMENTATION_PATHS
+            and "tests" not in relative.parts
+        )
+    ]
 
 
 def _relative(root: Path, path: Path) -> Path | None:
@@ -115,7 +141,38 @@ def _placeholder(value: str) -> bool:
         normalized in _PLACEHOLDERS
         or (normalized.startswith("<") and normalized.endswith(">"))
         or bool(_ENV_REFERENCE_RE.fullmatch(normalized))
+        or bool(_ENV_REQUIRED_REFERENCE_RE.fullmatch(normalized))
     )
+
+
+def _is_non_literal_password_assignment(path: Path, line: str, value: str) -> bool:
+    """Ignore UI attributes and code references while retaining literal config checks."""
+    if any(operator in line for operator in ("==", "!=", "<=", ">=")):
+        return True
+    if path.suffix.lower() in _UI_EXTENSIONS:
+        return True
+    normalized = value.strip().strip("\"'").strip()
+    if (
+        ":" in line
+        and "=" not in line
+        and path.suffix.lower() not in _STRUCTURED_SUFFIXES
+        and not line.lstrip().startswith(("{", "["))
+    ):
+        return True
+    if _ENV_REQUIRED_REFERENCE_RE.fullmatch(normalized):
+        return True
+    if normalized.startswith("%") or normalized.startswith("$("):
+        return True
+    if "$(" in line and normalized.startswith("%"):
+        return True
+    return bool(_CODE_REFERENCE_RE.fullmatch(normalized)) or normalized.startswith(_NON_LITERAL_PREFIXES)
+
+
+def _inside_env_interpolation(line: str, offset: int) -> bool:
+    """Return whether a regex match starts inside a `${...}` expression."""
+    opening = line.rfind("${", 0, offset)
+    closing = line.rfind("}", 0, offset)
+    return opening >= 0 and opening > closing
 
 
 def _safe_files(root: Path, files: Iterable[Path]) -> list[Path]:
@@ -158,7 +215,11 @@ def scan_files(root: Path, files: Iterable[Path]) -> list[Finding]:
                 if pattern.search(line):
                     findings.add(Finding(relative, line_number, rule))
             for password in _PASSWORD_RE.finditer(line):
-                if not _placeholder(password.group("value")):
+                if _inside_env_interpolation(line, password.start()):
+                    continue
+                if not _placeholder(password.group("value")) and not _is_non_literal_password_assignment(
+                    relative, line, password.group("value")
+                ):
                     findings.add(Finding(relative, line_number, "password-assignment"))
     return sorted(findings)
 

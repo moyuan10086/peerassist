@@ -7,7 +7,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from ..errors import DependencyUnavailable, NotFound
-from ..models import Action, Actor, Artifact
+from ..models import Action, Actor, Artifact, TenantScope
 from ..ports import ObjectStore, UnitOfWorkFactory
 from .reviews import ReviewService
 
@@ -55,4 +55,26 @@ class ArtifactService:
         return ArtifactSource(
             artifact,
             self._object_store.open_immutable(project.scope, artifact.object.object_id),
+        )
+
+    def read_range(
+        self,
+        actor: Actor,
+        project_id: UUID,
+        job_id: UUID,
+        artifact_id: UUID,
+        start: int,
+        end: int,
+    ) -> tuple[Artifact, bytes]:
+        source = self.open(actor, project_id, job_id, artifact_id)
+        source.stream.close()
+        artifact = source.artifact
+        return (
+            artifact,
+            self._object_store.read_range(
+                TenantScope(artifact.organization_id, artifact.project_id),
+                artifact.object.object_id,
+                start,
+                end,
+            ),
         )

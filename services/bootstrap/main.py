@@ -12,9 +12,15 @@ from typing import Protocol
 from uuid import UUID
 
 import httpx
+
 from common.config import PlatformSettings
-from peerassist.platform.models import Actor, ActorKind, Organization, Project
-from peerassist.platform.services.bootstrap import BootstrapOrganization, BootstrapOrganizationService
+from peerassist.platform.errors import IdempotencyConflict
+from peerassist.platform.models import Actor, ActorKind, Organization, Project, TenantScope
+from peerassist.platform.services.bootstrap import (
+    BootstrapOrganization,
+    BootstrapOrganizationResult,
+    BootstrapOrganizationService,
+)
 from peerassist.platform.services.memberships import CreateProject, MembershipService
 from services.api.composition import PlatformDependencies, build_dependencies
 
@@ -68,17 +74,38 @@ def bootstrap_platform(
     if not isinstance(issuer, str) or not issuer or not isinstance(subject, str) or not subject:
         raise ValueError("bootstrap identity claims are unavailable")
     operator = Actor(UUID(values["operator_id"]), ActorKind.OPERATOR)
-    organization_result = BootstrapOrganizationService(dependencies.uow_factory).execute(
-        operator,
-        BootstrapOrganization(
-            issuer,
-            subject,
-            values["organization_slug"],
-            values["organization_name"],
-            "reference-organization-v1",
-            "reference-bootstrap-organization",
-        ),
-    )
+    try:
+        organization_result = BootstrapOrganizationService(dependencies.uow_factory).execute(
+            operator,
+            BootstrapOrganization(
+                issuer,
+                subject,
+                values["organization_slug"],
+                values["organization_name"],
+                "reference-organization-v1",
+                "reference-bootstrap-organization",
+            ),
+        )
+    except IdempotencyConflict:
+        # Keycloak can issue a new subject after a realm restart while the
+        # browser identity has already been linked to the same local user.
+        # Reuse that user's existing bootstrap organization instead of treating
+        # a deployment restart as a changed command payload.
+        user_actor = Actor(user_id, ActorKind.USER)
+        with dependencies.uow_factory(user_actor) as uow:
+            organization_result = next(
+                (
+                    BootstrapOrganizationResult(organization, membership)
+                    for membership in uow.organizations.list_for_user(user_id)
+                    if membership.status == "active"
+                    and (organization := uow.organizations.get(TenantScope(membership.organization_id)))
+                    is not None
+                    and organization.slug == values["organization_slug"]
+                ),
+                None,
+            )
+        if organization_result is None:
+            raise
     project = MembershipService(dependencies.uow_factory).create_project(
         Actor(user_id, ActorKind.USER),
         CreateProject(

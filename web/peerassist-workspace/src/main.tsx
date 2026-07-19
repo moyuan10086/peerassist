@@ -1241,7 +1241,7 @@ function PaperOverviewPanel({ overview, jobStatus }: { overview?: PaperOverview;
       <div className="paper-overview-body">
         <div className="paper-overview-summary">
           <small>这篇论文讲了什么 · 一句话结论</small>
-          <p>{overview?.summary || (jobStatus ? `论文已上传，当前${labelJobStatus(jobStatus)}。完成后会在这里显示问题、方法、发现与局限。` : "论文概要将在上传后生成。")}</p>
+            <p>{overview?.summary || (jobStatus ? `摘要正在生成：当前${labelJobStatus(jobStatus)}。完成后会在这里显示问题、方法、发现与局限。` : "论文概要将在上传后生成。")}</p>
         </div>
         {facts.map(([label, value]) => (
           <div className="paper-overview-fact" key={label}>

@@ -98,6 +98,13 @@ class WorkspaceMaterializer:
         target = _contained(self._scratch_root, workspace)
         if target.exists() and not target.is_symlink():
             shutil.rmtree(target)
+        parent = target.parent
+        while parent != self._scratch_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
 
 class StageArtifactPublisher:

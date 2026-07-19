@@ -7,8 +7,8 @@ import pytest
 
 from peerassist.platform.adapters.memory import FakeIdentityProvider, MemoryUnitOfWorkFactory
 from peerassist.platform.errors import AuthenticationRequired
-from peerassist.platform.services.sessions import BrowserSessionService
 from peerassist.platform.models import Actor, ActorKind
+from peerassist.platform.services.sessions import BrowserSessionService
 
 
 class Clock:

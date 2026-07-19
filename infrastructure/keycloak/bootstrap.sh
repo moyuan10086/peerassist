@@ -52,11 +52,18 @@ done
 printf '%s\n' "$realm" > /opt/keycloak/data/import/peerassist-m1-realm.json
 unset realm
 
-args=(start --optimized --import-realm --http-enabled=true --http-host=0.0.0.0)
+args=(start --import-realm --http-enabled=true --http-host=0.0.0.0)
+if [[ "${M1_TEST_KEYCLOAK_OPTIMIZED:-true}" == "true" ]]; then
+  args+=(--optimized)
+fi
 if [[ -n "$identity_path" ]]; then
   args+=(
     --hostname="$M1_TEST_PUBLIC_ORIGIN$identity_path"
     --hostname-backchannel-dynamic=true
   )
+else
+  # The raw Keycloak image used by the provider harness still starts in
+  # production mode; give it the dynamically assigned loopback hostname.
+  args+=(--hostname="$M1_TEST_PUBLIC_ORIGIN" --hostname-strict=false)
 fi
 exec /opt/keycloak/bin/kc.sh "${args[@]}"

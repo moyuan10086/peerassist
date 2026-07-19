@@ -109,3 +109,48 @@ def test_review_decision_and_immutable_artifact_download_api() -> None:
     assert listed.status_code == 200 and listed.json()[0]["logical_name"] == "paper_summary.md"
     assert downloaded.status_code == 200 and downloaded.content == content
     assert downloaded.headers["etag"] == f'"{hashlib.sha256(content).hexdigest()}"'
+
+
+def test_artifact_download_supports_single_byte_ranges() -> None:
+    app, reviewer, _, project = _app()
+    app.dependency_overrides[require_management_actor] = lambda: reviewer
+    content = b"# Evidence-backed review artifact\n"
+    with TestClient(app) as client:
+        uploaded = client.post(
+            f"/api/v1/projects/{project.id}/papers",
+            headers={"Idempotency-Key": "range-artifact-paper"},
+            files={"file": ("paper.pdf", b"%PDF-1.7\nrange artifact\n%%EOF\n", "application/pdf")},
+        ).json()
+        job = client.post(
+            f"/api/v1/projects/{project.id}/review-jobs",
+            headers={"Idempotency-Key": "range-artifact-job"},
+            json={"paper_version_id": uploaded["version"]["id"], "mode": "full"},
+        ).json()
+        store = app.state.dependencies.object_store
+        upload_id = store.create_temporary(project.scope, len(content))
+        temporary = store.write_temporary(project.scope, upload_id, io.BytesIO(content))
+        descriptor = store.publish(project.scope, temporary, "reports/range.md")
+        artifact = Artifact(
+            uuid4(),
+            project.organization_id,
+            project.id,
+            UUID(job["id"]),
+            "review.md",
+            descriptor,
+            "available",
+            datetime.now(UTC),
+        )
+        with app.state.dependencies.uow_factory(reviewer) as uow:
+            uow.artifacts.add(project.scope, artifact)
+            uow.commit()
+
+        ranged = client.get(
+            f"/api/v1/projects/{project.id}/review-jobs/{job['id']}/artifacts/{artifact.id}",
+            headers={"Range": "bytes=2-9"},
+        )
+
+    assert ranged.status_code == 206
+    assert ranged.content == content[2:10]
+    assert ranged.headers["accept-ranges"] == "bytes"
+    assert ranged.headers["content-range"] == f"bytes 2-9/{len(content)}"
+    assert ranged.headers["content-length"] == "8"

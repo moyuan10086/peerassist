@@ -13,6 +13,7 @@ from peerassist.platform.models import Artifact
 from peerassist.platform.services.artifacts import ArtifactService
 
 from .organizations import ManagementActor
+from .papers import _parse_range
 
 router = APIRouter(prefix="/api/v1", tags=["artifacts"])
 
@@ -72,6 +73,7 @@ def get_artifact(
     source = _service(request).open(actor, project_id, job_id, artifact_id)
     descriptor = source.artifact.object
     headers = {
+        "Accept-Ranges": "bytes",
         "Cache-Control": "private, max-age=3600, immutable",
         "Content-Length": str(descriptor.size_bytes),
         "ETag": f'"{descriptor.sha256}"',
@@ -80,4 +82,27 @@ def get_artifact(
     if request.method == "HEAD":
         source.stream.close()
         return Response(headers=headers, media_type=descriptor.media_type)
+    range_header = request.headers.get("range", "")
+    if range_header:
+        source.stream.close()
+        bounds = _parse_range(range_header, descriptor.size_bytes)
+        if bounds is None:
+            return Response(
+                status_code=416,
+                headers={**headers, "Content-Range": f"bytes */{descriptor.size_bytes}"},
+            )
+        start, end = bounds
+        _, content = _service(request).read_range(
+            actor, project_id, job_id, artifact_id, start, end
+        )
+        return Response(
+            content=content,
+            status_code=206,
+            media_type=descriptor.media_type,
+            headers={
+                **headers,
+                "Content-Length": str(len(content)),
+                "Content-Range": f"bytes {start}-{end}/{descriptor.size_bytes}",
+            },
+        )
     return StreamingResponse(source.stream, headers=headers, media_type=descriptor.media_type)

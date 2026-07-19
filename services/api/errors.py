@@ -130,14 +130,34 @@ async def _http_error(request: Request, error: Exception) -> JSONResponse:
     else:
         code = "platform_error"
         message = "The operation could not be completed."
+    headers = _safe_standard_headers(error.headers)
+    if error.status_code == HTTPStatus.METHOD_NOT_ALLOWED and "Allow" not in headers:
+        allowed = _allowed_methods(request)
+        if allowed:
+            headers["Allow"] = allowed
     return _error_response(
         status_code=error.status_code,
         code=code,
         message=message,
         request_id=_request_id(request),
         retryable=False,
-        headers=_safe_standard_headers(error.headers),
+        headers=headers,
     )
+
+
+def _allowed_methods(request: Request) -> str:
+    methods: set[str] = set()
+    path = request.url.path
+    candidates = []
+    for route in request.app.router.routes:
+        candidates.append(route)
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            candidates.extend(original_router.routes)
+    for route in candidates:
+        if getattr(route, "path", None) == path:
+            methods.update(getattr(route, "methods", ()) or ())
+    return ", ".join(sorted(methods))
 
 
 def _safe_standard_headers(headers: dict[str, str] | None) -> dict[str, str]:

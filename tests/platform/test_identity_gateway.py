@@ -4,16 +4,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
-
-from common.config import PlatformSettings
 from services.api.app import create_app
 from services.api.composition import PlatformDependencies
+
+from common.config import PlatformSettings
 
 
 class _IdentityHandler(BaseHTTPRequestHandler):
     observed_path = ""
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         type(self).observed_path = self.path
         body = b'{"issuer":"proxied"}'
         self.send_response(200)

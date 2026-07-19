@@ -44,14 +44,15 @@ services:
       M1_TEST_OIDC_USER_PASSWORD: ${M1_TEST_OIDC_USER_PASSWORD}
       M1_TEST_PUBLIC_ORIGIN: ${M1_TEST_PUBLIC_ORIGIN}
       M1_TEST_OIDC_REDIRECT_URI: ${M1_TEST_OIDC_REDIRECT_URI}
+      M1_TEST_KEYCLOAK_OPTIMIZED: "false"
     ports:
       - "127.0.0.1::8080"
     volumes:
+      - keycloak-data:/opt/keycloak/data
       - ../keycloak/bootstrap.sh:/bootstrap/bootstrap.sh:ro
       - ../keycloak/realm-template.json:/bootstrap/realm-template.json:ro
     tmpfs:
       - /tmp:uid=1000,gid=0,mode=0700
-      - /opt/keycloak/data:uid=1000,gid=0,mode=0700
     cap_drop:
       - ALL
     security_opt:
@@ -151,3 +152,4 @@ services:
 
 volumes:
   postgres-data: {}
+  keycloak-data: {}

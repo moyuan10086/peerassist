@@ -63,11 +63,11 @@ services:
       M1_TEST_OIDC_REDIRECT_URI: ${PEERASSIST_PUBLIC_ORIGIN:?}/api/v1/auth/callback
       M1_TEST_IDENTITY_PATH_PREFIX: /identity
     volumes:
+      - keycloak-data:/opt/keycloak/data
       - ../keycloak/bootstrap.sh:/bootstrap/bootstrap.sh:ro
       - ../keycloak/realm-template.json:/bootstrap/realm-template.json:ro
     tmpfs:
       - /tmp:uid=1000,gid=0,mode=0700
-      - /opt/keycloak/data:uid=1000,gid=0,mode=0700
     <<: *service-security
     healthcheck:
       test:
@@ -171,6 +171,18 @@ services:
       minio-bootstrap: {condition: service_completed_successfully}
     restart: "no"
 
+  worker-scratch-init:
+    image: alpine:3.22.0
+    user: "0:0"
+    entrypoint: [sh, -c]
+    command: ["chown -R 10002:10002 /var/lib/peerassist/scratch"]
+    volumes:
+      - worker-scratch:/var/lib/peerassist/scratch
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
   api:
     build:
       context: ../..
@@ -179,6 +191,8 @@ services:
     command: [python, -m, uvicorn, services.api.app:create_configured_app, --factory, --host, 0.0.0.0, --port, "${PEERASSIST_M1_PORT:?}"]
     ports:
       - "${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
+    volumes:
+      - ${PEERASSIST_LEGACY_ROOT:?}:/var/lib/peerassist/legacy:ro
     <<: *service-security
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -197,6 +211,7 @@ services:
     environment:
       <<: *platform-environment
       PEERASSIST_WORKER_SCOPE_FILE: /run/peerassist/scope.json
+      DATA_DIR: /tmp/peerassist-data
     volumes:
       - worker-scratch:/var/lib/peerassist/scratch
       - ${PEERASSIST_BOOTSTRAP_STATE_DIR:?}:/run/peerassist:ro
@@ -208,8 +223,10 @@ services:
     <<: *service-security
     depends_on:
       platform-bootstrap: {condition: service_completed_successfully}
+      worker-scratch-init: {condition: service_completed_successfully}
 
 volumes:
   postgres-data: {}
+  keycloak-data: {}
   minio-data: {}
   worker-scratch: {}

@@ -5,10 +5,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from services.api.composition import PlatformDependencies
 from services.bootstrap.main import bootstrap_platform
 
 from peerassist.platform.models import Actor, ActorKind, TenantScope
-from services.api.composition import PlatformDependencies
 
 
 class _Response:
