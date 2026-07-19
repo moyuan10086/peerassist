@@ -1008,6 +1008,7 @@ function App() {
   async function logout() {
     const csrf = cookieValue("peerassist_csrf");
     if (!csrf) {
+      clearActivePaper();
       await refreshSession();
       navigate("login", "/login");
       return;
