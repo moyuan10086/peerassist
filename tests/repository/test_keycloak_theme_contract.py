@@ -13,7 +13,7 @@ def test_peerassist_keycloak_theme_is_self_contained_and_localized() -> None:
     messages = (THEME / "resources/messages/messages_zh_CN.properties").read_text(
         encoding="utf-8"
     )
-    assert "--pa-accent: #2f5bea" in css
+    assert "--pa-accent: #0f766e" in css
     assert ".pf-v5-c-login__container" in css
     assert ".brand-features" in css
     assert "loginAccountTitle=登录 PeerAssist" in messages

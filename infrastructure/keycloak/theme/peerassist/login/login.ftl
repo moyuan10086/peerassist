@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${msg("loginAccountTitle")}</title>
-    <link rel="stylesheet" href="${url.resourcesPath}/css/login.css?v=20260720">
+    <link rel="stylesheet" href="${url.resourcesPath}/css/login.css?v=20260721">
 </head>
 <body class="login-pf">
 <div class="pf-v5-c-login">
@@ -16,8 +16,8 @@
             </div>
             <div class="brand-copy">
                 <p class="brand-kicker">教师智能审稿工作台 <span class="brand-kicker-dot" aria-hidden="true"></span></p>
-                <h2>把时间留给<br><em>真正重要的判断。</em></h2>
-                <p>从论文阅读到意见定稿，PeerAssist 帮你把证据、批注和结论放在同一个工作台里。</p>
+                <h2>让每一条意见，<br><em>都有证据可追溯。</em></h2>
+                <p>从论文阅读到意见定稿，PeerAssist 把证据、批注和结论放在同一个工作台里。</p>
                 <ul class="brand-features" aria-label="工作台能力">
                     <li><span aria-hidden="true">01</span>证据驱动的论文分析</li>
                     <li><span aria-hidden="true">02</span>可追溯的审稿意见</li>
@@ -28,7 +28,7 @@
         </header>
         <main class="pf-v5-c-login__main">
             <div class="pf-v5-c-login__main-header">
-                <p class="form-kicker">PeerAssist / WORKSPACE</p>
+                <p class="form-kicker">PEERASSIST / WORKSPACE</p>
                 <h1 class="pf-v5-c-title pf-m-3xl" id="kc-page-title">${msg("loginAccountTitle")}</h1>
                 <p class="form-subtitle">登录后继续处理你的审稿项目</p>
             </div>
