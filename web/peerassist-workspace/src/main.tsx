@@ -470,12 +470,13 @@ function App() {
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
+  const [activeContextReady, setActiveContextReady] = useState(() => !window.localStorage.getItem("peerassist.activePaperId"));
   const [jobWorkspace, setJobWorkspace] = useState<ConfirmationState | null>(null);
   const [activePdfUrl, setActivePdfUrl] = useState(() => {
     const storedPdfUrl = window.localStorage.getItem("peerassist.activePdfUrl") || "";
     if (storedPdfUrl) return storedPdfUrl;
     const storedPaperId = window.localStorage.getItem("peerassist.activePaperId") || "";
-    return storedPaperId ? `/api/papers/${storedPaperId}/source` : initial.assets.pdf_url || "";
+    return storedPaperId ? `/api/papers/${storedPaperId}/source` : "";
   });
 
   const state = activeJobId && jobWorkspace ? jobWorkspace : bootstrap.state || {};
@@ -498,6 +499,21 @@ function App() {
             : "（验证中）"
     }`
     : "模型未配置";
+  const activeReviewJob = reviewJobs.find((job) => job.id === activeJobId)
+    || reviewJobs.find((job) => job.paper_id === activePaperId);
+  const hasActivePaper = Boolean(activeContextReady && activePaperId);
+
+  const clearActivePaper = useCallback(() => {
+    window.localStorage.removeItem("peerassist.activePaperId");
+    window.localStorage.removeItem("peerassist.activeJobId");
+    window.localStorage.removeItem("peerassist.activePdfUrl");
+    setActivePaperId("");
+    setActiveJobId("");
+    setActivePdfUrl("");
+    setJobWorkspace(null);
+    setActiveContextReady(true);
+    setBootstrap((current) => ({ ...current, paper_overview: undefined }));
+  }, []);
 
   useEffect(() => {
     if (!modelConfigured || !bootstrap.model_config.base_url || !bootstrap.model_config.model) {
@@ -530,6 +546,30 @@ function App() {
     bootstrap.model_config.provider,
     modelConfigured,
   ]);
+
+  useEffect(() => {
+    if (!authSession.authenticated || !activePaperId || !activePdfUrl) {
+      if (!activePaperId) setActiveContextReady(true);
+      return;
+    }
+    let cancelled = false;
+    setActiveContextReady(false);
+    fetch(activePdfUrl, { method: "HEAD", cache: "no-store" })
+      .then((response) => {
+        if (cancelled) return;
+        if (!response.ok) {
+          clearActivePaper();
+          return;
+        }
+        setActiveContextReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) clearActivePaper();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePaperId, activePdfUrl, authSession.authenticated, clearActivePaper]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -742,6 +782,8 @@ function App() {
       setActiveJobId(jobId);
     }
     setActivePaperId(normalized);
+    setActiveContextReady(false);
+    setBootstrap((current) => ({ ...current, paper_overview: undefined }));
     const resolvedSource = sourceUrl || `/api/papers/${normalized}/source`;
     window.localStorage.setItem("peerassist.activePdfUrl", resolvedSource);
     setActivePdfUrl(resolvedSource);
@@ -976,13 +1018,7 @@ function App() {
       redirect: "manual",
     }).catch(() => undefined);
     await refreshSession();
-    window.localStorage.removeItem("peerassist.activePaperId");
-    window.localStorage.removeItem("peerassist.activeJobId");
-    window.localStorage.removeItem("peerassist.activePdfUrl");
-    setActivePaperId("");
-    setActiveJobId("");
-    setActivePdfUrl("");
-    setJobWorkspace(null);
+    clearActivePaper();
     navigate("login", "/login");
   }
 
@@ -1087,18 +1123,25 @@ function App() {
 
         {activeWindow === "paper" && (authSession.authenticated ? (
           <>
-            <PaperOverviewPanel overview={bootstrap.paper_overview} />
-            <PaperWindow
-              pdfUrl={activePdfUrl}
-              queueItems={queueItems}
-              busy={busy}
-              linkedReviewJob={Boolean(activePaperId)}
-              readyForConfirmation={Boolean(state.ready_for_confirmation)}
-              citationAudit={state.citation_audit}
-              onRunReview={runAgentReview}
-              onSubmitManual={submitManualConcern}
-              onDecision={submitDecision}
-            />
+            {hasActivePaper ? (
+              <>
+                <PaperOverviewPanel overview={bootstrap.paper_overview} jobStatus={activeReviewJob?.status} />
+                <PaperWindow
+                  pdfUrl={activePdfUrl}
+                  queueItems={queueItems}
+                  busy={busy}
+                  linkedReviewJob={Boolean(activeReviewJob)}
+                  reviewStatus={activeReviewJob?.status}
+                  readyForConfirmation={Boolean(state.ready_for_confirmation)}
+                  citationAudit={state.citation_audit}
+                  onRunReview={runAgentReview}
+                  onSubmitManual={submitManualConcern}
+                  onDecision={submitDecision}
+                />
+              </>
+            ) : (
+              <PaperEmptyState onUpload={() => navigate("agent", "/agent")} />
+            )}
           </>
         ) : <AccessGate title="论文内容已锁定" detail="登录并获得项目成员授权后，才能查看论文、摘要和审稿证据。" />)}
         {activeWindow === "agent" && (
@@ -1166,7 +1209,19 @@ function AccessGate({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
+function PaperEmptyState({ onUpload }: { onUpload: () => void }) {
+  return (
+    <section className="paper-empty-state" role="status">
+      <div className="paper-empty-icon"><FileText size={30} /></div>
+      <p className="eyebrow">论文工作台</p>
+      <h2>先上传一篇论文</h2>
+      <p>上传 PDF 后，这里会显示论文概要、重点阅读路线和有证据的审稿意见。</p>
+      <button className="primary-button" type="button" onClick={onUpload}><FileUp size={16} /> 上传论文</button>
+    </section>
+  );
+}
+
+function PaperOverviewPanel({ overview, jobStatus }: { overview?: PaperOverview; jobStatus?: string }) {
   const facts = [
     ["研究问题", overview?.objective],
     ["研究方法", overview?.method],
@@ -1185,7 +1240,7 @@ function PaperOverviewPanel({ overview }: { overview?: PaperOverview }) {
       <div className="paper-overview-body">
         <div className="paper-overview-summary">
           <small>这篇论文讲了什么 · 一句话结论</small>
-          <p>{overview?.summary || "摘要正在生成，完成后会在这里显示论文的问题、方法、发现与局限。"}</p>
+          <p>{overview?.summary || (jobStatus ? `论文已上传，当前${labelJobStatus(jobStatus)}。完成后会在这里显示问题、方法、发现与局限。` : "论文概要将在上传后生成。")}</p>
         </div>
         {facts.map(([label, value]) => (
           <div className="paper-overview-fact" key={label}>
@@ -1683,6 +1738,7 @@ function PaperWindow({
   queueItems,
   busy,
   linkedReviewJob,
+  reviewStatus,
   readyForConfirmation,
   citationAudit,
   onRunReview,
@@ -1693,6 +1749,7 @@ function PaperWindow({
   queueItems: Concern[];
   busy: boolean;
   linkedReviewJob: boolean;
+  reviewStatus?: string;
   readyForConfirmation: boolean;
   citationAudit?: CitationAuditSummary;
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
@@ -1862,7 +1919,7 @@ function PaperWindow({
                 </div>
               )}
               <button className="primary-button wide" type="button" disabled={busy || linkedReviewJob} onClick={() => onRunReview("", "fast")}>
-                {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} {linkedReviewJob ? "后台任务审稿中" : "快速审阅全文"}
+                {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} {linkedReviewJob ? paperReviewStatusLabel(reviewStatus || "") : "快速审阅全文"}
               </button>
               <div className="selection-summary">
                 <span>PDF 选区</span>
@@ -3146,6 +3203,28 @@ function labelJobStatus(value: string) {
     cancelled: "已取消",
     interrupted: "等待恢复",
   } as Record<string, string>)[value] || value;
+}
+
+function paperReviewStatusLabel(value: string) {
+  return ({
+    queued: "审稿任务排队中",
+    validating_input: "正在校验论文",
+    parsing: "正在解析论文",
+    evidence_building: "正在建立证据",
+    profiling: "正在理解论文",
+    planning_review: "正在规划审稿",
+    deterministic_checking: "正在核查论文",
+    citation_checking: "正在核查引用",
+    agents_running: "正在生成审稿意见",
+    integrating: "正在整合审稿意见",
+    blocked: "等待继续审稿",
+    awaiting_human_confirmation: "等待你确认意见",
+    exporting_report: "正在导出报告",
+    completed: "审稿已完成",
+    failed: "审稿失败，请到任务页重试",
+    cancelled: "任务已取消，可重新审稿",
+    interrupted: "任务等待恢复",
+  } as Record<string, string>)[value] || "后台任务处理中";
 }
 
 function labelJobStage(value: string) {

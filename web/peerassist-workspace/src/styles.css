@@ -807,6 +807,45 @@ h1 {
   box-shadow: 0 7px 20px rgba(23, 36, 34, 0.05);
 }
 
+.paper-empty-state {
+  min-height: calc(100vh - 172px);
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: #f8fbfa;
+  color: var(--muted);
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.paper-empty-state h2,
+.paper-empty-state p {
+  margin-bottom: 0;
+}
+
+.paper-empty-state h2 {
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.paper-empty-state > p:not(.eyebrow) {
+  max-width: 420px;
+}
+
+.paper-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--accent);
+}
+
 .paper-overview > summary {
   min-height: 58px;
   display: flex;
