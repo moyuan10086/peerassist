@@ -391,5 +391,5 @@ update in place; do not append another dated progress log.
 - 产品目标从“先完成平台权限与基础设施”调整为“让高校老师从上传 PDF 到编辑、导出审稿意见形成可靠闭环”。
 - 新增 `docs/product/peerassist-teacher-first-roadmap.md`，路线改为 P0 真实可用闭环、P1 审稿结果可用、P2 持续使用、P3 平台化；复杂 RBAC、无限画布和完整 Next.js 迁移后置。
 - 重写 `docs/product/peerassist-platform-prd.md` 的用户、信息架构、最小权限、产品指标和非目标；旧 M1 权限计划保留为技术参考。
-- 飞书文档 `XuVIdkaGgoykehxox9Kc3Qnhnw2` 通过精准 block_replace 更新第 1、2、4、8、10 章，revision 从 `185` 提升到 `201`；outline 校验仍保持正好 10 个二级章节。
+- 飞书文档 `XuVIdkaGgoykehxox9Kc3Qnhnw2` 通过精准 block_replace 更新第 1、2、4、8、10 章，revision 从 `185` 提升到 `201`；随后补记 P0 失效上下文修复，revision 为 `202`；outline 校验仍保持正好 10 个二级章节。
 - 本次同步未写入账号密码、API Key、稿件原文或其他私密材料。
