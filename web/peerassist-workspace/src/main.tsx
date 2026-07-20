@@ -419,14 +419,14 @@ const fallbackBootstrap: Bootstrap = {
   model_config: {},
   assets: { pdf_url: "/paper.pdf", legacy_url: "/legacy" },
   windows: [
-    { id: "paper", label: "论文阅读", path: "/paper" },
-    { id: "agent", label: "智能审稿", path: "/agent" },
-    { id: "queue", label: "证据队列", path: "/queue" },
-    { id: "trace", label: "工具追踪", path: "/trace" },
-    { id: "confirm", label: "人工确认", path: "/confirm" },
-    { id: "artifacts", label: "产物导出", path: "/artifacts" },
-    { id: "login", label: "账号登录", path: "/login" },
-    { id: "admin", label: "管理后台", path: "/admin" },
+    { id: "paper", label: "阅读论文", path: "/paper" },
+    { id: "agent", label: "生成审稿", path: "/agent" },
+    { id: "queue", label: "证据与意见", path: "/queue" },
+    { id: "trace", label: "处理记录", path: "/trace" },
+    { id: "confirm", label: "待我确认", path: "/confirm" },
+    { id: "artifacts", label: "导出报告", path: "/artifacts" },
+    { id: "login", label: "登录", path: "/login" },
+    { id: "admin", label: "设置", path: "/admin" },
   ],
 };
 
@@ -1106,8 +1106,8 @@ function App() {
       <main className={`workspace ${activeWindow === "paper" ? "paper-workspace" : ""}`}>
         <header className="workspace-topbar">
           <div>
-            <p className="eyebrow">现代智能体审稿工作区</p>
-            <h1>{activeLabel}</h1>
+            <p className="eyebrow">{bootstrap.paper_overview?.title || "当前审稿项目"}</p>
+            <h1>{activeWindow === "paper" ? "阅读论文" : activeLabel}</h1>
           </div>
           <div className="topbar-actions">
             {authSession.authenticated ? (
@@ -1796,7 +1796,7 @@ function PaperWindow({
   const [targetPage, setTargetPage] = useState(1);
   const [citationHighlight, setCitationHighlight] = useState<Evidence | null>(null);
   const [activeConcernId, setActiveConcernId] = useState("");
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1180);
   const [inspectorTab, setInspectorTab] = useState<"review" | "concerns" | "citations">("review");
   const [inspectorWidth, setInspectorWidth] = useState(372);
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -2010,7 +2010,7 @@ function PaperWindow({
           )}
         </aside>
       ) : (
-        <button className="inspector-reopen" type="button" title="打开审稿侧栏" onClick={() => setInspectorOpen(true)}>
+        <button className="inspector-reopen" type="button" title="打开证据与意见" aria-label="打开证据与意见" onClick={() => setInspectorOpen(true)}>
           <PanelRightOpen size={18} />
         </button>
       )}
@@ -2443,8 +2443,8 @@ function AgentWindow({
     <section className="agent-grid">
       <div className="panel full-span">
         <div className="panel-head">
-          <h2>后台审稿任务</h2>
-          <span className="tag">{reviewJobs.length} 个 Review Job</span>
+          <h2>我的论文</h2>
+          <span className="tag">{reviewJobs.length} 个审稿项目</span>
         </div>
         <div className="panel-body">
           <div className="upload-bar">
@@ -2481,11 +2481,11 @@ function AgentWindow({
       </div>
       <div className="panel">
         <div className="panel-head">
-          <h2>智能审稿控制台</h2>
+          <h2>生成审稿意见</h2>
           <span className="tag good">{model || "模型未配置"}</span>
         </div>
         <div className="panel-body review-run-box">
-          <p className="muted">后端会读取证据台账、确定性核查、多代理结果和人工队列，生成可追溯中文审稿意见。</p>
+          <p className="muted">系统会结合论文证据和检查结果，生成可追溯的中文审稿意见。</p>
           <div className="segmented">
             {["fast", "standard", "deep"].map((item) => (
               <button key={item} type="button" aria-pressed={mode === item} onClick={() => setMode(item)}>
@@ -2503,8 +2503,8 @@ function AgentWindow({
       </div>
       <div className="panel">
         <div className="panel-head">
-          <h2>实时数据流</h2>
-          <span className="tag">EventSource</span>
+          <h2>处理进度</h2>
+          <span className="tag">实时进度</span>
         </div>
         <div className="stream-console">
           {streamLines.slice(-40).map((line, index) => (
@@ -2517,15 +2517,15 @@ function AgentWindow({
       </div>
       <div className="panel full-span">
         <div className="panel-head">
-          <h2>审稿草稿预览</h2>
-          <span className="tag">模型输出</span>
+          <h2>可编辑的审稿草稿</h2>
+          <span className="tag">审稿草稿</span>
         </div>
         <ReviewDraftEditor draft={lastReviewDraft} storageKey={draftStorageKey} onChange={onDraftChange} />
       </div>
       <div className="panel full-span">
         <div className="panel-head">
-          <h2>多代理结果</h2>
-          <span className="tag">{agentRuns.length} 个代理</span>
+          <h2>检查结果</h2>
+          <span className="tag">{agentRuns.length} 项检查</span>
         </div>
         <div className="panel-body agent-list">
           {agentRuns.map((run) => (
@@ -2552,7 +2552,7 @@ function AgentWindow({
               </p>
             </div>
           ))}
-          {!agentRuns.length && <div className="draft-empty">代理将在论文画像、确定性核查和引用核查完成后运行。</div>}
+          {!agentRuns.length && <div className="draft-empty">论文解析和证据检查完成后，这里会显示检查结果。</div>}
         </div>
       </div>
     </section>
@@ -2705,7 +2705,7 @@ function QueueWindow({
     <section className="queue-grid">
       <div className="panel">
         <div className="panel-head">
-          <h2>证据队列</h2>
+          <h2>待处理意见</h2>
           <div className="search-box">
             <Search size={15} />
             <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索关注点、证据、代理..." />
@@ -2745,7 +2745,7 @@ function TraceWindow({ events, streamLines }: { events: ToolEvent[]; streamLines
     <section className="trace-grid">
       <div className="panel">
         <div className="panel-head">
-          <h2>MCP / Skills 工具追踪</h2>
+          <h2>处理记录</h2>
           <span className="tag">{events.length} 条事件</span>
         </div>
         <div className="panel-body event-list">
