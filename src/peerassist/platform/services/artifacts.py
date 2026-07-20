@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from io import BytesIO
 from typing import BinaryIO
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from ..errors import DependencyUnavailable, NotFound
-from ..models import Action, Actor, Artifact, TenantScope
+from ..models import Action, Actor, Artifact, ObjectDescriptor, TenantScope
 from ..ports import ObjectStore, UnitOfWorkFactory
 from .reviews import ReviewService
 
@@ -78,3 +80,60 @@ class ArtifactService:
                 end,
             ),
         )
+
+    def publish_text(
+        self,
+        actor: Actor,
+        project_id: UUID,
+        job_id: UUID,
+        logical_name: str,
+        content: str,
+    ) -> Artifact:
+        if not logical_name.strip() or len(content.encode("utf-8")) > 4 * 1024 * 1024:
+            raise ValueError("artifact content is invalid")
+        payload = content.encode("utf-8")
+        with self._uow_factory(actor) as uow:
+            project = ReviewService._require_project_action(
+                uow, actor, project_id, Action.REPORT_FINALIZE
+            )
+            job = uow.review_jobs.get(project.scope, job_id)
+            if job is None:
+                raise NotFound()
+            existing = next(
+                (item for item in uow.artifacts.list_for_job(project.scope, job_id) if item.logical_name == logical_name),
+                None,
+            )
+            if existing is not None:
+                return existing
+            upload_id = self._object_store.create_temporary(project.scope, len(payload) or 1)
+            try:
+                temporary = self._object_store.write_temporary(
+                    project.scope, upload_id, BytesIO(payload)
+                )
+                descriptor = self._object_store.publish(
+                    project.scope,
+                    temporary,
+                    f"review-jobs/{job_id}/final/{logical_name}",
+                )
+                descriptor = ObjectDescriptor(
+                    descriptor.object_id,
+                    descriptor.size_bytes,
+                    descriptor.sha256,
+                    "text/markdown; charset=utf-8",
+                    descriptor.schema_version,
+                )
+            finally:
+                self._object_store.delete_temporary(project.scope, upload_id)
+            artifact = Artifact(
+                uuid5(job_id, f"artifact:{logical_name}"),
+                project.organization_id,
+                project.id,
+                job_id,
+                logical_name,
+                descriptor,
+                "available",
+                datetime.now(UTC),
+            )
+            uow.artifacts.add(project.scope, artifact)
+            uow.commit()
+            return artifact

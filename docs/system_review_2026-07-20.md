@@ -12,6 +12,10 @@ PeerAssist 当前已经不是“没有后端”的原型：OIDC 登录、会话�
 
 第一性原理判断：老师购买的不是登录、权限、任务状态或模型下拉框，而是“一篇论文从上传到一份有原文依据、可修改、可导出的审稿意见”。当前最大的工作不是增加更多平台模块，而是补齐这个最短价值链。
 
+### 2026-07-20 增量进展
+
+本轮已完成审稿闭环的核心补齐：Worker 发布 `review_result.json`，前端恢复带页码证据的结构化意见；ReviewJob 提供服务端草稿读写、版本号和过期写入保护；前端自动保存草稿；finalize 会把最新草稿固化为不可变 `final_report.md` 产物。定向平台测试 42 项、前端生产构建和 Ruff 检查通过。当前待做的是提交、重新部署到公网 `8766`，以及用 Chromium 验证刷新恢复和最终报告下载。
+
 ## 二、当前基线
 
 | 项目 | 事实 |
@@ -43,15 +47,15 @@ PeerAssist 当前已经不是“没有后端”的原型：OIDC 登录、会话�
 
 ## 四、P0 阻断问题
 
-### P0-1：平台审稿结果没有结构化进入证据队列
+### P0-1：平台审稿结果没有结构化进入证据队列（已解决）
 
 `services/worker/main.py` 只发布 `paper_summary.md` 和 `review.md`。`web/peerassist-workspace/src/main.tsx` 读取 Markdown 后只填充草稿和产物，不填充 `queue.items`、`agent_runs`、`evidence_preview` 或 `citation_audit`。
 
-结果是系统看起来完成了审稿，但老师无法逐条检查意见的原文证据，也无法使用“证据与意见”和“待我确认”两个核心窗口。这是当前最大产品断点。
+该问题已通过 `review_result.json` 和前端 hydration 解决；仍需公网回归确认真实 Worker 产物在不同任务状态下都能恢复。
 
-### P0-2：编辑意见与最终报告不是同一份事实
+### P0-2：编辑意见与最终报告不是同一份事实（已解决）
 
-审稿草稿通过 `localStorage` 保存，服务端没有草稿版本 API。用户换浏览器、清理缓存或重新登录后编辑内容会丢失。ReviewJob finalize 只改变数据库状态和事件，不读取前端编辑内容，也不会生成新的最终报告 Artifact。
+当前草稿通过 ReviewEvent 服务端持久化，带 `expected_version` CAS；finalize 读取最新草稿并发布 `final_report.md`。前端仍保留离线 localStorage 兜底，网络恢复策略属于后续优化。
 
 ### P0-3：Worker 只消费固定租户范围
 

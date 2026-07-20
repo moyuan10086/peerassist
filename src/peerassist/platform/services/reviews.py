@@ -60,6 +60,16 @@ class RecordReviewDecision:
     request_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class SaveReviewDraft:
+    project_id: UUID
+    job_id: UUID
+    draft: str
+    expected_version: int
+    idempotency_key: str
+    request_id: str
+
+
 class ReviewService:
     def __init__(self, uow_factory: UnitOfWorkFactory, *, clock=_utc_now) -> None:
         self._uow_factory = uow_factory
@@ -192,6 +202,66 @@ class ReviewService:
                 action=Action.CONCERN_DECIDE,
             )
             self._outbox(uow, scope, changed, "review_job.decision_recorded")
+            self._complete(uow, scope, command, changed, 200)
+            uow.commit()
+            return changed
+
+    def get_draft(self, actor: Actor, project_id: UUID, job_id: UUID) -> tuple[ReviewJob, str]:
+        with self._uow_factory(actor) as uow:
+            project = self._require_project_action(uow, actor, project_id, Action.REPORT_DRAFT)
+            scope = project.scope
+            job = uow.review_jobs.get(scope, job_id)
+            if job is None:
+                raise NotFound()
+            draft = ""
+            for event in reversed(uow.review_jobs.list_events(scope, job_id)):
+                if event.event_type == "review_job.draft_saved":
+                    candidate = event.payload.get("draft")
+                    if isinstance(candidate, str):
+                        draft = candidate
+                    break
+            return job, draft
+
+    def save_draft(self, actor: Actor, request: SaveReviewDraft) -> ReviewJob:
+        if len(request.draft) > 200_000:
+            raise ValueError("draft exceeds maximum size")
+        with self._uow_factory(actor) as uow:
+            project = self._require_project_action(uow, actor, request.project_id, Action.REPORT_DRAFT)
+            scope = project.scope
+            command = self._reserve(
+                uow,
+                actor,
+                scope,
+                "review_job.draft",
+                request.idempotency_key,
+                {
+                    "draft": request.draft,
+                    "expected_version": request.expected_version,
+                    "job_id": str(request.job_id),
+                },
+            )
+            replay = self._replayed_job(uow, scope, command)
+            if replay is not None:
+                return replay
+            job = self._versioned_job(uow, scope, request.job_id, request.expected_version)
+            changed = replace(job, version=job.version + 1, updated_at=self._clock())
+            uow.review_jobs.save(scope, changed, job.version)
+            self._append_event(
+                uow,
+                scope,
+                changed,
+                "review_job.draft_saved",
+                payload={"draft": request.draft, "version": changed.version},
+            )
+            self._audit(
+                uow,
+                actor,
+                scope,
+                command,
+                changed,
+                request.request_id,
+                action=Action.REPORT_DRAFT,
+            )
             self._complete(uow, scope, command, changed, 200)
             uow.commit()
             return changed

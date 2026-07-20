@@ -524,6 +524,7 @@ function App() {
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
   const [activeContextReady, setActiveContextReady] = useState(() => !window.localStorage.getItem("peerassist.activePaperId"));
   const [jobWorkspace, setJobWorkspace] = useState<ConfirmationState | null>(null);
+  const draftSaveRef = useRef<{ jobId: string; draft: string }>({ jobId: "", draft: "" });
   const [activePdfUrl, setActivePdfUrl] = useState(() => {
     const storedPdfUrl = window.localStorage.getItem("peerassist.activePdfUrl") || "";
     if (storedPdfUrl) return storedPdfUrl;
@@ -729,6 +730,7 @@ function App() {
         fetch(`${base}/events`, { cache: "no-store" }),
       ]);
       if (!artifactResponse.ok || !eventResponse.ok) throw new Error("无法读取平台审稿产物");
+      const draftResponse = await fetch(`${base}/draft`, { cache: "no-store" });
       const artifacts = await artifactResponse.json() as Array<{ id: string; logical_name: string; object: { media_type: string; size_bytes: number; sha256: string } }>;
       const eventRows = await eventResponse.json() as Array<{ event_type: string; created_at: string; payload?: Record<string, unknown> }>;
       const artifactUrl = (id: string) => `${base}/artifacts/${id}`;
@@ -767,7 +769,19 @@ function App() {
           },
         }));
       }
-      setLastReviewDraft(restoreReviewDraft(jobId, reviewMarkdown));
+      const savedDraft = draftResponse.ok
+        ? String(((await draftResponse.json()) as { draft?: string }).draft || "")
+        : null;
+      const localDraft = restoreReviewDraft(jobId, reviewMarkdown);
+      const hydratedDraft = savedDraft || localDraft;
+      // When the server had no draft, allow a locally recovered draft to be
+      // written back after connectivity returns. Avoid saving an empty draft
+      // merely because the server returned an empty snapshot.
+      draftSaveRef.current = {
+        jobId,
+        draft: savedDraft !== null && hydratedDraft === savedDraft ? hydratedDraft : "",
+      };
+      setLastReviewDraft(hydratedDraft);
       const nextState: ConfirmationState = {
         queue: { items: Array.isArray(structuredResult.concerns) ? structuredResult.concerns : [] },
         pending_count: Array.isArray(structuredResult.concerns)
@@ -839,6 +853,33 @@ function App() {
     const timer = window.setInterval(() => refreshJobWorkspace(activeJobId).catch(() => undefined), 3000);
     return () => window.clearInterval(timer);
   }, [activeJobId, refreshJobWorkspace]);
+
+  useEffect(() => {
+    if (!activeReviewJob?.platform || !activeReviewJob.project_id || !activeJobId) return;
+    if (draftSaveRef.current.jobId === activeJobId && draftSaveRef.current.draft === lastReviewDraft) return;
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/v1/projects/${activeReviewJob.project_id}/review-jobs/${activeJobId}/draft`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey(),
+          "X-CSRF-Token": cookieValue("peerassist_csrf"),
+        },
+        body: JSON.stringify({ draft: lastReviewDraft, expected_version: activeReviewJob.revision }),
+      })
+        .then(async (response) => {
+          if (!response.ok) return;
+          const saved = await response.json() as { version?: number };
+          draftSaveRef.current = { jobId: activeJobId, draft: lastReviewDraft };
+          const nextVersion = saved.version;
+          if (typeof nextVersion === "number") {
+            setReviewJobs((jobs) => jobs.map((job) => job.id === activeJobId ? { ...job, revision: nextVersion } : job));
+          }
+        })
+        .catch(() => undefined);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [activeJobId, activeReviewJob?.platform, activeReviewJob?.project_id, activeReviewJob?.revision, lastReviewDraft]);
 
   useEffect(() => {
     // v1 exposes a job-scoped replay stream. The old global stream is only

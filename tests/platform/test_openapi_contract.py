@@ -44,6 +44,7 @@ def test_openapi_has_versioned_paths_operation_ids_and_no_provider_schemas() -> 
         "/api/v1/projects/{project_id}/review-jobs/{job_id}/artifacts/{artifact_id}",
         "/api/v1/projects/{project_id}/review-jobs/{job_id}/cancel",
         "/api/v1/projects/{project_id}/review-jobs/{job_id}/decisions",
+        "/api/v1/projects/{project_id}/review-jobs/{job_id}/draft",
         "/api/v1/projects/{project_id}/review-jobs/{job_id}/event-stream",
         "/api/v1/projects/{project_id}/review-jobs/{job_id}/events",
         "/api/v1/projects/{project_id}/review-jobs/{job_id}/finalize",
@@ -56,7 +57,7 @@ def test_openapi_has_versioned_paths_operation_ids_and_no_provider_schemas() -> 
         for methods in schema["paths"].values()
         for operation in methods.values()
     }
-    assert len(operation_ids) == 39
+    assert len(operation_ids) == 41
     assert all(operation_id.startswith("v1_") for operation_id in operation_ids)
     serialized = json.dumps(schema).casefold()
     assert "postgres" not in serialized

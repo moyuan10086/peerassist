@@ -41,11 +41,11 @@
 - Modify: `web/peerassist-workspace/src/main.tsx`
 - Test: `tests/platform/test_review_draft_api.py`
 
-- [ ] **Step 1: Write failing API tests** for saving/loading a draft with expected job version and rejecting stale writes.
-- [ ] **Step 2: Implement a project-scoped draft snapshot** using the existing command/event and object-storage patterns; keep the draft text server-side and never expose API keys or private paths.
-- [ ] **Step 3: Add `GET/PATCH` draft routes** and replace frontend-only persistence with debounced server saves plus local fallback only while offline.
-- [ ] **Step 4: Make finalize generate an immutable `final_report.md` snapshot** from the latest draft and confirmed result, then expose it through existing artifacts.
-- [ ] **Step 5: Run API, worker, and frontend regression tests.**
+- [x] **Step 1: Write failing API tests** for saving/loading a draft with expected job version and rejecting stale writes.
+- [x] **Step 2: Implement a project-scoped draft snapshot** using the existing command/event and object-storage patterns; keep the draft text server-side and never expose API keys or private paths.
+- [x] **Step 3: Add `GET/PATCH` draft routes** and replace frontend-only persistence with debounced server saves plus local fallback only while offline.
+- [x] **Step 4: Make finalize generate an immutable `final_report.md` snapshot** from the latest draft and confirmed result, then expose it through existing artifacts.
+- [x] **Step 5: Run API, worker, and frontend regression tests.**
 - [ ] **Step 6: Commit** `feat: persist review drafts and final reports`.
 
 ## Chunk 3: First-Use Reliability

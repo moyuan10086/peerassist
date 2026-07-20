@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from peerassist.platform.models import ReviewEvent, ReviewJob
 from peerassist.platform.services.reviews import (
@@ -17,8 +17,10 @@ from peerassist.platform.services.reviews import (
     CreateReviewJob,
     RecordReviewDecision,
     ReviewService,
+    SaveReviewDraft,
 )
 
+from .artifacts import ArtifactService
 from .organizations import IdempotencyKey, ManagementActor
 
 router = APIRouter(prefix="/api/v1", tags=["review-jobs"])
@@ -67,6 +69,16 @@ class ReviewDecisionBody(BaseModel):
     subject_id: str
     decision: str
     expected_version: int
+
+
+class ReviewDraftBody(BaseModel):
+    draft: str = Field(default="", max_length=200_000)
+    expected_version: int
+
+
+class ReviewDraftView(BaseModel):
+    draft: str
+    version: int
 
 
 def _service(request: Request) -> ReviewService:
@@ -129,6 +141,44 @@ def list_events(
     project_id: UUID, job_id: UUID, request: Request, actor: ManagementActor
 ) -> tuple[ReviewEvent, ...]:
     return _service(request).events(actor, project_id, job_id)
+
+
+@router.get(
+    "/projects/{project_id}/review-jobs/{job_id}/draft",
+    operation_id="v1_get_review_draft",
+    response_model=ReviewDraftView,
+)
+def get_draft(
+    project_id: UUID, job_id: UUID, request: Request, actor: ManagementActor
+) -> ReviewDraftView:
+    job, draft = _service(request).get_draft(actor, project_id, job_id)
+    return ReviewDraftView(draft=draft, version=job.version)
+
+
+@router.patch(
+    "/projects/{project_id}/review-jobs/{job_id}/draft",
+    operation_id="v1_save_review_draft",
+    response_model=ReviewJobView,
+)
+def save_draft(
+    project_id: UUID,
+    job_id: UUID,
+    body: ReviewDraftBody,
+    request: Request,
+    actor: ManagementActor,
+    idempotency_key: IdempotencyKey,
+) -> ReviewJob:
+    return _service(request).save_draft(
+        actor,
+        SaveReviewDraft(
+            project_id,
+            job_id,
+            body.draft,
+            body.expected_version,
+            idempotency_key,
+            request.state.request_id,
+        ),
+    )
 
 
 @router.get(
@@ -245,7 +295,8 @@ def finalize_review(
     actor: ManagementActor,
     idempotency_key: IdempotencyKey,
 ) -> ReviewJob:
-    return _service(request).finalize(
+    service = _service(request)
+    finalized = service.finalize(
         actor,
         ChangeReviewJob(
             project_id,
@@ -255,3 +306,30 @@ def finalize_review(
             request.state.request_id,
         ),
     )
+    _, draft = service.get_draft(actor, project_id, job_id)
+    # Preserve the teacher's markdown exactly; only use stripped text to decide
+    # whether the draft is empty.
+    report = draft if draft.strip() else ""
+    if not report:
+        for artifact in ArtifactService(
+            request.app.state.dependencies.uow_factory,
+            request.app.state.dependencies.object_store,
+        ).list(actor, project_id, job_id):
+            if artifact.logical_name != "review.md":
+                continue
+            source = ArtifactService(
+                request.app.state.dependencies.uow_factory,
+                request.app.state.dependencies.object_store,
+            ).open(actor, project_id, job_id, artifact.id)
+            try:
+                report = source.stream.read().decode("utf-8")
+            finally:
+                source.stream.close()
+            break
+    if not report:
+        report = "# PeerAssist 最终审阅报告\n\n当前任务没有可导出的审阅正文。"
+    ArtifactService(
+        request.app.state.dependencies.uow_factory,
+        request.app.state.dependencies.object_store,
+    ).publish_text(actor, project_id, job_id, "final_report.md", report)
+    return finalized
