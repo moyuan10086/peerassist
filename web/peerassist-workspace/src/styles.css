@@ -1996,28 +1996,40 @@ input:focus {
   color: var(--muted);
 }
 
-.draft-preview {
-  max-height: 430px;
-  overflow: auto;
-  padding: 16px 18px;
-  color: #20312e;
+.draft-editor {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px 16px;
   background: #fff;
 }
 
-.draft-preview h3 {
-  margin: 0 0 10px;
-  font-size: 16px;
-  line-height: 1.35;
+.draft-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.draft-preview p {
-  margin: 0 0 12px;
-  color: #34423f;
-  line-height: 1.72;
+.draft-save-note {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.draft-preview p:last-child {
-  margin-bottom: 0;
+.draft-editor-input {
+  width: 100%;
+  min-height: 360px;
+  box-sizing: border-box;
+  border-color: var(--line-strong);
+  border-radius: var(--radius);
+  color: #20312e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  resize: vertical;
 }
 
 .timeline {

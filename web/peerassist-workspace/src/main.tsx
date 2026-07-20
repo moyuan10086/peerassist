@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardCheck,
+  Copy,
   Columns2,
   Download,
   ExternalLink,
@@ -363,6 +364,29 @@ function parsePaperSummaryMarkdown(markdown: string): PaperOverview {
   };
 }
 
+const REVIEW_DRAFT_STORAGE_PREFIX = "peerassist.reviewDraft.";
+
+function reviewDraftStorageKey(jobId: string) {
+  return `${REVIEW_DRAFT_STORAGE_PREFIX}${jobId || "local"}`;
+}
+
+function restoreReviewDraft(jobId: string, fallback: string) {
+  try {
+    const saved = window.localStorage.getItem(reviewDraftStorageKey(jobId));
+    return saved === null ? fallback : saved;
+  } catch {
+    return fallback;
+  }
+}
+
+function persistReviewDraft(jobId: string, draft: string) {
+  try {
+    window.localStorage.setItem(reviewDraftStorageKey(jobId), draft);
+  } catch {
+    // Private browsing or storage quotas should not block editing or export.
+  }
+}
+
 type AuthUser = { id: string; display_name: string; status: string };
 type AuthSession = {
   authenticated: boolean;
@@ -502,6 +526,7 @@ function App() {
   const activeReviewJob = reviewJobs.find((job) => job.id === activeJobId)
     || reviewJobs.find((job) => job.paper_id === activePaperId);
   const hasActivePaper = Boolean(activeContextReady && activePaperId);
+  const draftStorageKey = reviewDraftStorageKey(activeJobId);
 
   const clearActivePaper = useCallback(() => {
     window.localStorage.removeItem("peerassist.activePaperId");
@@ -678,7 +703,7 @@ function App() {
           },
         }));
       }
-      if (reviewMarkdown) setLastReviewDraft(reviewMarkdown);
+      setLastReviewDraft(restoreReviewDraft(jobId, reviewMarkdown));
       const nextState: ConfirmationState = {
         artifacts: {
           ready: artifacts.length > 0,
@@ -783,6 +808,7 @@ function App() {
     }
     setActivePaperId(normalized);
     setActiveContextReady(false);
+    setLastReviewDraft("");
     setBootstrap((current) => ({ ...current, paper_overview: undefined }));
     const resolvedSource = sourceUrl || `/api/papers/${normalized}/source`;
     window.localStorage.setItem("peerassist.activePdfUrl", resolvedSource);
@@ -813,6 +839,7 @@ function App() {
       const suggestion = String(payload.suggestion || "");
       showToast(`已写入 ${structuredCount} 条结构化意见`);
       setLastReviewDraft(suggestion);
+      persistReviewDraft(activeJobId, suggestion);
       setStreamLines((lines) => [
         ...lines.slice(-80),
         `agent: 审稿完成，新增 ${structuredCount} 条结构化意见，当前队列 ${queueItems} 条`,
@@ -1155,6 +1182,11 @@ function App() {
             agentRuns={agentRuns}
             streamLines={streamLines}
             lastReviewDraft={lastReviewDraft}
+            draftStorageKey={draftStorageKey}
+            onDraftChange={(draft) => {
+              setLastReviewDraft(draft);
+              persistReviewDraft(activeJobId, draft);
+            }}
             reviewJobs={reviewJobs}
             onRunReview={runAgentReview}
             onJobAction={runJobAction}
@@ -2372,6 +2404,8 @@ function AgentWindow({
   agentRuns,
   streamLines,
   lastReviewDraft,
+  draftStorageKey,
+  onDraftChange,
   reviewJobs,
   onRunReview,
   onJobAction,
@@ -2385,6 +2419,8 @@ function AgentWindow({
   agentRuns: AgentRun[];
   streamLines: string[];
   lastReviewDraft: string;
+  draftStorageKey: string;
+  onDraftChange: (draft: string) => void;
   reviewJobs: ReviewJob[];
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
   onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void;
@@ -2484,7 +2520,7 @@ function AgentWindow({
           <h2>审稿草稿预览</h2>
           <span className="tag">模型输出</span>
         </div>
-        <ReviewDraftPreview draft={lastReviewDraft} />
+        <ReviewDraftEditor draft={lastReviewDraft} storageKey={draftStorageKey} onChange={onDraftChange} />
       </div>
       <div className="panel full-span">
         <div className="panel-head">
@@ -2584,7 +2620,15 @@ function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; b
   );
 }
 
-function ReviewDraftPreview({ draft }: { draft: string }) {
+function ReviewDraftEditor({
+  draft,
+  storageKey,
+  onChange,
+}: {
+  draft: string;
+  storageKey: string;
+  onChange: (draft: string) => void;
+}) {
   const cleanDraft = draft.trim();
   if (!cleanDraft) {
     return (
@@ -2594,15 +2638,54 @@ function ReviewDraftPreview({ draft }: { draft: string }) {
     );
   }
   return (
-    <div className="draft-preview">
-      {cleanDraft.split(/\n{2,}/).map((block, index) => {
-        const normalized = block.trim();
-        if (!normalized) return null;
-        if (normalized.startsWith("#")) {
-          return <h3 key={`${normalized}-${index}`}>{normalized.replace(/^#+\s*/, "")}</h3>;
-        }
-        return <p key={`${normalized}-${index}`}>{normalized.replace(/^[-*]\s*/, "")}</p>;
-      })}
+    <div className="draft-editor">
+      <div className="draft-toolbar">
+        <span className="draft-save-note">自动保存在当前浏览器 · {storageKey.endsWith("local") ? "当前草稿" : "当前任务"}</span>
+        <div className="button-row">
+          <button
+            className="ghost-button"
+            type="button"
+            title="复制审稿草稿"
+            onClick={() => {
+              const copy = navigator.clipboard?.writeText
+                ? navigator.clipboard.writeText(draft)
+                : Promise.resolve().then(() => {
+                  const input = document.createElement("textarea");
+                  input.value = draft;
+                  input.setAttribute("readonly", "true");
+                  input.style.position = "fixed";
+                  input.style.opacity = "0";
+                  document.body.appendChild(input);
+                  input.select();
+                  document.execCommand("copy");
+                  input.remove();
+                });
+              void copy.catch(() => undefined);
+            }}
+          ><Copy size={15} /> 复制</button>
+          <button
+            className="primary-button"
+            type="button"
+            title="下载 Markdown 草稿"
+            onClick={() => {
+              const blob = new Blob([draft.endsWith("\n") ? draft : `${draft}\n`], { type: "text/markdown;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = "peerassist-review-draft.md";
+              link.click();
+              URL.revokeObjectURL(url);
+            }}
+          ><Download size={15} /> 下载 Markdown</button>
+        </div>
+      </div>
+      <textarea
+        className="draft-editor-input"
+        aria-label="审稿草稿"
+        value={draft}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+      />
     </div>
   );
 }
