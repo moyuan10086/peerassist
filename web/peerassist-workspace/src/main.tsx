@@ -491,10 +491,12 @@ function idempotencyKey() {
 
 async function resolvePlatformProject() {
   const organizationsResponse = await fetch("/api/v1/organizations", { cache: "no-store" });
+  if (organizationsResponse.status === 401) throw new Error("AUTH_REQUIRED");
   if (!organizationsResponse.ok) return null;
   const organizations = await organizationsResponse.json() as OrganizationRow[];
   if (!organizations.length) return null;
   const projectsResponse = await fetch(`/api/v1/organizations/${organizations[0].id}/projects`, { cache: "no-store" });
+  if (projectsResponse.status === 401) throw new Error("AUTH_REQUIRED");
   if (!projectsResponse.ok) return null;
   const projects = await projectsResponse.json() as ProjectRow[];
   return projects[0] || null;
@@ -631,9 +633,9 @@ function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    // Platform projects use the v1 APIs and do not expose the retired
-    // bootstrap document. Avoid a false state-read error after OIDC login.
-    if (authSession.authenticated && await resolvePlatformProject().catch(() => null)) {
+    // Authenticated sessions use the v1 APIs even when the account has no
+    // project yet. Never fall back to the retired bootstrap endpoint.
+    if (authSession.authenticated) {
       return bootstrap;
     }
     const response = await fetch("/api/bootstrap");
@@ -644,7 +646,16 @@ function App() {
   }, [authSession.authenticated, bootstrap]);
 
   const refreshJobs = useCallback(async () => {
-    const project = await resolvePlatformProject().catch(() => null);
+    let project: ProjectRow | null = null;
+    try {
+      project = await resolvePlatformProject();
+    } catch (cause) {
+      if (cause instanceof Error && cause.message === "AUTH_REQUIRED") {
+        setAuthSession({ authenticated: false, user: null, available: true, roles: [], is_admin: false });
+        setReviewJobs([]);
+        return [];
+      }
+    }
     if (project) {
       const [jobsResponse, papersResponse] = await Promise.all([
         fetch(`/api/v1/projects/${project.id}/review-jobs`, { cache: "no-store" }),
@@ -669,6 +680,12 @@ function App() {
         return jobs;
       }
     }
+    // A logged-in platform user without a project has an empty workspace, not
+    // a legacy job store. Calling /api/jobs here produced a misleading 404.
+    if (authSession.authenticated) {
+      setReviewJobs([]);
+      return [];
+    }
     const response = await fetch("/api/jobs", { cache: "no-store" });
     if (!response.ok) throw new Error("无法读取后台审稿任务");
     const payload = (await response.json()) as { jobs?: ReviewJob[] };
@@ -676,7 +693,7 @@ function App() {
     jobs.sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
     setReviewJobs(jobs);
     return jobs;
-  }, []);
+  }, [authSession.authenticated]);
 
   const refreshSession = useCallback(async () => {
     try {
