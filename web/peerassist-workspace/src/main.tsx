@@ -474,6 +474,21 @@ function apiErrorMessage(payload: unknown, fallback: string) {
   return fallback;
 }
 
+function idempotencyKey() {
+  const webCrypto = globalThis.crypto;
+  if (typeof webCrypto?.randomUUID === "function") return webCrypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof webCrypto?.getRandomValues === "function") {
+    webCrypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function resolvePlatformProject() {
   const organizationsResponse = await fetch("/api/v1/organizations", { cache: "no-store" });
   if (!organizationsResponse.ok) return null;
@@ -616,12 +631,17 @@ function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    // Platform projects use the v1 APIs and do not expose the retired
+    // bootstrap document. Avoid a false state-read error after OIDC login.
+    if (authSession.authenticated && await resolvePlatformProject().catch(() => null)) {
+      return bootstrap;
+    }
     const response = await fetch("/api/bootstrap");
     if (!response.ok) throw new Error("无法读取 PeerAssist 状态");
     const payload = (await response.json()) as Bootstrap;
     setBootstrap(payload);
     return payload;
-  }, []);
+  }, [authSession.authenticated, bootstrap]);
 
   const refreshJobs = useCallback(async () => {
     const project = await resolvePlatformProject().catch(() => null);
@@ -784,7 +804,9 @@ function App() {
   }, [activeJobId, refreshJobWorkspace]);
 
   useEffect(() => {
-    if (!authSession.authenticated || !window.EventSource) return;
+    // v1 exposes a job-scoped replay stream. The old global stream is only
+    // available to legacy jobs and must not be opened for platform projects.
+    if (!authSession.authenticated || !window.EventSource || !reviewJobs.length || reviewJobs.every((job) => job.platform)) return;
     const eventsSource = new EventSource("/api/events");
     eventsSource.addEventListener("state", (event) => {
       const statePayload = JSON.parse((event as MessageEvent).data) as ConfirmationState;
@@ -799,7 +821,7 @@ function App() {
       eventsSource.close();
     };
     return () => eventsSource.close();
-  }, [authSession.authenticated]);
+  }, [authSession.authenticated, reviewJobs]);
 
   useEffect(() => {
     if (!authSession.available || authSession.authenticated || activeWindow === "login") return;
@@ -841,6 +863,11 @@ function App() {
     setLastReviewDraft("");
     setStreamLines((lines) => [...lines.slice(-80), `agent: 以 ${reviewMode} 模式启动智能审稿`]);
     try {
+      if (activeReviewJob?.platform) {
+        await refreshJobWorkspace(activeReviewJob.id);
+        showToast("平台审稿任务已在运行，请在任务卡查看进度");
+        return;
+      }
       const response = await fetch("/api/agent-review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -871,6 +898,29 @@ function App() {
   async function submitManualConcern(selectedText: string, note: string, page: string) {
     setBusy(true);
     try {
+      if (activeReviewJob?.platform && activeReviewJob.project_id) {
+        const response = await fetch(`/api/v1/projects/${activeReviewJob.project_id}/review-jobs/${activeReviewJob.id}/decisions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey(),
+            "X-CSRF-Token": cookieValue("peerassist_csrf"),
+          },
+          body: JSON.stringify({
+            decision_type: "concern",
+            subject_id: `manual-${Date.now()}`,
+            decision: `${note.trim()}${selectedText.trim() ? `\n原文：${selectedText.trim()}` : ""}${page ? `\n页码：${page}` : ""}`.trim(),
+            expected_version: activeReviewJob.revision,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error?.message || "加入队列失败");
+        showToast("人工意见已记录到平台任务");
+        await refreshJobs();
+        await refreshJobWorkspace(activeReviewJob.id);
+        navigate("queue", "/queue");
+        return;
+      }
       const response = await fetch("/api/manual-concern", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -891,6 +941,28 @@ function App() {
   async function submitDecision(concern: Concern, action: string) {
     setBusy(true);
     try {
+      if (activeReviewJob?.platform && activeReviewJob.project_id) {
+        const response = await fetch(`/api/v1/projects/${activeReviewJob.project_id}/review-jobs/${activeReviewJob.id}/decisions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey(),
+            "X-CSRF-Token": cookieValue("peerassist_csrf"),
+          },
+          body: JSON.stringify({
+            decision_type: "concern",
+            subject_id: concern.id,
+            decision: action,
+            expected_version: activeReviewJob.revision,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error?.message || "确认失败");
+        showToast(`已记录：${labelAction(action)}`);
+        await refreshJobs();
+        await refreshJobWorkspace(activeReviewJob.id);
+        return;
+      }
       const response = await fetch(activeJobId ? `/api/jobs/${activeJobId}/decisions` : "/api/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -934,7 +1006,7 @@ function App() {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Idempotency-Key": crypto.randomUUID(),
+              "Idempotency-Key": idempotencyKey(),
               "X-CSRF-Token": cookieValue("peerassist_csrf"),
             },
             body: JSON.stringify(
@@ -996,7 +1068,7 @@ function App() {
         const uploadedResponse = await fetch(`/api/v1/projects/${project.id}/papers`, {
           method: "POST",
           headers: {
-            "Idempotency-Key": crypto.randomUUID(),
+            "Idempotency-Key": idempotencyKey(),
             "X-CSRF-Token": cookieValue("peerassist_csrf"),
           },
           body,
@@ -1007,7 +1079,7 @@ function App() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Idempotency-Key": crypto.randomUUID(),
+            "Idempotency-Key": idempotencyKey(),
             "X-CSRF-Token": cookieValue("peerassist_csrf"),
           },
           body: JSON.stringify({ paper_version_id: uploaded.version.id, mode: "full" }),
@@ -1419,7 +1491,7 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
     try {
       await api(`/api/v1/organizations/${organizationId}/projects`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ name: projectName.trim() }),
       });
       setProjectName("");
@@ -1436,7 +1508,7 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
     try {
       await api(`/api/v1/organizations/${organizationId}/members`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ user_id: newUserId.trim(), expected_version: null }),
       });
       setNewUserId("");
@@ -1453,7 +1525,7 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
     try {
       await api(`/api/v1/projects/${projectId}/members`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ user_id: projectUserId, role: projectRole, expected_version: null }),
       });
       await loadProjectMembers(projectId);
@@ -1467,7 +1539,7 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
     try {
       await api(`/api/v1/projects/${member.project_id}/members/${member.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ role, status, expected_version: member.version }),
       });
       await loadProjectMembers(projectId);

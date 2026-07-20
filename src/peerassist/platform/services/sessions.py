@@ -81,6 +81,7 @@ class BrowserSessionService:
         return_path: str = "/",
         *,
         screen_hint: str | None = None,
+        force_reauthentication: bool = False,
     ) -> SessionStarted:
         return_path = _return_path(return_path)
         if screen_hint not in {None, "signup"}:
@@ -117,6 +118,8 @@ class BrowserSessionService:
         }
         if screen_hint is not None:
             authorization_parameters["screen_hint"] = screen_hint
+        if force_reauthentication:
+            authorization_parameters["prompt"] = "login"
         authorization_url = self._identity_provider.build_authorization_url(
             transaction_id,
             **authorization_parameters,

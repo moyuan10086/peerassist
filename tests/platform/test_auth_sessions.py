@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -69,6 +70,23 @@ def test_pkce_login_provisions_identity_resolves_actor_and_logs_out() -> None:
     service.logout(completed.session_token, completed.csrf_token)
     with pytest.raises(AuthenticationRequired):
         service.resolve_session(completed.session_token)
+
+
+def test_login_can_force_the_identity_provider_to_show_account_picker() -> None:
+    service = BrowserSessionService(
+        MemoryUnitOfWorkFactory(),
+        FakeIdentityProvider(
+            issuer="https://issuer.example",
+            audience="peerassist-api",
+            accepted_algorithms=frozenset({"RS256"}),
+        ),
+        key_ring={"key-1": bytes(range(32))},
+        redirect_uri="https://peerassist.example/api/v1/auth/callback",
+    )
+
+    started = service.begin("/admin", force_reauthentication=True)
+
+    assert parse_qs(urlsplit(started.authorization_url).query)["prompt"] == ["login"]
 
 
 def test_first_valid_bearer_provisions_the_trusted_external_identity() -> None:

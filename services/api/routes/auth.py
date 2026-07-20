@@ -15,7 +15,10 @@ router = APIRouter(prefix="/api/v1", tags=["authentication"])
 
 @router.get("/auth/login", operation_id="v1_auth_login")
 def login(request: Request, return_path: str = Query(default="/")) -> RedirectResponse:
-    started = request.app.state.dependencies.session_service.begin(return_path)
+    started = request.app.state.dependencies.session_service.begin(
+        return_path,
+        force_reauthentication=True,
+    )
     return RedirectResponse(started.authorization_url, status_code=307)
 
 

@@ -310,7 +310,7 @@ def test_fixed_router_registry_and_lifespan_include_all_platform_components() ->
     with TestClient(app):
         assert lifecycle.started is True
         paths = set(app.openapi()["paths"])
-        assert {route.prefix for route in platform_routers()} == {"/api/v1", "/api/v1"}
+        assert {route.prefix for route in platform_routers()} == {"", "/api/v1"}
         assert "/api/v1/health" in paths
         assert "/api/v1/auth/login" in paths
 
