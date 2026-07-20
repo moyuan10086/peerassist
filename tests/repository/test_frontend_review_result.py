@@ -22,3 +22,11 @@ def test_workspace_waits_for_job_list_before_restoring_a_job() -> None:
     source = Path("web/peerassist-workspace/src/main.tsx").read_text(encoding="utf-8")
 
     assert "reviewJobs.some((job) => job.id === activeJobId)" in source
+
+
+def test_workspace_exposes_failed_record_delete_and_contextual_errors() -> None:
+    source = Path("web/peerassist-workspace/src/main.tsx").read_text(encoding="utf-8")
+
+    assert 'method: action === "delete" ? "DELETE" : "POST"' in source
+    assert "删除记录" in source
+    assert "apiErrorMessage(payload" in source

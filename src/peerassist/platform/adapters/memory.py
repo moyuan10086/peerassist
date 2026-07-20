@@ -489,6 +489,22 @@ class _ReviewJobs:
         _check_replacement_version(self.get(scope, job.id), job, expected_version)
         self._state.review_jobs[job.id] = job
 
+    def delete(self, scope: TenantScope, job_id: UUID) -> None:
+        job = self.get(scope, job_id)
+        if job is None:
+            raise NotFound()
+        self._state.review_jobs.pop(job_id, None)
+        self._state.review_events.pop(job_id, None)
+        for artifact_id, artifact in tuple(self._state.artifacts.items()):
+            if artifact.job_id == job_id:
+                del self._state.artifacts[artifact_id]
+        for item_id, item in tuple(self._state.work_items.items()):
+            if item.job_id == job_id:
+                del self._state.work_items[item_id]
+        for event_id, event in tuple(self._state.outbox.items()):
+            if event.aggregate_id == job_id:
+                del self._state.outbox[event_id]
+
     def append_event(self, scope: TenantScope, event: ReviewEvent) -> None:
         _require_project_scope(scope, event)
         events = self._state.review_events.setdefault(event.job_id, [])

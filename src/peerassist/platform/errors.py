@@ -27,6 +27,7 @@ _ERROR_SPECS = MappingProxyType(
         "dependency_unavailable": ("A required service is temporarily unavailable.", True),
         "payload_too_large": ("The uploaded payload exceeds the configured limit.", False),
         "immutable_resource": ("The resource is read-only.", False),
+        "invalid_review_job_state": ("只有失败或已取消的任务可以删除。", False),
     }
 )
 _SAFE_DETAIL_KEYS = frozenset(
@@ -172,3 +173,7 @@ class PayloadTooLarge(PlatformError):
 
 class ImmutableResource(PlatformError):
     code = "immutable_resource"
+
+
+class InvalidReviewJobState(PlatformError):
+    code = "invalid_review_job_state"

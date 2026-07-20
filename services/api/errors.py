@@ -30,6 +30,7 @@ _PLATFORM_STATUS = {
     "not_found": HTTPStatus.NOT_FOUND,
     "payload_too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
     "stale_version": HTTPStatus.CONFLICT,
+    "invalid_review_job_state": HTTPStatus.CONFLICT,
 }
 _HTTP_METHOD = re.compile(r"[A-Z][A-Z0-9-]{0,31}")
 _AUTH_CHALLENGE = re.compile(

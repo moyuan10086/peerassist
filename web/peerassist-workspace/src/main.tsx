@@ -466,10 +466,15 @@ function cookieValue(name: string) {
 function apiErrorMessage(payload: unknown, fallback: string) {
   if (!payload || typeof payload !== "object" || !("error" in payload)) return fallback;
   const error = (payload as { error?: unknown }).error;
-  if (typeof error === "string" && error.trim()) return error;
+  if (typeof error === "string" && error.trim()) {
+    if (error === "The operation could not be completed.") return fallback;
+    if (error === "The request could not be validated.") return `${fallback}：请求参数不完整，请刷新后重试。`;
+    return error;
+  }
   if (error && typeof error === "object" && "message" in error) {
     const message = String((error as { message?: unknown }).message || "").trim();
-    if (message) return message;
+    if (message && message !== "The operation could not be completed." && message !== "The request could not be validated.") return message;
+    if (message === "The request could not be validated.") return `${fallback}：请求参数不完整，请刷新后重试。`;
   }
   return fallback;
 }
@@ -955,7 +960,7 @@ function App() {
         body: JSON.stringify({ selected_text: selectedText, review_mode: reviewMode }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "智能审稿失败");
+      if (!response.ok) throw new Error(apiErrorMessage(payload, "智能审稿失败，请刷新后重试"));
       const structuredCount = Number(payload.structured_concern_count || 0);
       const queueItems = Number(payload.queue_items || 0);
       const suggestion = String(payload.suggestion || "");
@@ -995,7 +1000,7 @@ function App() {
           }),
         });
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error?.message || "加入队列失败");
+        if (!response.ok) throw new Error(apiErrorMessage(payload, "加入队列失败，请检查当前论文和登录状态"));
         showToast("人工意见已记录到平台任务");
         await refreshJobs();
         await refreshJobWorkspace(activeReviewJob.id);
@@ -1008,7 +1013,7 @@ function App() {
         body: JSON.stringify({ selected_text: selectedText, note, page: Number(page) || 0 }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "加入队列失败");
+      if (!response.ok) throw new Error(apiErrorMessage(payload, "加入队列失败，请刷新后重试"));
       showToast(`已加入队列：${payload.concern_id}`);
       await refresh();
       navigate("queue", "/queue");
@@ -1038,7 +1043,7 @@ function App() {
           }),
         });
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error?.message || "确认失败");
+        if (!response.ok) throw new Error(apiErrorMessage(payload, "确认失败，请刷新任务后重试"));
         showToast(`已记录：${labelAction(action)}`);
         await refreshJobs();
         await refreshJobWorkspace(activeReviewJob.id);
@@ -1061,7 +1066,7 @@ function App() {
         }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || payload.result?.error_code || "确认失败");
+        if (!response.ok) throw new Error(apiErrorMessage(payload, "确认失败，请刷新任务后重试"));
       showToast(`已记录：${labelAction(action)}`);
       if (activeJobId) {
         setJobWorkspace(payload.state || null);
@@ -1076,31 +1081,36 @@ function App() {
     }
   }
 
-  async function runJobAction(job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") {
+  async function runJobAction(job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize" | "delete") {
     setBusy(true);
     try {
       if (job.platform && job.project_id) {
         const platformAction = action === "consent" ? "decisions" : action;
         const response = await fetch(
-          `/api/v1/projects/${job.project_id}/review-jobs/${job.id}/${platformAction}`,
+          action === "delete"
+            ? `/api/v1/projects/${job.project_id}/review-jobs/${job.id}`
+            : `/api/v1/projects/${job.project_id}/review-jobs/${job.id}/${platformAction}`,
           {
-            method: "POST",
+            method: action === "delete" ? "DELETE" : "POST",
             headers: {
               "Content-Type": "application/json",
               "Idempotency-Key": idempotencyKey(),
               "X-CSRF-Token": cookieValue("peerassist_csrf"),
             },
-            body: JSON.stringify(
-              action === "consent"
-                ? { decision_type: "consent", subject_id: "model", decision: "granted", expected_version: job.revision }
-                : { expected_version: job.revision },
-            ),
+            ...(action === "delete" ? {} : {
+              body: JSON.stringify(
+                action === "consent"
+                  ? { decision_type: "consent", subject_id: "model", decision: "granted", expected_version: job.revision }
+                  : { expected_version: job.revision },
+              ),
+            }),
           },
         );
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error?.message || "任务操作失败");
+        const result = response.status === 204 ? {} : await response.json();
+        if (!response.ok) throw new Error(apiErrorMessage(result, action === "delete" ? "删除失败，请刷新后重试" : "任务操作失败，请刷新后重试"));
         showToast(jobActionLabel(action));
         await refreshJobs();
+        if (action === "delete" && activeJobId === job.id) clearActivePaper();
         return;
       }
       const path =
@@ -1119,7 +1129,7 @@ function App() {
         body: JSON.stringify(payload),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "任务操作失败");
+      if (!response.ok) throw new Error(apiErrorMessage(result, "任务操作失败，请刷新后重试"));
       showToast(jobActionLabel(action));
       await refreshJobs();
       if (action === "finalize" && result.job?.status === "completed") {
@@ -1155,7 +1165,7 @@ function App() {
           body,
         });
         const uploaded = await uploadedResponse.json();
-        if (!uploadedResponse.ok) throw new Error(uploaded.error?.message || "论文上传失败");
+        if (!uploadedResponse.ok) throw new Error(apiErrorMessage(uploaded, "论文上传失败，请检查 PDF 格式和登录状态"));
         const reviewResponse = await fetch(`/api/v1/projects/${project.id}/review-jobs`, {
           method: "POST",
           headers: {
@@ -1166,7 +1176,7 @@ function App() {
           body: JSON.stringify({ paper_version_id: uploaded.version.id, mode: "full" }),
         });
         const job = await reviewResponse.json();
-        if (!reviewResponse.ok) throw new Error(job.error?.message || "审阅任务创建失败");
+        if (!reviewResponse.ok) throw new Error(apiErrorMessage(job, "审阅任务创建失败，请稍后重试"));
         showToast("论文已上传，平台审阅任务已启动");
         await refreshJobs();
         openPaperById(
@@ -1180,7 +1190,7 @@ function App() {
       body.append("file", file, file.name);
       const response = await fetch("/api/papers/upload", { method: "POST", body });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "论文上传失败");
+      if (!response.ok) throw new Error(apiErrorMessage(result, "论文上传失败，请检查文件和服务状态"));
       showToast("论文已上传，后台审稿任务已启动");
       setStreamLines((lines) => [
         ...lines.slice(-80),
@@ -1513,7 +1523,7 @@ function AdminWindow({ showToast }: { showToast: (message: string) => void }) {
     }
     const response = await fetch(path, { cache: "no-store", ...init, headers });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error?.message || payload.error || "管理操作失败");
+    if (!response.ok) throw new Error(apiErrorMessage(payload, "管理操作失败，请刷新后重试"));
     return payload;
   }, []);
 
@@ -2603,7 +2613,7 @@ function AgentWindow({
   onDraftChange: (draft: string) => void;
   reviewJobs: ReviewJob[];
   onRunReview: (selectedText?: string, reviewMode?: string) => void;
-  onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void;
+  onJobAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize" | "delete") => void;
   onUploadPaper: (file: File) => Promise<boolean>;
   onOpenPaper: (job: ReviewJob) => void;
 }) {
@@ -2741,7 +2751,7 @@ function AgentWindow({
 
 const reviewStages = ["queued", "prepare", "validate", "parse", "evidence", "profile", "plan", "deterministic", "citation", "agents", "integrate", "report", "await_confirmation", "finalize", "completed", "complete"];
 
-function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize") => void; onOpenPaper: (job: ReviewJob) => void }) {
+function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; busy: boolean; onAction: (job: ReviewJob, action: "cancel" | "retry" | "consent" | "finalize" | "delete") => void; onOpenPaper: (job: ReviewJob) => void }) {
   const current = Math.max(0, reviewStages.indexOf(job.stage));
   const canCancel = !["completed", "cancelled", "cancel_requested", "failed", "awaiting_human_confirmation"].includes(job.status);
   const timelineItems = job.timeline?.items || [];
@@ -2759,6 +2769,7 @@ function ReviewJobCard({ job, busy, onAction, onOpenPaper }: { job: ReviewJob; b
           {job.status === "blocked" && job.required_consents?.includes("model") && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "consent")}>授权模型并继续</button>}
           {canCancel && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "cancel")}>取消</button>}
           {["failed", "cancelled", "interrupted"].includes(job.status) && <button className="ghost-button" disabled={busy} type="button" onClick={() => onAction(job, "retry")}>重试</button>}
+          {job.platform && ["failed", "cancelled"].includes(job.status) && <button className="danger-button" disabled={busy} type="button" onClick={() => onAction(job, "delete")}>删除记录</button>}
           {(job.status === "awaiting_human_confirmation" || (job.status === "blocked" && job.stage === "finalize")) && <button className="primary-button" disabled={busy} type="button" onClick={() => onAction(job, "finalize")}>确认并完成报告</button>}
         </div>
       </div>
@@ -3554,6 +3565,7 @@ function jobActionLabel(value: string) {
     retry: "任务已重新排队",
     consent: "模型授权已记录",
     finalize: "最终报告已导出",
+    delete: "失败记录已删除",
   } as Record<string, string>)[value] || "任务状态已更新";
 }
 

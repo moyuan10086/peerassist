@@ -7,14 +7,16 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from peerassist.platform.models import ReviewEvent, ReviewJob
+from peerassist.platform.errors import DependencyUnavailable, NotFound
+from peerassist.platform.models import ReviewEvent, ReviewJob, TenantScope
 from peerassist.platform.services.reviews import (
     ChangeReviewJob,
     CreateReviewJob,
+    DeleteReviewJob,
     RecordReviewDecision,
     ReviewService,
     SaveReviewDraft,
@@ -252,6 +254,34 @@ def retry_review(
     idempotency_key: IdempotencyKey,
 ) -> ReviewJob:
     return _change("retry", project_id, job_id, body, request, actor, idempotency_key)
+
+
+@router.delete(
+    "/projects/{project_id}/review-jobs/{job_id}",
+    operation_id="v1_delete_review_job",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_review(
+    project_id: UUID,
+    job_id: UUID,
+    request: Request,
+    actor: ManagementActor,
+    idempotency_key: IdempotencyKey,
+) -> Response:
+    deleted, object_ids = _service(request).delete(
+        actor,
+        DeleteReviewJob(project_id, job_id, idempotency_key, request.state.request_id),
+    )
+    object_store = request.app.state.dependencies.object_store
+    scope = TenantScope(deleted.organization_id, deleted.project_id)
+    for object_id in object_ids:
+        try:
+            object_store.tombstone(scope, object_id)
+        except (DependencyUnavailable, NotFound):
+            # The database record is already gone; an unavailable object store
+            # must not make a failed task reappear in the teacher's list.
+            continue
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

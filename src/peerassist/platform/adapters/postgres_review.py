@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid5
 
-from sqlalchemy import and_, insert, or_, select, update
+from sqlalchemy import and_, delete, insert, or_, select, update
 
 from peerassist.platform.errors import NotFound, StaleVersion
 from peerassist.platform.models import (
@@ -233,6 +233,35 @@ class _ReviewJobs(_Repository):
                 lambda: self._add_attempt(job),
                 "review attempt already exists or is invalid",
             )
+
+    def delete(self, scope: TenantScope, job_id: UUID) -> None:
+        if scope.project_id is None:
+            raise NotFound()
+        job_filter = _project_filter(schema.review_jobs, scope) & (schema.review_jobs.c.id == job_id)
+        if self._one(select(schema.review_jobs).where(job_filter)) is None:
+            raise NotFound()
+
+        def child_filter(table):
+            return _project_filter(table, scope) & (table.c.job_id == job_id)
+        # Delete children first because the M1 schema deliberately keeps audit
+        # history but does not cascade ReviewJob-owned operational records.
+        for table in (
+            schema.artifacts,
+            schema.work_items,
+            schema.stage_manifests,
+            schema.report_versions,
+            schema.review_events,
+            schema.review_attempts,
+        ):
+            self.connection.execute(delete(table).where(child_filter(table)))
+        self.connection.execute(
+            delete(schema.outbox_events).where(
+                schema.outbox_events.c.organization_id == scope.organization_id,
+                schema.outbox_events.c.project_id == scope.project_id,
+                schema.outbox_events.c.aggregate_id == job_id,
+            )
+        )
+        self.connection.execute(delete(schema.review_jobs).where(job_filter))
 
     def _add_attempt(self, job: ReviewJob) -> None:
         if job.attempt <= 0:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from ..errors import Forbidden, IdempotencyConflict, NotFound, StaleVersion
+from ..errors import Forbidden, IdempotencyConflict, InvalidReviewJobState, NotFound, StaleVersion
 from ..idempotency import canonical_json_digest
 from ..models import (
     Action,
@@ -44,6 +44,14 @@ class ChangeReviewJob:
     project_id: UUID
     job_id: UUID
     expected_version: int
+    idempotency_key: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteReviewJob:
+    project_id: UUID
+    job_id: UUID
     idempotency_key: str
     request_id: str
 
@@ -150,6 +158,46 @@ class ReviewService:
 
     def retry(self, actor: Actor, request: ChangeReviewJob) -> ReviewJob:
         return self._change(actor, request, operation="retry")
+
+    def delete(self, actor: Actor, request: DeleteReviewJob) -> tuple[ReviewJob, tuple[str, ...]]:
+        with self._uow_factory(actor) as uow:
+            project = self._require_project_action(
+                uow, actor, request.project_id, Action.REVIEW_JOB_CANCEL
+            )
+            scope = project.scope
+            command = self._reserve(
+                uow,
+                actor,
+                scope,
+                "review_job.delete",
+                request.idempotency_key,
+                {"job_id": str(request.job_id)},
+            )
+            replay = self._replayed_job(uow, scope, command)
+            if replay is not None:
+                return replay, ()
+            job = uow.review_jobs.get(scope, request.job_id)
+            if job is None:
+                raise NotFound()
+            if job.status not in {"failed", "cancelled"}:
+                raise InvalidReviewJobState()
+            object_ids = tuple(
+                artifact.object.object_id
+                for artifact in uow.artifacts.list_for_job(scope, job.id)
+            )
+            self._audit(
+                uow,
+                actor,
+                scope,
+                command,
+                job,
+                request.request_id,
+                action=Action.REVIEW_JOB_CANCEL,
+            )
+            self._complete(uow, scope, command, job, 204)
+            uow.review_jobs.delete(scope, job.id)
+            uow.commit()
+            return job, object_ids
 
     def record_decision(self, actor: Actor, request: RecordReviewDecision) -> ReviewJob:
         if request.decision_type not in {"consent", "concern"}:
