@@ -845,7 +845,10 @@ function App() {
   }, [authSession.authenticated, refreshJobs]);
 
   useEffect(() => {
-    if (!activeJobId) {
+    // Wait until the authenticated job list has resolved before deciding
+    // whether a restored ID belongs to the platform or legacy API. This
+    // prevents a transient legacy 404 during page reload.
+    if (!activeJobId || !reviewJobs.some((job) => job.id === activeJobId)) {
       setJobWorkspace(null);
       return;
     }
