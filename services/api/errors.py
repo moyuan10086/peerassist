@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from peerassist.platform.errors import PlatformError
@@ -87,9 +88,18 @@ def _error_response(
     )
 
 
-async def _platform_error(request: Request, error: Exception) -> JSONResponse:
+async def _platform_error(request: Request, error: Exception) -> Response:
     assert isinstance(error, PlatformError)
     fields = error.public_fields(request_id=_request_id(request))
+    if error.code == "authentication_required" and _is_browser_navigation(request):
+        return_path = request.url.path
+        if request.url.query:
+            return_path = f"{return_path}?{request.url.query}"
+        return RedirectResponse(
+            url=f"/api/v1/auth/login?{urlencode({'return_path': return_path})}",
+            status_code=HTTPStatus.SEE_OTHER,
+            headers={"Cache-Control": "no-store"},
+        )
     return _error_response(
         status_code=_PLATFORM_STATUS.get(error.code, HTTPStatus.INTERNAL_SERVER_ERROR),
         code=str(fields["code"]),
@@ -98,6 +108,13 @@ async def _platform_error(request: Request, error: Exception) -> JSONResponse:
         details=dict(fields["details"]),
         retryable=bool(fields["retryable"]),
     )
+
+
+def _is_browser_navigation(request: Request) -> bool:
+    if request.method.upper() not in {"GET", "HEAD"}:
+        return False
+    accepted = request.headers.get("accept", "").casefold()
+    return any(item.partition(";")[0].strip() == "text/html" for item in accepted.split(","))
 
 
 async def _not_configured(request: Request, error: Exception) -> JSONResponse:

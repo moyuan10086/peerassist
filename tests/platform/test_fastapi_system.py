@@ -20,7 +20,7 @@ with warnings.catch_warnings():
     from starlette.testclient import TestClient
 
 from common.config import PlatformSettings
-from peerassist.platform.errors import DependencyUnavailable
+from peerassist.platform.errors import AuthenticationRequired, DependencyUnavailable
 
 
 def test_health_is_live_and_readiness_reports_safe_dependency_status() -> None:
@@ -180,6 +180,36 @@ def test_platform_and_unexpected_errors_have_safe_stable_envelopes() -> None:
     assert "private-token" not in combined
     assert "/srv/private" not in combined
     assert "traceback" not in combined.casefold()
+
+
+def test_browser_navigation_authentication_failure_returns_to_the_requested_page() -> None:
+    from services.api.app import create_app
+    from services.api.composition import PlatformDependencies
+
+    app = create_app(_settings(), PlatformDependencies.for_test())
+
+    def protected_file() -> None:
+        raise AuthenticationRequired()
+
+    app.add_api_route("/api/v1/_test/protected-file", protected_file)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        browser = client.get(
+            "/api/v1/_test/protected-file?disposition=inline",
+            headers={"Accept": "text/html,application/xhtml+xml"},
+            follow_redirects=False,
+        )
+        api = client.get(
+            "/api/v1/_test/protected-file?disposition=inline",
+            headers={"Accept": "application/json"},
+        )
+
+    assert browser.status_code == 303
+    assert browser.headers["location"] == (
+        "/api/v1/auth/login?return_path=%2Fapi%2Fv1%2F_test%2Fprotected-file"
+        "%3Fdisposition%3Dinline"
+    )
+    assert api.status_code == 401
+    assert api.json()["error"]["code"] == "authentication_required"
 
 
 def test_http_exceptions_preserve_only_safe_standard_headers() -> None:
