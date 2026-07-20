@@ -20,12 +20,12 @@
 - Modify: `web/peerassist-workspace/src/main.tsx`
 - Test: `tests/repository/test_frontend_review_result.py`
 
-- [ ] **Step 1: Write failing tests** for a third `review_result.json` artifact containing a version, at least one pending concern, and evidence with a page number; add a frontend contract test for hydrating `queue.items` from the artifact.
-- [ ] **Step 2: Run the focused tests** and verify they fail because the artifact and hydration do not exist.
-- [ ] **Step 3: Implement the smallest deterministic result builder** in the Worker. Preserve the existing Markdown artifacts, derive stable concern IDs from the job-independent category, and bind each concern to a short extracted PDF text anchor and page number.
-- [ ] **Step 4: Publish and read `review_result.json`** through the existing immutable artifact API; map its concerns, evidence, agent runs, and citation availability into `ConfirmationState`.
-- [ ] **Step 5: Run focused worker/platform/frontend tests** and update system artifact expectations.
-- [ ] **Step 6: Commit** `feat: hydrate platform review evidence`.
+- [x] **Step 1: Write failing tests** for a third `review_result.json` artifact containing a version, at least one pending concern, and evidence with a page number; add a frontend contract test for hydrating `queue.items` from the artifact.
+- [x] **Step 2: Run the focused tests** and verify they fail because the artifact and hydration do not exist.
+- [x] **Step 3: Implement the smallest deterministic result builder** in the Worker. Preserve the existing Markdown artifacts, derive stable concern IDs from the job-independent category, and bind each concern to a short extracted PDF text anchor and page number.
+- [x] **Step 4: Publish and read `review_result.json`** through the existing immutable artifact API; map its concerns, evidence, agent runs, and citation availability into `ConfirmationState`.
+- [x] **Step 5: Run focused worker/platform/frontend tests** and update system artifact expectations.
+- [x] **Step 6: Commit** `feat: hydrate platform review evidence` (`a48ed71`).
 
 ## Chunk 2: Server-Owned Draft And Final Report
 
