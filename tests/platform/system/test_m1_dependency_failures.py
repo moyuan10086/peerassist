@@ -61,7 +61,11 @@ def test_expired_worker_lease_recovers_without_duplicate_artifacts_or_scratch(
         return response.json() if len(response.json()) == 2 else None
 
     artifacts = reference_env.wait_until(artifacts_ready, timeout=120)
-    assert {item["logical_name"] for item in artifacts} == {"paper_summary.md", "review.md"}
+    assert {item["logical_name"] for item in artifacts} == {
+        "paper_summary.md",
+        "review.md",
+        "review_result.json",
+    }
     before_counts = reference_env.psql(
         "SELECT "
         f"(SELECT count(*) FROM artifacts WHERE job_id = '{job['id']}'),"

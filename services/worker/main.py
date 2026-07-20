@@ -102,10 +102,15 @@ class ReviewWorker:
             )
             pdf_bytes = (materialized / "inputs" / "object-000.bin").read_bytes()
             summary, report = self._document_generator(pdf_bytes)
+            review_result = build_review_result(pdf_bytes)
             outputs = materialized / "outputs"
             (outputs / "paper_summary.md").write_text(summary.rstrip() + "\n", encoding="utf-8")
             (outputs / "review.md").write_text(report.rstrip() + "\n", encoding="utf-8")
-            logical_names = ("paper_summary.md", "review.md")
+            (outputs / "review_result.json").write_text(
+                json.dumps(review_result, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            logical_names = ("paper_summary.md", "review.md", "review_result.json")
             descriptors = self._publisher.publish(
                 scope,
                 job,
@@ -227,15 +232,95 @@ def generate_review_documents(pdf_bytes: bytes) -> tuple[str, str]:
     return _fallback_documents(title, text)
 
 
+def build_review_result(pdf_bytes: bytes) -> dict[str, object]:
+    """Build a stable, evidence-bound review queue for the platform UI.
+
+    The first platform worker intentionally keeps this deterministic: these are
+    review prompts, not invented factual findings. They give the teacher a
+    concrete confirmation queue while richer Agent output is being integrated.
+    """
+    pages = _extract_pdf_pages(pdf_bytes)
+    evidence_text = next((page for page in pages if page.strip()), "未提取到可读正文，需人工查看 PDF。")
+    evidence_text = re.sub(r"\s+", " ", evidence_text).strip()[:360]
+    prompts = (
+        ("method", "核对方法描述是否足以复现", "请确认方法、数据处理和实验设置是否完整。"),
+        ("result", "核对主要结论的证据", "请确认主要结论是否有直接实验或理论证据支撑。"),
+        ("limitation", "补充局限性与适用边界", "请确认论文是否充分说明局限性、风险和适用范围。"),
+    )
+    concerns: list[dict[str, object]] = []
+    for index, (category, title, action) in enumerate(prompts, start=1):
+        evidence_id = f"platform-evidence-{category}"
+        concerns.append(
+            {
+                "id": f"platform-concern-{category}",
+                "finding_lineage_id": f"platform-lineage-{category}",
+                "finding_id": f"platform-finding-{category}",
+                "revision": 1,
+                "level": "editor_note",
+                "category": "review_prompt",
+                "title": title,
+                "impact": "这是需要审稿人对照原文确认的检查点，不代表系统已经判定论文存在问题。",
+                "benign_explanation": "当前结果由平台审稿 Worker 生成，需结合全文上下文判断。",
+                "author_action": action,
+                "status": "pending_human_confirmation",
+                "evidence": [
+                    {
+                        "id": evidence_id,
+                        "locator": f"pdf:page:{min(index, max(1, len(pages)))}",
+                        "page": min(index, max(1, len(pages))),
+                        "text": evidence_text,
+                    }
+                ],
+                "evidence_ids": [evidence_id],
+                "source_agent_ids": ["platform-reviewer"],
+                "allowed_actions": ["confirm", "rewrite", "downgrade", "delete", "mark_pending"],
+            }
+        )
+    return {
+        "schema_version": "peerassist.review_result.v1",
+        "status": "ready_for_confirmation",
+        "concerns": concerns,
+        "agent_runs": [
+            {
+                "agent_id": "platform-reviewer",
+                "status": "completed",
+                "draft_count": len(concerns),
+                "warning_count": 1,
+                "warnings": ["当前为平台审阅提示，请审稿人逐条核对原文。"],
+                "metadata": {
+                    "responsibility": "将论文审阅结果整理为可确认的检查点",
+                    "evidence_count": len(concerns),
+                    "review_engine": "platform_review_prompts",
+                    "model_status": "not_requested",
+                    "model_configured": False,
+                },
+                "drafts": concerns,
+            }
+        ],
+        "citation_audit": {
+            "available": False,
+            "warnings": ["平台引用核查结果尚未接入当前任务。"],
+        },
+    }
+
+
 def _extract_pdf(pdf_bytes: bytes) -> tuple[str, str]:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         title = str((reader.metadata or {}).get("/Title") or "").strip()
-        pages = [(page.extract_text() or "").strip() for page in reader.pages[:20]]
+        pages = _extract_pdf_pages(pdf_bytes, reader=reader)
     except Exception:
         return "", ""
     text = re.sub(r"\s+", " ", " ".join(pages)).strip()
     return title, text[:24000]
+
+
+def _extract_pdf_pages(pdf_bytes: bytes, *, reader: PdfReader | None = None) -> list[str]:
+    try:
+        source = reader or PdfReader(io.BytesIO(pdf_bytes))
+        return [(page.extract_text() or "").strip() for page in source.pages[:20]]
+    except Exception:
+        return []
 
 
 def _generate_with_model(title: str, text: str, config) -> tuple[str, str]:

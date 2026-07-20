@@ -56,7 +56,19 @@ def test_worker_claims_review_and_publishes_summary_and_report(tmp_path: Path) -
     assert {artifact.logical_name for artifact in artifacts} == {
         "paper_summary.md",
         "review.md",
+        "review_result.json",
     }
+    result_artifact = next(item for item in artifacts if item.logical_name == "review_result.json")
+    result_source = worker.artifact_service.open(
+        actors["viewer"], project.id, job.id, result_artifact.id
+    )
+    try:
+        result = json.loads(result_source.stream.read().decode("utf-8"))
+    finally:
+        result_source.stream.close()
+    assert result["schema_version"] == "peerassist.review_result.v1"
+    assert result["concerns"][0]["status"] == "pending_human_confirmation"
+    assert result["concerns"][0]["evidence"][0]["page"] == 1
     summary_artifact = next(item for item in artifacts if item.logical_name == "paper_summary.md")
     source = worker.artifact_service.open(
         actors["viewer"], project.id, job.id, summary_artifact.id

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -70,7 +71,11 @@ def test_browser_oidc_upload_worker_decision_and_persistence(
         return payload if len(payload) == 2 else None
 
     artifacts = reference_env.wait_until(completed_artifacts)
-    assert {item["logical_name"] for item in artifacts} == {"paper_summary.md", "review.md"}
+    assert {item["logical_name"] for item in artifacts} == {
+        "paper_summary.md",
+        "review.md",
+        "review_result.json",
+    }
     contents: dict[str, bytes] = {}
     for artifact in artifacts:
         url = (
@@ -86,6 +91,9 @@ def test_browser_oidc_upload_worker_decision_and_persistence(
         assert fragment.headers["Content-Range"].startswith("bytes 0-31/")
     assert "这篇论文讲了什么" in contents["paper_summary.md"].decode("utf-8")
     assert "审阅报告" in contents["review.md"].decode("utf-8")
+    result = json.loads(contents["review_result.json"].decode("utf-8"))
+    assert result["concerns"]
+    assert result["concerns"][0]["evidence"][0]["page"] >= 1
 
     decision = session.post(
         f"{base}/api/v1/projects/{scope['project_id']}/review-jobs/{job['id']}/decisions",

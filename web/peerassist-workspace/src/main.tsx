@@ -734,10 +734,23 @@ function App() {
       const artifactUrl = (id: string) => `${base}/artifacts/${id}`;
       const summaryArtifact = artifacts.find((item) => item.logical_name === "paper_summary.md");
       const reviewArtifact = artifacts.find((item) => item.logical_name === "review.md");
-      const [summaryMarkdown, reviewMarkdown] = await Promise.all([
+      const resultArtifact = artifacts.find((item) => item.logical_name === "review_result.json");
+      const [summaryMarkdown, reviewMarkdown, resultJson] = await Promise.all([
         summaryArtifact ? fetch(artifactUrl(summaryArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
         reviewArtifact ? fetch(artifactUrl(reviewArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
+        resultArtifact ? fetch(artifactUrl(resultArtifact.id)).then((response) => response.ok ? response.text() : "") : "",
       ]);
+      let structuredResult: {
+        concerns?: Concern[];
+        agent_runs?: AgentRun[];
+        citation_audit?: CitationAuditSummary;
+      } = {};
+      try {
+        const parsed = resultJson ? JSON.parse(resultJson) : {};
+        if (parsed && typeof parsed === "object") structuredResult = parsed;
+      } catch {
+        // Keep Markdown/report viewing available even if a result artifact is malformed.
+      }
       const parsedSummary = parsePaperSummaryMarkdown(summaryMarkdown);
       if (parsedSummary.available) {
         setBootstrap((current) => ({
@@ -756,6 +769,13 @@ function App() {
       }
       setLastReviewDraft(restoreReviewDraft(jobId, reviewMarkdown));
       const nextState: ConfirmationState = {
+        queue: { items: Array.isArray(structuredResult.concerns) ? structuredResult.concerns : [] },
+        pending_count: Array.isArray(structuredResult.concerns)
+          ? structuredResult.concerns.filter((item) => item.status === "pending_human_confirmation").length
+          : 0,
+        ready_for_confirmation: Boolean(structuredResult.concerns?.length),
+        agent_runs: Array.isArray(structuredResult.agent_runs) ? structuredResult.agent_runs : [],
+        citation_audit: structuredResult.citation_audit,
         artifacts: {
           ready: artifacts.length > 0,
           items: artifacts.map((item) => ({
