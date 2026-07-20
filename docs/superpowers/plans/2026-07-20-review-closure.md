@@ -46,7 +46,7 @@
 - [x] **Step 3: Add `GET/PATCH` draft routes** and replace frontend-only persistence with debounced server saves plus local fallback only while offline.
 - [x] **Step 4: Make finalize generate an immutable `final_report.md` snapshot** from the latest draft and confirmed result, then expose it through existing artifacts.
 - [x] **Step 5: Run API, worker, and frontend regression tests.**
-- [ ] **Step 6: Commit** `feat: persist review drafts and final reports`.
+- [x] **Step 6: Commit** `feat: persist review drafts and final reports` (`4090acc`); follow-up restore race fix (`b866fc8`) is deployed.
 
 ## Chunk 3: First-Use Reliability
 
