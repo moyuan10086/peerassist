@@ -26,21 +26,21 @@
 - Modify: `infrastructure/keycloak/theme/peerassist/login/login.ftl`
 - Modify: `infrastructure/keycloak/theme/peerassist/login/resources/css/login.css`
 
-- [ ] Replace the promotional header content with a compact brand row and privacy note.
-- [ ] Rebuild the stylesheet around one 460px card without column grid rules.
-- [ ] Preserve Keycloak form actions, conditional blocks, localization, errors, and registration.
-- [ ] Run `.venv/bin/python -m pytest -q tests/repository/test_keycloak_theme_contract.py` and expect all tests to pass.
+- [x] Replace the promotional header content with a compact brand row and privacy note.
+- [x] Rebuild the stylesheet around one 460px card without column grid rules.
+- [x] Preserve Keycloak form actions, conditional blocks, localization, errors, and registration.
+- [x] Run `.venv/bin/python -m pytest -q tests/repository/test_keycloak_theme_contract.py` and expect all tests to pass.
 
 ### Task 3: Deploy and visually verify
 
 **Files:**
 - Rebuild: Keycloak service image only.
 
-- [ ] Run `docker compose --project-name peerassist-m1-ref-59985de10e09f4f8 --env-file /tmp/peerassist-m1-final/environment -f infrastructure/compose/compose.m1.yml build keycloak`.
-- [ ] Run the matching `docker compose ... up -d --no-deps keycloak` command and wait for a healthy container.
-- [ ] Capture 1440x900 and 390x844 Chromium screenshots after `networkidle`.
-- [ ] Verify no console errors, overlap, clipping, or horizontal overflow.
-- [ ] Verify password visibility state and label, invalid-credential error rendering, registration navigation, English locale, and the conditional absence of remember-me for the current realm.
-- [ ] Verify successful login redirects to the workspace.
-- [ ] Review `git diff --check` and commit the change. The full repository gate is intentionally deferred because this is a Keycloak theme-only change and the user requested narrow testing; record that explicitly in the handoff.
+- [x] Run `docker compose --project-name peerassist-m1-ref-59985de10e09f4f8 --env-file /tmp/peerassist-m1-final/environment -f infrastructure/compose/compose.m1.yml build keycloak`.
+- [x] Run the matching `docker compose ... up -d --no-deps keycloak` command and wait for a healthy container.
+- [x] Capture 1440x900 and 390x844 Chromium screenshots after `networkidle`.
+- [x] Verify no console errors, overlap, clipping, or horizontal overflow.
+- [x] Verify password visibility state and label, invalid-credential error rendering, registration navigation, English locale, and the conditional absence of remember-me for the current realm.
+- [x] Verify successful login redirects to the workspace.
+- [x] Review `git diff --check` and commit the change. The full repository gate is intentionally deferred because this is a Keycloak theme-only change and the user requested narrow testing; record that explicitly in the handoff.
 - [ ] Under the user's standing synchronization instruction, update only the existing P0 checkbox in Feishu chapter ten after the repository change is approved; do not add or replace chapters.
