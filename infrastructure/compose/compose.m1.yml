@@ -18,6 +18,8 @@ x-platform-environment: &platform-environment
   PEERASSIST_PLATFORM_SCRATCH_ROOT: /var/lib/peerassist/scratch
   PEERASSIST_PLATFORM_INTERNAL_LEGACY_AUDIENCE: peerassist-legacy
   PEERASSIST_PLATFORM_LEGACY_ROOT: /var/lib/peerassist/legacy
+  PEERASSIST_MODEL_SETTINGS_PATH: /var/lib/peerassist/model-settings/model-settings.json
+  PEERASSIST_MODEL_SETTINGS_FILE_MODE: "0640"
 
 x-service-security: &service-security
   read_only: true
@@ -183,6 +185,18 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
 
+  model-settings-init:
+    image: alpine:3.22.0
+    user: "0:0"
+    entrypoint: [sh, -c]
+    command: ["chown -R 10001:10001 /var/lib/peerassist/model-settings"]
+    volumes:
+      - model-settings-data:/var/lib/peerassist/model-settings
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
   api:
     build:
       context: ../..
@@ -193,11 +207,13 @@ services:
       - "${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
     volumes:
       - ${PEERASSIST_LEGACY_ROOT:?}:/var/lib/peerassist/legacy:ro
+      - model-settings-data:/var/lib/peerassist/model-settings
     <<: *service-security
     depends_on:
       migrate: {condition: service_completed_successfully}
       keycloak: {condition: service_healthy}
       minio-bootstrap: {condition: service_completed_successfully}
+      model-settings-init: {condition: service_completed_successfully}
     healthcheck:
       test: [CMD, python, -c, "import os, urllib.request; port=os.environ['PEERASSIST_M1_PORT']; urllib.request.urlopen(f'http://127.0.0.1:{port}/api/v1/ready', timeout=2)"]
       interval: 5s
@@ -214,6 +230,7 @@ services:
       DATA_DIR: /tmp/peerassist-data
     volumes:
       - worker-scratch:/var/lib/peerassist/scratch
+      - model-settings-data:/var/lib/peerassist/model-settings:ro
       - ${PEERASSIST_BOOTSTRAP_STATE_DIR:?}:/run/peerassist:ro
       - ${PEERASSIST_LEGACY_ROOT:?}:/var/lib/peerassist/legacy:ro
     group_add:
@@ -224,9 +241,11 @@ services:
     depends_on:
       platform-bootstrap: {condition: service_completed_successfully}
       worker-scratch-init: {condition: service_completed_successfully}
+      model-settings-init: {condition: service_completed_successfully}
 
 volumes:
   postgres-data: {}
   keycloak-data: {}
   minio-data: {}
   worker-scratch: {}
+  model-settings-data: {}

@@ -132,6 +132,7 @@ def test_management_dependency_fails_closed_and_registry_is_deterministic() -> N
         ["papers"],
         ["review-jobs"],
         ["artifacts"],
+        ["model-settings"],
         ["legacy-compatibility"],
     )
 

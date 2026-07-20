@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from .artifacts import router as artifacts_router
 from .auth import router as auth_router
 from .legacy import router as legacy_router
+from .model_settings import router as model_settings_router
 from .organizations import router as organizations_router
 from .papers import router as papers_router
 from .projects import router as projects_router
@@ -23,6 +24,7 @@ def platform_routers() -> tuple[APIRouter, ...]:
         papers_router,
         review_jobs_router,
         artifacts_router,
+        model_settings_router,
         legacy_router,
     )
 

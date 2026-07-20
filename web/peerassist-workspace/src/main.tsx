@@ -463,6 +463,17 @@ function cookieValue(name: string) {
   return value ? decodeURIComponent(value) : "";
 }
 
+function apiErrorMessage(payload: unknown, fallback: string) {
+  if (!payload || typeof payload !== "object" || !("error" in payload)) return fallback;
+  const error = (payload as { error?: unknown }).error;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object" && "message" in error) {
+    const message = String((error as { message?: unknown }).message || "").trim();
+    if (message) return message;
+  }
+  return fallback;
+}
+
 async function resolvePlatformProject() {
   const organizationsResponse = await fetch("/api/v1/organizations", { cache: "no-store" });
   if (!organizationsResponse.ok) return null;
@@ -549,7 +560,10 @@ function App() {
     setModelReachable(null);
     fetch("/api/model-settings/discover", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": cookieValue("peerassist_csrf"),
+      },
       body: JSON.stringify({
         provider: bootstrap.model_config.provider,
         base_url: bootstrap.model_config.base_url,
@@ -1593,7 +1607,7 @@ function ModelSettingsDrawer({
     fetch("/api/model-settings", { cache: "no-store" })
       .then(async (response) => {
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "无法读取模型设置");
+        if (!response.ok) throw new Error(apiErrorMessage(payload, "无法读取模型设置"));
         return payload.settings as ModelSettingsView;
       })
       .then((settings) => {
@@ -1609,13 +1623,23 @@ function ModelSettingsDrawer({
   }, [open]);
 
   const pullModels = useCallback(async (silent = false) => {
-    if (!baseUrl.trim() || (!apiKey.trim() && !apiKeyConfigured)) return;
+    if (!baseUrl.trim()) {
+      if (!silent) setError("请先填写 Base URL。");
+      return;
+    }
+    if (!apiKey.trim() && !apiKeyConfigured) {
+      if (!silent) setError("请先填写 API Key。");
+      return;
+    }
     if (!silent) setLoading(true);
     setError("");
     try {
       const response = await fetch("/api/model-settings/discover", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": cookieValue("peerassist_csrf"),
+        },
         body: JSON.stringify({
           provider,
           base_url: baseUrl.trim(),
@@ -1624,7 +1648,7 @@ function ModelSettingsDrawer({
         }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "模型列表拉取失败");
+      if (!response.ok) throw new Error(apiErrorMessage(payload, "模型列表拉取失败"));
       const nextModels = Array.isArray(payload.models) ? payload.models.map(String) : [];
       setModels(nextModels);
       if (!model && nextModels.length) setModel(nextModels[0]);
@@ -1649,7 +1673,10 @@ function ModelSettingsDrawer({
     try {
       const response = await fetch("/api/model-settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": cookieValue("peerassist_csrf"),
+        },
         body: JSON.stringify({
           provider,
           base_url: baseUrl.trim(),
@@ -1658,7 +1685,7 @@ function ModelSettingsDrawer({
         }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "模型设置保存失败");
+      if (!response.ok) throw new Error(apiErrorMessage(payload, "模型设置保存失败"));
       const settings = payload.settings as ModelSettingsView;
       setModels(Array.isArray(payload.models) ? payload.models.map(String) : models);
       setApiKey("");

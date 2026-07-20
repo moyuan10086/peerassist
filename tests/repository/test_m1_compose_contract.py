@@ -13,6 +13,7 @@ def test_m1_compose_has_authoritative_api_worker_and_private_providers() -> None
     assert {
         "api", "worker", "migrate", "platform-bootstrap", "postgres",
         "keycloak", "minio-init", "minio", "minio-bootstrap", "worker-scratch-init",
+        "model-settings-init",
     } <= set(services)
     assert services["api"]["ports"] == [
         "${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
@@ -29,6 +30,20 @@ def test_m1_compose_has_authoritative_api_worker_and_private_providers() -> None
         "chown -R 10002:10002 /var/lib/peerassist/scratch"
     ]
     assert services["worker"]["depends_on"]["worker-scratch-init"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert services["model-settings-init"]["command"] == [
+        "chown -R 10001:10001 /var/lib/peerassist/model-settings"
+    ]
+    assert services["api"]["environment"]["PEERASSIST_MODEL_SETTINGS_PATH"] == (
+        "/var/lib/peerassist/model-settings/model-settings.json"
+    )
+    assert services["worker"]["environment"]["PEERASSIST_MODEL_SETTINGS_PATH"] == (
+        "/var/lib/peerassist/model-settings/model-settings.json"
+    )
+    assert "model-settings-data:/var/lib/peerassist/model-settings" in services["api"]["volumes"]
+    assert "model-settings-data:/var/lib/peerassist/model-settings:ro" in services["worker"]["volumes"]
+    assert services["api"]["depends_on"]["model-settings-init"]["condition"] == (
         "service_completed_successfully"
     )
     assert any(value.endswith(":/opt/keycloak/data") for value in services["keycloak"]["volumes"])

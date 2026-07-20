@@ -118,20 +118,30 @@ def save_model_settings(
     }
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    file_mode = _settings_file_mode()
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, file_mode)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, file_mode)
         os.replace(temporary, target)
-        os.chmod(target, 0o600)
+        os.chmod(target, file_mode)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
     return stored
+
+
+def _settings_file_mode() -> int:
+    value = os.getenv("PEERASSIST_MODEL_SETTINGS_FILE_MODE", "0600").strip()
+    try:
+        mode = int(value, 8)
+    except ValueError:
+        return 0o600
+    return mode if mode in {0o600, 0o640} else 0o600
 
 
 def discover_models(
