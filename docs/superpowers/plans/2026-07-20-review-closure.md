@@ -83,3 +83,13 @@
 - `python scripts/verify_repository.py fast` is green, including Ruff import ordering.
 - Real Chromium validates upload → summary → evidence concern → human decision → final report download.
 - The Feishu project document records each completed chunk and the remaining risks.
+
+## Closure Update (2026-07-20, revision 218)
+
+- [x] Translate generic platform errors into actionable Chinese UI messages.
+- [x] Add deletion API and task-card action for failed/cancelled review jobs, including dependent database and object-store cleanup.
+- [x] Rebuild and deploy the public HTTP Compose API on port `8766`.
+- [x] Verify with Chromium over `http://101.47.158.17:8766`: login, non-secure cookies, deletion `204`, list removal, no page errors or failed HTTP responses.
+- [x] Record the result in the Feishu project document.
+
+Remaining boundary: HTTP is intentionally retained for the current demo/public test endpoint; production use still requires TLS and secure cookies.

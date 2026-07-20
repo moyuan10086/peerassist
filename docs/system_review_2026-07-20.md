@@ -128,3 +128,15 @@ Keycloak 日志明确提示非安全上下文，Cookie 不会按 HTTPS 方式保
 - 浏览器：公网 Chromium 验证登录、管理员入口、模型设置、PDF 上传和 PDF 阅读；未登录访问 `/agent` 会回到 `/login`，无旧接口请求。
 - 工程统计：`.venv/bin/pygount`，已排除依赖、缓存和构建目录。
 - 门禁：`.venv/bin/python scripts/verify_repository.py fast` 当前在 Ruff 阶段失败，错误为 `tests/platform/test_model_settings_api.py` 和 `tests/repository/test_frontend_draft_editor.py` 的 I001 import 排序。
+
+## 十、2026-07-20 HTTP 与失败任务删除修复
+
+本轮针对公网 HTTP 下的通用英文错误，以及失败/取消审稿记录无法清理的问题完成修复：
+
+- `public_base_url` 使用 `http://` 时，登录 Cookie 不设置 `Secure`，HTTP 演示地址可以完成登录；这只适合测试，不适合承载真实未发表稿件。
+- 前端统一把 `The operation could not be completed.` 和 `The request could not be validated.` 转成中文、带下一步动作的提示，不再把平台兜底英文直接展示给老师。
+- 新增 `DELETE /api/v1/projects/{project_id}/review-jobs/{job_id}`。仅 `failed` 或 `cancelled` 任务可删除；运行中、等待授权或已完成任务会保留并返回明确状态错误。
+- 删除会清理任务事件、工作项、产物、阶段清单、报告版本、审稿尝试、Outbox 记录及对象存储任务产物，避免失败记录和孤儿文件长期堆积。
+- 任务卡为失败/取消的 v1 任务显示“删除记录”；操作使用 CSRF 与 `Idempotency-Key`，成功返回 `204` 并刷新列表。
+
+公网 `http://101.47.158.17:8766/` 的 Chromium 验证结果：登录成功，`peerassist_session` 与 CSRF Cookie 的 `secure=false`；选取一个 `cancelled` 任务删除返回 `204`，随后任务不再出现在列表；页面无 4xx/5xx 和 page error。第一次手工 API 复现的 `422` 是验证脚本漏传 `Idempotency-Key`，前端实现已正确传递该请求头。
