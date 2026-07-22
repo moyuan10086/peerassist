@@ -57,10 +57,10 @@
 - Test: `tests/repository/test_frontend_project_selection.py`
 - Test: `tests/repository/test_frontend_error_messages.py`
 
-- [ ] **Step 1: Add project selection and an empty-project onboarding state.**
-- [ ] **Step 2: Replace generic upload/request errors with Chinese cause plus next action.**
-- [ ] **Step 3: Add a browser smoke covering first login, project selection, upload, and returning to the same paper after refresh.**
-- [ ] **Step 4: Commit** `fix: improve first review onboarding`.
+- [x] **Step 1: Add project selection and an empty-project onboarding state.**
+- [x] **Step 2: Replace generic upload/request errors with Chinese cause plus next action.**
+- [x] **Step 3: Add a browser smoke covering first login, project selection, upload validation, and returning to the same paper after refresh.**
+- [x] **Step 4: Commit** `fix: improve first review onboarding`.
 
 ## Chunk 4: Multi-Project Worker And Production Boundary
 
@@ -93,3 +93,14 @@
 - [x] Record the result in the Feishu project document.
 
 Remaining boundary: HTTP is intentionally retained for the current demo/public test endpoint; production use still requires TLS and secure cookies.
+
+## First-Use Reliability Update (2026-07-22, revision 219)
+
+- [x] Persist an explicit `peerassist.activeProjectId` and expose a project selector in the workspace header.
+- [x] Use the selected project for jobs, papers and uploads instead of silently taking the first organization/project.
+- [x] Add separate empty-project guidance for administrators and ordinary teachers.
+- [x] Validate PDF extension and the 100 MB limit before upload.
+- [x] Map stable platform error codes to actionable Chinese messages.
+- [x] Preserve the active paper across transient source-probe failures; only 404/410 clears the saved context.
+- [x] Add and run `scripts/verify_first_use_browser.py` against the public HTTP deployment.
+- [x] Expand the root ext4 filesystem online from 40 GB to 49 GB after the cloud disk was enlarged; no reboot was required.

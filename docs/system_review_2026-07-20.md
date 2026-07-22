@@ -140,3 +140,16 @@ Keycloak 日志明确提示非安全上下文，Cookie 不会按 HTTPS 方式保
 - 任务卡为失败/取消的 v1 任务显示“删除记录”；操作使用 CSRF 与 `Idempotency-Key`，成功返回 `204` 并刷新列表。
 
 公网 `http://101.47.158.17:8766/` 的 Chromium 验证结果：登录成功，`peerassist_session` 与 CSRF Cookie 的 `secure=false`；选取一个 `cancelled` 任务删除返回 `204`，随后任务不再出现在列表；页面无 4xx/5xx 和 page error。第一次手工 API 复现的 `422` 是验证脚本漏传 `Idempotency-Key`，前端实现已正确传递该请求头。
+
+## 十一、2026-07-22 首次使用可靠性
+
+本轮完成老师首次进入系统后的项目上下文和上传入口修复：
+
+- 顶部新增当前审稿项目选择器，选择结果写入 `peerassist.activeProjectId`；任务列表、论文列表和上传均使用显式选中的项目，不再默认取第一个组织的第一个项目。
+- 没有项目时显示独立引导。管理员进入“创建第一个项目”，普通老师看到“联系管理员将你加入项目”，不再把普通账号错误引导到无权限页面。
+- 上传前校验 `.pdf` 扩展名和 100 MB 上限，避免无效文件上传到后端后才得到模糊错误。
+- 前端按 `invalid_upload`、`payload_too_large`、`authentication_required`、`forbidden`、`dependency_unavailable`、`stale_version` 等稳定错误码给出中文原因与下一步。
+- 论文上下文探测只在服务端明确返回 404/410 时清除；临时网络失败不再删除本地论文、任务和 PDF 地址，解决刷新后偶发回到空白工作台的问题。
+- 新增 `scripts/verify_first_use_browser.py`，公网 Chromium 已验证登录、项目选择持久化、非 PDF 拦截、打开论文和刷新恢复，且无 4xx/5xx、英文兜底错误或 page error。
+
+部署期间确认云盘已经扩至 50 GB，但根分区仍为 39.8 GB。已在线执行分区与 ext4 扩容，根文件系统现约 49 GB、可用空间约 13 GB，无需重启；Keycloak、MinIO、PostgreSQL、API 和 Worker 均恢复运行。

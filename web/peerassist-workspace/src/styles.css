@@ -2843,6 +2843,82 @@ select:focus-visible {
   color: #245c51;
 }
 
+.project-switcher {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--accent);
+  padding: 0 9px;
+}
+
+.project-switcher select {
+  max-width: 230px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.project-onboarding {
+  min-height: min(560px, calc(100vh - 150px));
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.project-onboarding h2,
+.project-onboarding p {
+  margin: 0;
+}
+
+.project-onboarding h2 {
+  font-size: 24px;
+  font-weight: 680;
+}
+
+.project-onboarding > p:not(.eyebrow) {
+  max-width: 480px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.project-onboarding-icon {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: 18px;
+  background: #e6f2ed;
+  color: var(--accent);
+}
+
+.project-onboarding-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f4f7f5;
+  color: #50605c;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 720;
+}
+
 .status-strip {
   gap: 0;
   border: 1px solid var(--line);
@@ -3090,6 +3166,15 @@ select:focus-visible {
   .topbar-actions .ghost-button,
   .topbar-actions .primary-button {
     flex: 1 1 145px;
+  }
+
+  .project-switcher {
+    width: 100%;
+  }
+
+  .project-switcher select {
+    width: 100%;
+    max-width: none;
   }
 
   .status-strip {

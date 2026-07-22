@@ -397,6 +397,7 @@ type AuthSession = {
 };
 type OrganizationRow = { id: string; slug: string; name: string; status: string; version: number };
 type ProjectRow = { id: string; organization_id: string; name: string; status: string; version: number };
+type ProjectOption = ProjectRow & { organization_name: string };
 type MembershipRow = {
   id: string;
   organization_id: string;
@@ -466,18 +467,33 @@ function cookieValue(name: string) {
 function apiErrorMessage(payload: unknown, fallback: string) {
   if (!payload || typeof payload !== "object" || !("error" in payload)) return fallback;
   const error = (payload as { error?: unknown }).error;
+  const messages: Record<string, string> = {
+    invalid_upload: "只支持有效的 PDF 文件，请重新选择论文。",
+    payload_too_large: "PDF 文件超过 100 MB，请压缩后重新上传。",
+    authentication_required: "登录状态已失效，请重新登录。",
+    forbidden: "当前账号没有执行此操作的权限，请联系管理员。",
+    dependency_unavailable: "服务暂时不可用，请稍后重试。",
+    stale_version: "任务已被其他操作更新，请刷新后重试。",
+    idempotency_conflict: "该操作已经提交，请刷新页面查看最新结果。",
+    not_found: "目标内容不存在或已被删除，请刷新页面。",
+  };
   if (typeof error === "string" && error.trim()) {
     if (error === "The operation could not be completed.") return fallback;
     if (error === "The request could not be validated.") return `${fallback}：请求参数不完整，请刷新后重试。`;
     return error;
   }
-  if (error && typeof error === "object" && "message" in error) {
+  if (error && typeof error === "object") {
+    const code = String((error as { code?: unknown }).code || "").trim();
+    if (messages[code]) return messages[code];
     const message = String((error as { message?: unknown }).message || "").trim();
     if (message && message !== "The operation could not be completed." && message !== "The request could not be validated.") return message;
     if (message === "The request could not be validated.") return `${fallback}：请求参数不完整，请刷新后重试。`;
   }
   return fallback;
 }
+
+const ACTIVE_PROJECT_STORAGE_KEY = "peerassist.activeProjectId";
+const MAX_PDF_SIZE_BYTES = 100 * 1024 * 1024;
 
 function idempotencyKey() {
   const webCrypto = globalThis.crypto;
@@ -494,17 +510,22 @@ function idempotencyKey() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-async function resolvePlatformProject() {
+async function listPlatformProjects(): Promise<ProjectOption[]> {
   const organizationsResponse = await fetch("/api/v1/organizations", { cache: "no-store" });
   if (organizationsResponse.status === 401) throw new Error("AUTH_REQUIRED");
-  if (!organizationsResponse.ok) return null;
+  if (!organizationsResponse.ok) {
+    const payload = await organizationsResponse.json().catch(() => ({}));
+    throw new Error(apiErrorMessage(payload, "无法读取当前账号的项目，请刷新后重试。"));
+  }
   const organizations = await organizationsResponse.json() as OrganizationRow[];
-  if (!organizations.length) return null;
-  const projectsResponse = await fetch(`/api/v1/organizations/${organizations[0].id}/projects`, { cache: "no-store" });
-  if (projectsResponse.status === 401) throw new Error("AUTH_REQUIRED");
-  if (!projectsResponse.ok) return null;
-  const projects = await projectsResponse.json() as ProjectRow[];
-  return projects[0] || null;
+  const projectGroups = await Promise.all(organizations.map(async (organization) => {
+    const response = await fetch(`/api/v1/organizations/${organization.id}/projects`, { cache: "no-store" });
+    if (response.status === 401) throw new Error("AUTH_REQUIRED");
+    if (!response.ok) return [];
+    const projects = await response.json() as ProjectRow[];
+    return projects.map((project) => ({ ...project, organization_name: organization.name }));
+  }));
+  return projectGroups.flat().filter((project) => project.status === "active");
 }
 
 function App() {
@@ -525,6 +546,9 @@ function App() {
     is_admin: false,
   });
   const [reviewJobs, setReviewJobs] = useState<ReviewJob[]>([]);
+  const [platformProjects, setPlatformProjects] = useState<ProjectOption[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState(() => window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || "");
+  const [projectsReady, setProjectsReady] = useState(false);
   const [activePaperId, setActivePaperId] = useState(() => window.localStorage.getItem("peerassist.activePaperId") || "");
   const [activeJobId, setActiveJobId] = useState(() => window.localStorage.getItem("peerassist.activeJobId") || "");
   const [activeContextReady, setActiveContextReady] = useState(() => !window.localStorage.getItem("peerassist.activePaperId"));
@@ -559,6 +583,7 @@ function App() {
     : "模型未配置";
   const activeReviewJob = reviewJobs.find((job) => job.id === activeJobId)
     || reviewJobs.find((job) => job.paper_id === activePaperId);
+  const selectedProject = platformProjects.find((project) => project.id === selectedProjectId) || null;
   const hasActivePaper = Boolean(activeContextReady && activePaperId);
   const draftStorageKey = reviewDraftStorageKey(activeJobId);
 
@@ -573,6 +598,14 @@ function App() {
     setActiveContextReady(true);
     setBootstrap((current) => ({ ...current, paper_overview: undefined }));
   }, []);
+
+  const chooseProject = useCallback((projectId: string) => {
+    if (!projectId || projectId === selectedProjectId) return;
+    window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectId);
+    setSelectedProjectId(projectId);
+    setReviewJobs([]);
+    clearActivePaper();
+  }, [clearActivePaper, selectedProjectId]);
 
   useEffect(() => {
     if (!modelConfigured || !bootstrap.model_config.base_url || !bootstrap.model_config.model) {
@@ -619,15 +652,13 @@ function App() {
     fetch(activePdfUrl, { method: "HEAD", cache: "no-store" })
       .then((response) => {
         if (cancelled) return;
-        if (!response.ok) {
+        if ([404, 410].includes(response.status)) {
           clearActivePaper();
           return;
         }
         setActiveContextReady(true);
       })
-      .catch(() => {
-        if (!cancelled) clearActivePaper();
-      });
+      .catch(() => setActiveContextReady(true));
     return () => {
       cancelled = true;
     };
@@ -652,16 +683,7 @@ function App() {
   }, [authSession.authenticated, bootstrap]);
 
   const refreshJobs = useCallback(async () => {
-    let project: ProjectRow | null = null;
-    try {
-      project = await resolvePlatformProject();
-    } catch (cause) {
-      if (cause instanceof Error && cause.message === "AUTH_REQUIRED") {
-        setAuthSession({ authenticated: false, user: null, available: true, roles: [], is_admin: false });
-        setReviewJobs([]);
-        return [];
-      }
-    }
+    const project = selectedProject;
     if (project) {
       const [jobsResponse, papersResponse] = await Promise.all([
         fetch(`/api/v1/projects/${project.id}/review-jobs`, { cache: "no-store" }),
@@ -699,7 +721,7 @@ function App() {
     jobs.sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
     setReviewJobs(jobs);
     return jobs;
-  }, [authSession.authenticated]);
+  }, [authSession.authenticated, selectedProject]);
 
   const refreshSession = useCallback(async () => {
     try {
@@ -831,6 +853,41 @@ function App() {
   useEffect(() => {
     void refreshSession();
   }, [refreshSession]);
+
+  useEffect(() => {
+    if (!authSession.authenticated) {
+      setPlatformProjects([]);
+      setProjectsReady(false);
+      return;
+    }
+    let cancelled = false;
+    setProjectsReady(false);
+    listPlatformProjects()
+      .then((projects) => {
+        if (cancelled) return;
+        setPlatformProjects(projects);
+        const stored = window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || "";
+        const nextProjectId = projects.some((project) => project.id === stored) ? stored : projects[0]?.id || "";
+        setSelectedProjectId(nextProjectId);
+        if (nextProjectId) window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextProjectId);
+        else window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        if (cause instanceof Error && cause.message === "AUTH_REQUIRED") {
+          setAuthSession({ authenticated: false, user: null, available: true, roles: [], is_admin: false });
+          return;
+        }
+        showToast(cause instanceof Error ? cause.message : "无法读取当前账号的项目");
+        setPlatformProjects([]);
+      })
+      .finally(() => {
+        if (!cancelled) setProjectsReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authSession.authenticated, showToast]);
 
   useEffect(() => {
     if (!authSession.authenticated) {
@@ -1148,12 +1205,20 @@ function App() {
   }
 
   async function uploadPaper(file: File) {
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      showToast("请选择 PDF 文件，Word 或图片暂不支持。");
+      return false;
+    }
+    if (file.size > MAX_PDF_SIZE_BYTES) {
+      showToast("PDF 文件超过 100 MB，请压缩后重新上传。");
+      return false;
+    }
     setBusy(true);
     setStreamLines((lines) => [...lines.slice(-80), `upload: 正在上传 ${file.name}`]);
     try {
       if (authSession.authenticated) {
-        const project = await resolvePlatformProject();
-        if (!project) throw new Error("当前账号还没有可用项目，请先到成员管理创建项目");
+        const project = selectedProject;
+        if (!project) throw new Error("当前账号还没有可用项目，请联系管理员将你加入项目。");
         const body = new FormData();
         body.append("file", file, file.name);
         const uploadedResponse = await fetch(`/api/v1/projects/${project.id}/papers`, {
@@ -1289,6 +1354,16 @@ function App() {
           <div className="topbar-actions">
             {authSession.authenticated ? (
               <>
+                {platformProjects.length > 0 && (
+                  <label className="project-switcher">
+                    <Building2 size={15} />
+                    <select aria-label="当前审稿项目" value={selectedProjectId} onChange={(event) => chooseProject(event.target.value)}>
+                      {platformProjects.map((project) => (
+                        <option value={project.id} key={project.id}>{project.organization_name} / {project.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {authSession.is_admin && <button
                   className="ghost-button"
                   type="button"
@@ -1328,7 +1403,11 @@ function App() {
 
         {activeWindow === "paper" && (authSession.authenticated ? (
           <>
-            {hasActivePaper ? (
+            {!projectsReady ? (
+              <WorkspaceLoading label="正在读取你的审稿项目" />
+            ) : !selectedProject ? (
+              <ProjectOnboarding isAdmin={authSession.is_admin} onOpenAdmin={() => navigate("admin", "/admin")} />
+            ) : hasActivePaper ? (
               <>
                 <PaperOverviewPanel overview={bootstrap.paper_overview} jobStatus={activeReviewJob?.status} />
                 <PaperWindow
@@ -1351,7 +1430,9 @@ function App() {
         ) : <AccessGate title="论文内容已锁定" detail="登录并获得项目成员授权后，才能查看论文、摘要和审稿证据。" />)}
         {activeWindow === "agent" && (
           authSession.authenticated ?
-          <AgentWindow
+          !projectsReady ? <WorkspaceLoading label="正在读取你的审稿项目" /> : !selectedProject ? (
+            <ProjectOnboarding isAdmin={authSession.is_admin} onOpenAdmin={() => navigate("admin", "/admin")} />
+          ) : <AgentWindow
             busy={busy}
             model={modelDisplay}
             modelEnabled={modelEnabled}
@@ -1415,6 +1496,32 @@ function AccessGate({ title, detail }: { title: string; detail: string }) {
       <button className="primary-button" type="button" onClick={() => window.location.assign("/api/v1/auth/login?return_path=/paper")}>
         <LogIn size={16} /> 登录后继续
       </button>
+    </section>
+  );
+}
+
+function WorkspaceLoading({ label }: { label: string }) {
+  return (
+    <section className="project-onboarding" role="status">
+      <Loader2 className="spin" size={30} />
+      <h2>{label}</h2>
+      <p>马上就好。</p>
+    </section>
+  );
+}
+
+function ProjectOnboarding({ isAdmin, onOpenAdmin }: { isAdmin: boolean; onOpenAdmin: () => void }) {
+  return (
+    <section className="project-onboarding" role="status">
+      <span className="project-onboarding-icon"><Building2 size={30} /></span>
+      <p className="eyebrow">开始第一次智能审稿</p>
+      <h2>还没有可用的审稿项目</h2>
+      <p>{isAdmin ? "先创建一个项目，用来保存论文、审稿意见和最终报告。" : "联系管理员将你加入项目，加入后即可上传论文开始审稿。"}</p>
+      {isAdmin ? (
+        <button className="primary-button" type="button" onClick={onOpenAdmin}><Plus size={16} /> 创建第一个项目</button>
+      ) : (
+        <div className="project-onboarding-tip"><Users size={16} /> 联系管理员将你加入项目</div>
+      )}
     </section>
   );
 }
