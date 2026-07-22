@@ -655,13 +655,26 @@ class _WorkItems:
         )
 
     def claim(self, scope: TenantScope, worker_id: str, lease_seconds: int) -> WorkItem | None:
+        return self._claim(scope, worker_id, lease_seconds)
+
+    def claim_next(self, worker_id: str, lease_seconds: int) -> WorkItem | None:
+        return self._claim(None, worker_id, lease_seconds)
+
+    def _claim(
+        self,
+        scope: TenantScope | None,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> WorkItem | None:
+        if lease_seconds <= 0 or not worker_id.strip():
+            return None
         now = self._clock()
         for item in sorted(
             self._state.work_items.values(),
             key=lambda value: (value.available_at, value.created_at, value.id.int),
         ):
             if (
-                not _project_scope_matches(scope, item.organization_id, item.project_id)
+                (scope is not None and not _project_scope_matches(scope, item.organization_id, item.project_id))
                 or item.dead_lettered_at is not None
             ):
                 continue

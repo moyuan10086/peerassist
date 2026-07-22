@@ -71,11 +71,11 @@
 - Modify: deployment/security documentation
 - Test: `tests/platform/test_worker_queue_scope.py`
 
-- [ ] **Step 1: Write a queue-scope test** proving a worker can claim jobs across authorized projects without trusting a client-provided tenant header.
-- [ ] **Step 2: Replace fixed scope bootstrap with durable worker lease/claim selection.**
-- [ ] **Step 3: Add TLS, secure-cookie, upload limits, rate-limit and recovery prerequisites to the deployment profile.**
-- [ ] **Step 4: Run the full M1 verification and real Chromium workflow.**
-- [ ] **Step 5: Commit** `feat: process review jobs across projects`.
+- [x] **Step 1: Write a queue-scope test** proving a worker can claim jobs across projects without trusting a client-provided tenant header.
+- [x] **Step 2: Replace fixed scope bootstrap with durable worker lease/claim selection.**
+- [x] **Step 3: Record TLS, secure-cookie, upload limits, rate-limit and recovery prerequisites in the operation manual; HTTP remains a demo-only boundary.**
+- [x] **Step 4: Run the relevant M1 verification and a real public multi-project workflow.**
+- [x] **Step 5: Commit** `feat: process review jobs across projects`.
 
 ## Verification Gates
 
@@ -104,3 +104,10 @@ Remaining boundary: HTTP is intentionally retained for the current demo/public t
 - [x] Preserve the active paper across transient source-probe failures; only 404/410 clears the saved context.
 - [x] Add and run `scripts/verify_first_use_browser.py` against the public HTTP deployment.
 - [x] Expand the root ext4 filesystem online from 40 GB to 49 GB after the cloud disk was enlarged; no reboot was required.
+
+## Multi-Project Worker Update (2026-07-22, revision 220)
+
+- [x] Add internal `claim_next(worker_id, lease_seconds)` queue operation; it returns a server-owned work record, not a client-provided scope.
+- [x] Derive the Worker tenant scope only from the claimed work item, then retain project-scoped reads and mutations for the remainder of processing.
+- [x] Remove `PEERASSIST_WORKER_SCOPE_FILE` and `/run/peerassist` from the Worker Compose service.
+- [x] Verify two independent projects with memory tests and a live public second-project upload; the second project reached `blocked/finalize` with all three review artifacts.

@@ -226,12 +226,10 @@ services:
       dockerfile: infrastructure/compose/Dockerfile.worker
     environment:
       <<: *platform-environment
-      PEERASSIST_WORKER_SCOPE_FILE: /run/peerassist/scope.json
       DATA_DIR: /tmp/peerassist-data
     volumes:
       - worker-scratch:/var/lib/peerassist/scratch
       - model-settings-data:/var/lib/peerassist/model-settings:ro
-      - ${PEERASSIST_BOOTSTRAP_STATE_DIR:?}:/run/peerassist:ro
       - ${PEERASSIST_LEGACY_ROOT:?}:/var/lib/peerassist/legacy:ro
     group_add:
       - "10001"

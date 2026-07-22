@@ -187,21 +187,36 @@ class _WorkItems(_Repository):
         return None if row is None else _work_item(row)
 
     def claim(self, scope: TenantScope, worker_id: str, lease_seconds: int) -> WorkItem | None:
-        if scope.project_id is None or lease_seconds <= 0 or not worker_id.strip():
+        if scope.project_id is None:
+            return None
+        return self._claim(scope, worker_id, lease_seconds)
+
+    def claim_next(self, worker_id: str, lease_seconds: int) -> WorkItem | None:
+        return self._claim(None, worker_id, lease_seconds)
+
+    def _claim(
+        self,
+        scope: TenantScope | None,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> WorkItem | None:
+        if lease_seconds <= 0 or not worker_id.strip():
             return None
         now = self._clock()
         while True:
+            conditions = [
+                schema.work_items.c.dead_lettered_at.is_(None),
+                schema.work_items.c.available_at <= now,
+                or_(
+                    schema.work_items.c.lease_owner.is_(None),
+                    schema.work_items.c.lease_expires_at <= now,
+                ),
+            ]
+            if scope is not None:
+                conditions.insert(0, _project_filter(schema.work_items, scope))
             row = self._one(
                 select(schema.work_items)
-                .where(
-                    _project_filter(schema.work_items, scope),
-                    schema.work_items.c.dead_lettered_at.is_(None),
-                    schema.work_items.c.available_at <= now,
-                    or_(
-                        schema.work_items.c.lease_owner.is_(None),
-                        schema.work_items.c.lease_expires_at <= now,
-                    ),
-                )
+                .where(*conditions)
                 .order_by(schema.work_items.c.available_at, schema.work_items.c.created_at, schema.work_items.c.id)
                 .limit(1)
                 .with_for_update(skip_locked=True)
@@ -209,10 +224,14 @@ class _WorkItems(_Repository):
             if row is None:
                 return None
             item = _work_item(row)
+            item_scope = TenantScope(item.organization_id, item.project_id)
             if item.lease_expires_at is not None and item.attempt_count >= item.max_attempts:
                 self.connection.execute(
                     update(schema.work_items)
-                    .where(_project_filter(schema.work_items, scope), schema.work_items.c.id == item.id)
+                    .where(
+                        _project_filter(schema.work_items, item_scope),
+                        schema.work_items.c.id == item.id,
+                    )
                     .values(
                         lease_owner=None, lease_expires_at=None, dead_lettered_at=now,
                         safe_error_code="lease_expired", updated_at=now,
@@ -221,7 +240,10 @@ class _WorkItems(_Repository):
                 continue
             result = self.connection.execute(
                 update(schema.work_items)
-                .where(_project_filter(schema.work_items, scope), schema.work_items.c.id == item.id)
+                .where(
+                    _project_filter(schema.work_items, item_scope),
+                    schema.work_items.c.id == item.id,
+                )
                 .values(
                     attempt_count=item.attempt_count + 1, lease_owner=worker_id,
                     lease_expires_at=now + timedelta(seconds=lease_seconds), updated_at=now,

@@ -153,3 +153,11 @@ Keycloak 日志明确提示非安全上下文，Cookie 不会按 HTTPS 方式保
 - 新增 `scripts/verify_first_use_browser.py`，公网 Chromium 已验证登录、项目选择持久化、非 PDF 拦截、打开论文和刷新恢复，且无 4xx/5xx、英文兜底错误或 page error。
 
 部署期间确认云盘已经扩至 50 GB，但根分区仍为 39.8 GB。已在线执行分区与 ext4 扩容，根文件系统现约 49 GB、可用空间约 13 GB，无需重启；Keycloak、MinIO、PostgreSQL、API 和 Worker 均恢复运行。
+
+## 十二、2026-07-22 多项目 Worker 队列
+
+原实现把 Worker 固定在 bootstrap 写入的单个 organization/project scope。管理员之后创建项目时，任务可以成功入队，但 Worker 永远看不到它们，表现为一直 `queued`。
+
+本轮新增仅供服务端 Worker 使用的 `claim_next(worker_id, lease_seconds)`：数据库在全局待处理工作项中原子领取一项，再由 Worker 从该记录的 `organization_id` 和 `project_id` 派生后续所有读写范围。客户端请求不会传入这个 scope，且 `renew`、`complete`、`fail`、论文读取、产物发布仍保持项目级过滤。因此解决了多项目处理阻塞，同时没有把项目选择权暴露给浏览器。
+
+Compose Worker 已移除 `PEERASSIST_WORKER_SCOPE_FILE` 和 `/run/peerassist` 只读挂载。公网验证新建“多项目审稿验证”项目后上传 PDF、创建任务，任务从 `queued/queued` 自动进入 `blocked/finalize`，并产生 `paper_summary.md`、`review.md`、`review_result.json`。TLS、Secure Cookie、限流、上传安全扫描与恢复演练仍是生产上线前必做项；当前 HTTP 地址继续只用于演示。

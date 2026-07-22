@@ -202,7 +202,7 @@ def test_project_repository_sql_ast_uses_tenant_predicates_for_every_resource_pa
         _ReviewJobs: {"get", "list", "add", "save", "append_event", "list_events"},
         _Artifacts: {"get", "list_for_job", "add"},
         _LegacyRegistrations: {"get", "add"},
-        _WorkItems: {"enqueue", "get", "claim", "renew", "complete", "fail", "_active"},
+        _WorkItems: {"enqueue", "get", "_claim", "renew", "complete", "fail", "_active"},
         _Commands: {"get", "_reserve", "complete"},
         _Outbox: {"append", "claim_batch", "mark_published"},
         _Audit: {"append", "list"},

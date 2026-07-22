@@ -80,6 +80,35 @@ def test_work_dedupe_claim_renew_ack_and_nack(uow_factory, clock) -> None:
         assert uow.work_items.claim(scope, "worker-3", 30) is None
 
 
+def test_worker_can_claim_the_next_item_without_a_client_supplied_scope(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    first_scope = TenantScope(uuid4(), uuid4())
+    second_scope = TenantScope(uuid4(), uuid4())
+    first = work(first_scope, clock())
+    second = work(second_scope, clock())
+    with uow_factory(principal) as uow:
+        uow.work_items.enqueue(first_scope, first)
+        uow.work_items.enqueue(second_scope, second)
+        uow.commit()
+
+    claimed: list[WorkItem] = []
+    for index in range(2):
+        with uow_factory(principal) as uow:
+            item = uow.work_items.claim_next(f"global-worker-{index}", 30)
+            assert item is not None
+            claimed.append(item)
+            uow.commit()
+
+    assert {item.id for item in claimed} == {first.id, second.id}
+    assert {
+        TenantScope(item.organization_id, item.project_id)
+        for item in claimed
+    } == {first_scope, second_scope}
+
+
 def test_three_lease_expiries_dead_letter_work(uow_factory, clock) -> None:
     principal = actor()
     scope = TenantScope(uuid4(), uuid4())

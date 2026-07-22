@@ -71,9 +71,8 @@ def test_m1_compose_has_authoritative_api_worker_and_private_providers() -> None
     assert services["api"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
     assert services["platform-bootstrap"]["depends_on"]["api"]["condition"] == "service_healthy"
     assert services["worker"]["depends_on"]["platform-bootstrap"]["condition"] == "service_completed_successfully"
-    assert services["worker"]["environment"]["PEERASSIST_WORKER_SCOPE_FILE"] == (
-        "/run/peerassist/scope.json"
-    )
+    assert "PEERASSIST_WORKER_SCOPE_FILE" not in services["worker"]["environment"]
+    assert all("/run/peerassist" not in value for value in services["worker"]["volumes"])
     assert services["worker"]["environment"]["DATA_DIR"] == "/tmp/peerassist-data"
     assert services["api"]["environment"]["PEERASSIST_PLATFORM_IDENTITY_GATEWAY_URL"] == (
         "http://keycloak:8080/identity"

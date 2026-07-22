@@ -13,8 +13,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from collections.abc import Mapping
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 import requests
 from pypdf import PdfReader
@@ -60,12 +59,13 @@ class ReviewWorker:
         self._clock = clock
         self.artifact_service = ArtifactService(uow_factory, object_store)
 
-    def run_once(self, scope: TenantScope, *, worker_id: str) -> ReviewJob | None:
+    def run_once(self, *, worker_id: str) -> ReviewJob | None:
         service_actor = Actor(uuid5(NAMESPACE_URL, "peerassist:worker"), ActorKind.SERVICE)
         with self._uow_factory(service_actor) as uow:
-            work = uow.work_items.claim(scope, worker_id, 300)
+            work = uow.work_items.claim_next(worker_id, 300)
             if work is None:
                 return None
+            scope = TenantScope(work.organization_id, work.project_id)
             job = uow.review_jobs.get(scope, work.job_id)
             if job is None:
                 raise NotFound()
@@ -420,10 +420,6 @@ def _fallback_documents(title: str, text: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    try:
-        scope = _worker_scope_from_environment(os.environ)
-    except (OSError, ValueError):
-        return 2
     from common.config import PlatformSettings
     from services.api.composition import build_dependencies
 
@@ -444,27 +440,10 @@ def main() -> int:
     signal.signal(signal.SIGINT, stop)
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     while not stopping:
-        processed = worker.run_once(scope, worker_id=worker_id)
+        processed = worker.run_once(worker_id=worker_id)
         if processed is None:
             time.sleep(1.0)
     return 0
-
-
-def _worker_scope_from_environment(environ: Mapping[str, str]) -> TenantScope:
-    organization_id = environ.get("PEERASSIST_WORKER_ORGANIZATION_ID", "").strip()
-    project_id = environ.get("PEERASSIST_WORKER_PROJECT_ID", "").strip()
-    if organization_id and project_id:
-        return TenantScope(UUID(organization_id), UUID(project_id))
-    scope_file = environ.get("PEERASSIST_WORKER_SCOPE_FILE", "").strip()
-    if not scope_file:
-        raise ValueError("worker tenant scope is unavailable")
-    path = Path(scope_file)
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
-        raise ValueError("worker tenant scope file is invalid")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("worker tenant scope file is invalid")
-    return TenantScope(UUID(str(payload["organization_id"])), UUID(str(payload["project_id"])))
 
 
 if __name__ == "__main__":

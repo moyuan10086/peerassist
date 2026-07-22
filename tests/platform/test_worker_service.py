@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from services.worker.main import ReviewWorker, _worker_scope_from_environment, main
+from services.worker.main import ReviewWorker
 from tests.platform.test_paper_service import _seed
 
-from peerassist.platform.models import TenantScope
+from peerassist.platform.models import Project, ProjectMembership, Role
 from peerassist.platform.services.papers import UploadPaper
 from peerassist.platform.services.reviews import CreateReviewJob, ReviewService
 
@@ -48,7 +48,7 @@ def test_worker_claims_review_and_publishes_summary_and_report(tmp_path: Path) -
         clock=paper_service._clock,
     )
 
-    processed = worker.run_once(project.scope, worker_id="worker-test")
+    processed = worker.run_once(worker_id="worker-test")
 
     assert processed is not None
     assert processed.id == job.id and processed.stage == "finalize" and processed.status == "blocked"
@@ -80,24 +80,75 @@ def test_worker_claims_review_and_publishes_summary_and_report(tmp_path: Path) -
     assert not any(tmp_path.rglob("object-000.bin"))
 
 
-def test_worker_entrypoint_rejects_missing_tenant_scope(monkeypatch) -> None:
-    monkeypatch.delenv("PEERASSIST_WORKER_ORGANIZATION_ID", raising=False)
-    monkeypatch.delenv("PEERASSIST_WORKER_PROJECT_ID", raising=False)
+def test_worker_processes_jobs_from_projects_created_after_bootstrap(tmp_path: Path) -> None:
+    paper_service, store, actors, first_project = _seed()
+    second_project = Project(
+        uuid4(),
+        first_project.organization_id,
+        "Second Review Project",
+        "active",
+        1,
+        first_project.created_at,
+        first_project.updated_at,
+    )
+    with paper_service._uow_factory(actors["owner"]) as uow:
+        uow.projects.add(second_project.scope, second_project)
+        for role in ("owner", "reviewer", "viewer"):
+            uow.projects.save_membership(
+                second_project.scope,
+                ProjectMembership(
+                    uuid4(),
+                    second_project.organization_id,
+                    second_project.id,
+                    actors[role].actor_id,
+                    Role.PROJECT_OWNER if role == "owner" else Role(role),
+                    "active",
+                    1,
+                    first_project.created_at,
+                    first_project.updated_at,
+                ),
+                None,
+            )
+        uow.commit()
 
-    assert main() == 2
-
-
-def test_worker_scope_can_be_loaded_from_private_bootstrap_file(tmp_path: Path) -> None:
-    organization_id = uuid4()
-    project_id = uuid4()
-    scope_file = tmp_path / "scope.json"
-    scope_file.write_text(
-        json.dumps({"organization_id": str(organization_id), "project_id": str(project_id)}),
-        encoding="utf-8",
+    review_service = ReviewService(paper_service._uow_factory, clock=paper_service._clock)
+    jobs = []
+    for index, project in enumerate((first_project, second_project), start=1):
+        uploaded = paper_service.upload(
+            actors["reviewer"],
+            UploadPaper(
+                project.id,
+                f"paper-{index}.pdf",
+                "application/pdf",
+                1024,
+                f"multi-paper-{index}",
+                f"multi-paper-request-{index}",
+            ),
+            io.BytesIO(f"%PDF-1.7\nproject {index}\n%%EOF\n".encode()),
+        )
+        jobs.append(
+            review_service.create(
+                actors["reviewer"],
+                CreateReviewJob(
+                    project.id,
+                    uploaded.version.id,
+                    "full",
+                    f"multi-review-{index}",
+                    f"multi-review-request-{index}",
+                ),
+            )
+        )
+    worker = ReviewWorker(
+        paper_service._uow_factory,
+        store,
+        tmp_path,
+        document_generator=lambda _: ("# Summary\n", "# Review\n"),
+        clock=paper_service._clock,
     )
 
-    scope = _worker_scope_from_environment(
-        {"PEERASSIST_WORKER_SCOPE_FILE": str(scope_file)}
-    )
+    processed = {
+        worker.run_once(worker_id="multi-project-worker").id,
+        worker.run_once(worker_id="multi-project-worker").id,
+    }
 
-    assert scope == TenantScope(organization_id, project_id)
+    assert processed == {job.id for job in jobs}
