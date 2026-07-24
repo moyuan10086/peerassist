@@ -10,12 +10,22 @@ sections.
 - Document token: XuVIdkaGgoykehxox9Kc3Qnhnw2
 - Owner identity used to create it: user 陈昊
 - Created on: 2026-07-10
+- Last verified revision: 279
+- Current product source: `docs/superpowers/specs/2026-07-24-peerassist-evidence-review-workspace-positioning-design.md`
+- Current structure: exactly ten stable h2 chapters; historical progress is retained under chapter 九, while chapter 十 contains only current actions.
 
 Use sections 三、八、十 for verified engineering progress, milestone status,
 and current actions. Fetch and verify the ten-section outline before and after
 each write, and use the current `revision_id` as an optimistic concurrency
 guard. Do not store API keys, GitHub tokens, model keys, private paths, paper
 secrets, provider responses, or reviewer-private material here.
+
+The evidence-review-workspace positioning is synchronized in place across the
+stable chapters: product conclusion, current capability gaps, engineering
+baseline, four-entry information architecture, canvas/Agent deferral,
+task-scoped external-model consent, recovery semantics, phased acceptance,
+fact sources, and current actions. Do not append a dated h2 progress section for
+this positioning; update the stable chapter that owns the information.
 
 M1 synchronization must record the delivered login/admin/member/model configuration surfaces,
 PostgreSQL/Keycloak/MinIO authority, real PDF-to-summary workflow, 35-operation OpenAPI contract,
