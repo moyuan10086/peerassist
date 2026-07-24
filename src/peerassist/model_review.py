@@ -24,6 +24,10 @@ class ModelReviewConfig:
     provider: str = "openai"
     max_tokens: int = 900
     timeout_seconds: float = 240
+    provider_config_revision: int = 0
+    policy_version: str = "legacy"
+    configuration_id: str = "legacy"
+    enabled: bool = True
 
 
 def resolve_model_review_config() -> ModelReviewConfig | None:
@@ -44,6 +48,10 @@ def resolve_model_review_config() -> ModelReviewConfig | None:
             base_url=stored.base_url,
             model=stored.model,
             provider=provider,
+            provider_config_revision=stored.revision,
+            policy_version=stored.policy_version,
+            configuration_id=stored.configuration_id,
+            enabled=stored.enabled,
             **common,
         )
     api_key = str(settings.peerassist_openai_api_key or "").strip()
@@ -52,6 +60,9 @@ def resolve_model_review_config() -> ModelReviewConfig | None:
             api_key=api_key,
             base_url=settings.peerassist_openai_base_url,
             model=settings.peerassist_openai_model.strip(),
+            provider_config_revision=0,
+            policy_version="legacy",
+            configuration_id="legacy",
             **common,
         )
     if is_codex_provider(settings.model_provider) and load_cached_codex_auth() is not None:
@@ -60,6 +71,9 @@ def resolve_model_review_config() -> ModelReviewConfig | None:
             base_url=settings.peerassist_openai_base_url,
             model=settings.peerassist_openai_model.strip(),
             provider="openai-codex",
+            provider_config_revision=0,
+            policy_version="legacy",
+            configuration_id="legacy",
             **common,
         )
     return None
@@ -74,6 +88,8 @@ def run_model_review_text(
 ) -> str | tuple[str, dict[str, int]]:
     """Invoke the configured review provider without retaining reusable credentials."""
 
+    if not config.enabled:
+        raise ValueError("model_review_disabled")
     if config.provider != "openai-codex":
         raise ValueError("model_review_provider_not_supported")
     auth = (
@@ -132,6 +148,8 @@ def run_batched_model_review(
 ) -> dict[str, Any]:
     """Run all specialist roles in one bounded request and return untrusted draft rows."""
 
+    if not config.enabled:
+        raise ValueError("model_review_disabled")
     endpoint = config.base_url.rstrip("/") + "/chat/completions"
     system = (
         "你是 PeerAssist 的专业论文审稿代理编排器。分别从结构、方法、实验、统计、引用、伦理、"

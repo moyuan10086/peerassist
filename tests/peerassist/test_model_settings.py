@@ -52,6 +52,10 @@ def test_model_settings_persist_secret_server_side_and_return_only_masked_state(
         "api_mode": "responses",
         "api_key_configured": True,
         "api_key_hint": "sk-...vate",
+        "revision": 1,
+        "enabled": True,
+        "policy_version": "peerassist.model-policy.v1",
+        "configuration_id": saved.configuration_id,
     }
     assert load_model_settings(path=path) == saved
     assert "sk-synthetic-private" not in repr(saved)

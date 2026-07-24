@@ -18,7 +18,7 @@ from uuid import NAMESPACE_URL, uuid5
 import requests
 from pypdf import PdfReader
 
-from peerassist.model_review import resolve_model_review_config, run_model_review_text
+from peerassist.model_review import ModelReviewConfig, resolve_model_review_config, run_model_review_text
 from peerassist.platform.adapters.workspace import StageArtifactPublisher, WorkspaceMaterializer
 from peerassist.platform.errors import DependencyUnavailable, NotFound
 from peerassist.platform.models import (
@@ -40,6 +40,18 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+MODEL_DATA_SCOPE = {"paper_text": True}
+
+
+def _same_model_snapshot(left: ModelReviewConfig, right: ModelReviewConfig) -> bool:
+    return (
+        left.provider_config_revision == right.provider_config_revision
+        and left.policy_version == right.policy_version
+        and left.configuration_id == right.configuration_id
+        and left.enabled == right.enabled
+    )
+
+
 class ReviewWorker:
     def __init__(
         self,
@@ -55,7 +67,7 @@ class ReviewWorker:
         self._scratch_root = scratch_root
         self._materializer = WorkspaceMaterializer(object_store, scratch_root)
         self._publisher = StageArtifactPublisher(object_store)
-        self._document_generator = document_generator or generate_review_documents
+        self._document_generator = document_generator
         self._clock = clock
         self.artifact_service = ArtifactService(uow_factory, object_store)
 
@@ -101,8 +113,18 @@ class ReviewWorker:
                 workspace,
             )
             pdf_bytes = (materialized / "inputs" / "object-000.bin").read_bytes()
-            summary, report = self._document_generator(pdf_bytes)
-            review_result = build_review_result(pdf_bytes)
+            if self._document_generator is not None:
+                summary, report = self._document_generator(pdf_bytes)
+                model_status, model_fallback_reason = "not_requested", None
+            else:
+                summary, report, model_status, model_fallback_reason = self._generate_documents(
+                    service_actor, scope, job, version, pdf_bytes
+                )
+            review_result = build_review_result(
+                pdf_bytes,
+                model_status=model_status,
+                model_fallback_reason=model_fallback_reason,
+            )
             outputs = materialized / "outputs"
             (outputs / "paper_summary.md").write_text(summary.rstrip() + "\n", encoding="utf-8")
             (outputs / "review.md").write_text(report.rstrip() + "\n", encoding="utf-8")
@@ -164,7 +186,16 @@ class ReviewWorker:
                         sequence,
                         event_type,
                         1,
-                        {"artifacts": list(logical_names), "status": completed.status},
+                        {
+                            "artifacts": list(logical_names),
+                            "status": completed.status,
+                            "model_status": model_status,
+                            **(
+                                {"model_fallback_reason": model_fallback_reason}
+                                if model_fallback_reason
+                                else {}
+                            ),
+                        },
                         self._clock(),
                     ),
                 )
@@ -191,6 +222,71 @@ class ReviewWorker:
             raise
         finally:
             self._materializer.cleanup(workspace)
+
+    def _generate_documents(
+        self,
+        service_actor: Actor,
+        scope: TenantScope,
+        job: ReviewJob,
+        version,
+        pdf_bytes: bytes,
+    ) -> tuple[str, str, str, str | None]:
+        title, text = _extract_pdf(pdf_bytes)
+        if text:
+            config, reason = self._model_consent_gate(service_actor, scope, job, version)
+            if config is not None:
+                latest = resolve_model_review_config()
+                if latest is None or not _same_model_snapshot(config, latest):
+                    return (*_fallback_documents(title, text), "local_fallback", "model_config_changed")
+                try:
+                    summary, report = _generate_with_model(title, text, config)
+                    return summary, report, "external_model", None
+                except Exception:
+                    return (*_fallback_documents(title, text), "local_fallback", "model_request_failed")
+            return (*_fallback_documents(title, text), "local_fallback", reason)
+        reason = "empty_input"
+        return (*_fallback_documents(title, text), "local_fallback", reason)
+
+    def _model_consent_gate(
+        self,
+        service_actor: Actor,
+        scope: TenantScope,
+        job: ReviewJob,
+        version,
+    ) -> tuple[ModelReviewConfig | None, str]:
+        # This transaction is deliberately opened after claim and immediately before I/O.
+        with self._uow_factory(service_actor) as uow:
+            config = resolve_model_review_config()
+            if config is None:
+                return None, "model_unavailable"
+            current_job = uow.review_jobs.get(scope, job.id)
+            if current_job is None:
+                return None, "job_missing"
+            current_version = uow.papers.get_version(scope, current_job.paper_version_id)
+            if current_version is None or current_version.id != version.id:
+                return None, "paper_version_mismatch"
+            consent = uow.consents.get_current(scope, current_job.id, current_version.id, "model")
+            now = self._clock()
+            if not config.enabled:
+                return None, "model_disabled"
+            if consent is None:
+                return None, "consent_missing"
+            if consent.paper_version_id != current_version.id:
+                return None, "paper_version_mismatch"
+            if consent.policy_version != config.policy_version:
+                return None, "policy_version_mismatch"
+            if consent.data_scope != MODEL_DATA_SCOPE:
+                return None, "data_scope_mismatch"
+            if not consent.is_effective(
+                provider_config_revision=config.provider_config_revision,
+                at=now,
+            ):
+                if consent.status != "granted":
+                    return None, f"consent_{consent.status}"
+                if consent.expires_at is not None and now >= consent.expires_at:
+                    return None, "consent_expired"
+                return None, "provider_revision_mismatch"
+            return config, ""
 
     def _fail(
         self,
@@ -232,7 +328,12 @@ def generate_review_documents(pdf_bytes: bytes) -> tuple[str, str]:
     return _fallback_documents(title, text)
 
 
-def build_review_result(pdf_bytes: bytes) -> dict[str, object]:
+def build_review_result(
+    pdf_bytes: bytes,
+    *,
+    model_status: str = "not_requested",
+    model_fallback_reason: str | None = None,
+) -> dict[str, object]:
     """Build a stable, evidence-bound review queue for the platform UI.
 
     The first platform worker intentionally keeps this deterministic: these are
@@ -291,8 +392,13 @@ def build_review_result(pdf_bytes: bytes) -> dict[str, object]:
                     "responsibility": "将论文审阅结果整理为可确认的检查点",
                     "evidence_count": len(concerns),
                     "review_engine": "platform_review_prompts",
-                    "model_status": "not_requested",
-                    "model_configured": False,
+                    "model_status": model_status,
+                    "model_configured": model_status == "external_model",
+                    **(
+                        {"model_fallback_reason": model_fallback_reason}
+                        if model_fallback_reason
+                        else {}
+                    ),
                 },
                 "drafts": concerns,
             }

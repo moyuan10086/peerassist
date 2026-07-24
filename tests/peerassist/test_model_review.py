@@ -35,7 +35,8 @@ class _Response:
         }
 
 
-def test_model_review_uses_typed_workspace_settings(monkeypatch) -> None:
+def test_model_review_uses_typed_workspace_settings(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "missing-model-settings.json"))
     monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("PEERASSIST_OPENAI_BASE_URL", "https://example.test/v1/")
     monkeypatch.setenv("PEERASSIST_OPENAI_MODEL", "gpt-test")

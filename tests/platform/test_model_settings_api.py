@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-
-from common.config import PlatformSettings
-from peerassist.platform.models import Actor, ActorKind
 from services.api.app import create_app
 from services.api.composition import PlatformDependencies
 from services.api.dependencies import require_request_actor
+
+from common.config import PlatformSettings
+from peerassist.platform.models import (
+    Actor,
+    ActorKind,
+    Organization,
+    OrganizationMembership,
+    Role,
+    TenantScope,
+    User,
+)
 
 
 def _settings() -> PlatformSettings:
@@ -44,8 +53,24 @@ def test_model_settings_can_discover_save_and_reload_without_exposing_secret(
         "services.api.routes.model_settings.discover_models",
         lambda value: ["gpt-5.5", "gpt-5.6-sol"],
     )
-    app = create_app(_settings(), PlatformDependencies.for_test())
-    app.dependency_overrides[require_request_actor] = lambda: Actor(uuid4(), ActorKind.USER)
+    dependencies = PlatformDependencies.for_test()
+    admin = Actor(uuid4(), ActorKind.USER)
+    now = datetime(2026, 7, 24, 1, 0, tzinfo=UTC)
+    organization = Organization(uuid4(), "model-org", "Model Org", "active", 1, now, now)
+    with dependencies.uow_factory(admin) as uow:
+        uow.users.add(User(admin.actor_id, "active", "Admin", now, now))
+        uow.organizations.add(TenantScope(organization.id), organization)
+        uow.organizations.save_membership(
+            TenantScope(organization.id),
+            OrganizationMembership(
+                uuid4(), organization.id, admin.actor_id, Role.ORGANIZATION_ADMIN,
+                "active", 1, now, now,
+            ),
+            None,
+        )
+        uow.commit()
+    app = create_app(_settings(), dependencies)
+    app.dependency_overrides[require_request_actor] = lambda: admin
 
     with TestClient(app) as client:
         empty = client.get("/api/model-settings")
@@ -75,6 +100,10 @@ def test_model_settings_can_discover_save_and_reload_without_exposing_secret(
     assert discovered.json() == {"models": ["gpt-5.5", "gpt-5.6-sol"]}
     assert saved.status_code == 200
     assert saved.json()["settings"]["model"] == "gpt-5.6-sol"
+    assert saved.json()["settings"]["revision"] == 1
+    assert saved.json()["settings"]["enabled"] is True
+    assert saved.json()["settings"]["policy_version"]
+    assert saved.json()["settings"]["configuration_id"]
     assert reloaded.status_code == 200
     assert reloaded.json()["settings"]["api_key_configured"] is True
     assert "sk-synthetic-private" not in str(saved.json())
@@ -82,8 +111,24 @@ def test_model_settings_can_discover_save_and_reload_without_exposing_secret(
 
 
 def test_model_settings_validation_returns_a_readable_safe_message(monkeypatch) -> None:
-    app = create_app(_settings(), PlatformDependencies.for_test())
-    app.dependency_overrides[require_request_actor] = lambda: Actor(uuid4(), ActorKind.USER)
+    dependencies = PlatformDependencies.for_test()
+    admin = Actor(uuid4(), ActorKind.USER)
+    now = datetime(2026, 7, 24, 1, 0, tzinfo=UTC)
+    organization = Organization(uuid4(), "validation-org", "Validation Org", "active", 1, now, now)
+    with dependencies.uow_factory(admin) as uow:
+        uow.users.add(User(admin.actor_id, "active", "Admin", now, now))
+        uow.organizations.add(TenantScope(organization.id), organization)
+        uow.organizations.save_membership(
+            TenantScope(organization.id),
+            OrganizationMembership(
+                uuid4(), organization.id, admin.actor_id, Role.ORGANIZATION_ADMIN,
+                "active", 1, now, now,
+            ),
+            None,
+        )
+        uow.commit()
+    app = create_app(_settings(), dependencies)
+    app.dependency_overrides[require_request_actor] = lambda: admin
 
     with TestClient(app) as client:
         response = client.post(
@@ -93,3 +138,41 @@ def test_model_settings_validation_returns_a_readable_safe_message(monkeypatch) 
 
     assert response.status_code == 400
     assert response.json()["error"]["message"] == "Base URL 必须是完整的 HTTP(S) 地址。"
+
+
+def test_model_settings_write_and_discovery_are_hidden_from_non_admins(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    dependencies = PlatformDependencies.for_test()
+    teacher = Actor(uuid4(), ActorKind.USER)
+    now = datetime(2026, 7, 24, 1, 0, tzinfo=UTC)
+    with dependencies.uow_factory(teacher) as uow:
+        uow.users.add(User(teacher.actor_id, "active", "Teacher", now, now))
+        uow.commit()
+    app = create_app(_settings(), dependencies)
+    app.dependency_overrides[require_request_actor] = lambda: teacher
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/model-settings",
+            json={"provider": "openai-compatible", "base_url": "https://provider.example/v1", "model": "m"},
+        )
+    assert response.status_code == 404
+
+
+def test_model_settings_revision_uses_compare_and_swap(tmp_path) -> None:
+    from peerassist.model_settings import ModelSettingsError, ModelSettingsInput, save_model_settings
+
+    path = tmp_path / "settings.json"
+    first = save_model_settings(
+        ModelSettingsInput("openai-compatible", "https://provider.example/v1", "model-a"),
+        path=path,
+    )
+    assert first.revision == 1
+    try:
+        save_model_settings(
+            ModelSettingsInput("openai-compatible", "https://provider.example/v1", "model-b", expected_revision=0),
+            path=path,
+        )
+    except ModelSettingsError as exc:
+        assert "revision" in str(exc).lower()
+    else:
+        raise AssertionError("stale model settings write must fail")

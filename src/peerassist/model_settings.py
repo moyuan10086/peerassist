@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from llm.codex_auth import load_cached_codex_auth
 
@@ -25,6 +27,10 @@ class ModelSettingsError(ValueError):
     """Safe model settings or provider discovery failure."""
 
 
+class ModelSettingsConflict(ModelSettingsError):
+    """Optimistic concurrency conflict while replacing settings."""
+
+
 @dataclass(frozen=True)
 class ModelSettingsInput:
     provider: str
@@ -32,6 +38,9 @@ class ModelSettingsInput:
     model: str = ""
     api_key: str = field(default="", repr=False)
     clear_api_key: bool = False
+    expected_revision: int | None = None
+    enabled: bool = True
+    policy_version: str = "peerassist.model-policy.v1"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "provider", _validate_provider(self.provider))
@@ -41,6 +50,12 @@ class ModelSettingsInput:
         if len(api_key) > 4096:
             raise ModelSettingsError("API Key 长度无效。")
         object.__setattr__(self, "api_key", api_key)
+        if self.expected_revision is not None and self.expected_revision < 0:
+            raise ModelSettingsError("模型配置 revision 无效。")
+        policy_version = str(self.policy_version or "").strip()
+        if not policy_version or len(policy_version) > 128:
+            raise ModelSettingsError("模型策略版本无效。")
+        object.__setattr__(self, "policy_version", policy_version)
 
 
 @dataclass(frozen=True)
@@ -49,6 +64,18 @@ class StoredModelSettings:
     base_url: str
     model: str
     api_key: str = field(default="", repr=False)
+    revision: int = 1
+    enabled: bool = True
+    policy_version: str = "peerassist.model-policy.v1"
+    configuration_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.revision < 1:
+            raise ModelSettingsError("模型配置 revision 无效。")
+        if not self.policy_version or len(self.policy_version) > 128:
+            raise ModelSettingsError("模型策略版本无效。")
+        if not self.configuration_id:
+            object.__setattr__(self, "configuration_id", uuid4().hex)
 
     @property
     def api_mode(self) -> str:
@@ -62,6 +89,10 @@ class StoredModelSettings:
             "api_mode": self.api_mode,
             "api_key_configured": bool(self.api_key) or _cached_key(self.provider) is not None,
             "api_key_hint": _key_hint(self.api_key),
+            "revision": self.revision,
+            "enabled": self.enabled,
+            "policy_version": self.policy_version,
+            "configuration_id": self.configuration_id,
         }
 
 
@@ -83,11 +114,19 @@ def load_model_settings(*, path: Path | None = None) -> StoredModelSettings | No
     if not isinstance(payload, dict) or payload.get("schema_version") != _SCHEMA_VERSION:
         raise ModelSettingsError("模型配置文件格式无效。")
     try:
+        provider = _validate_provider(str(payload.get("provider") or ""))
+        base_url = _validate_base_url(str(payload.get("base_url") or ""))
+        model = _validate_model(str(payload.get("model") or ""), required=True)
+        legacy_id = _legacy_configuration_id(provider, base_url, model)
         return StoredModelSettings(
-            provider=_validate_provider(str(payload.get("provider") or "")),
-            base_url=_validate_base_url(str(payload.get("base_url") or "")),
-            model=_validate_model(str(payload.get("model") or ""), required=True),
+            provider=provider,
+            base_url=base_url,
+            model=model,
             api_key=str(payload.get("api_key") or "").strip(),
+            revision=int(payload.get("revision") or 1),
+            enabled=bool(payload.get("enabled", True)),
+            policy_version=str(payload.get("policy_version") or "peerassist.model-policy.v1"),
+            configuration_id=str(payload.get("configuration_id") or legacy_id),
         )
     except ModelSettingsError:
         raise
@@ -102,12 +141,19 @@ def save_model_settings(
 ) -> StoredModelSettings:
     target = path or model_settings_path()
     existing = load_model_settings(path=target)
+    current_revision = existing.revision if existing is not None else 0
+    if value.expected_revision is not None and value.expected_revision != current_revision:
+        raise ModelSettingsConflict("模型配置 revision 冲突。")
     api_key = "" if value.clear_api_key else value.api_key or (existing.api_key if existing else "")
     stored = StoredModelSettings(
         provider=value.provider,
         base_url=value.base_url,
         model=_validate_model(value.model, required=True),
         api_key=api_key,
+        revision=current_revision + 1,
+        enabled=value.enabled,
+        policy_version=value.policy_version,
+        configuration_id=uuid4().hex,
     )
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -115,6 +161,10 @@ def save_model_settings(
         "base_url": stored.base_url,
         "model": stored.model,
         "api_key": stored.api_key,
+        "revision": stored.revision,
+        "enabled": stored.enabled,
+        "policy_version": stored.policy_version,
+        "configuration_id": stored.configuration_id,
     }
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.tmp")
@@ -190,6 +240,11 @@ def discover_models(
     if not models:
         raise ModelSettingsError("模型服务未返回可用模型。")
     return sorted(models, key=str.casefold)
+
+
+def _legacy_configuration_id(provider: str, base_url: str, model: str) -> str:
+    digest = hashlib.sha256(f"{provider}|{base_url}|{model}".encode()).hexdigest()[:24]
+    return f"legacy-{digest}"
 
 
 def _cached_key(provider: str) -> str | None:

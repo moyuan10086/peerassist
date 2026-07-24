@@ -9,13 +9,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from peerassist.model_settings import (
+    ModelSettingsConflict,
     ModelSettingsError,
     ModelSettingsInput,
     discover_models,
     load_model_settings,
     save_model_settings,
 )
-from peerassist.platform.models import Actor
+from peerassist.platform.models import Actor, Role
 from services.api.dependencies import require_request_actor
 
 router = APIRouter(tags=["model-settings"])
@@ -30,6 +31,9 @@ class ModelSettingsBody(BaseModel):
     model: str = ""
     api_key: str = ""
     clear_api_key: bool = False
+    expected_revision: int | None = None
+    enabled: bool = True
+    policy_version: str = "peerassist.model-policy.v1"
 
     def as_input(self) -> ModelSettingsInput:
         return ModelSettingsInput(
@@ -38,6 +42,9 @@ class ModelSettingsBody(BaseModel):
             model=self.model,
             api_key=self.api_key,
             clear_api_key=self.clear_api_key,
+            expected_revision=self.expected_revision,
+            enabled=self.enabled,
+            policy_version=self.policy_version,
         )
 
 
@@ -49,7 +56,28 @@ def _empty_settings() -> dict[str, object]:
         "api_mode": "chat_completions",
         "api_key_configured": False,
         "api_key_hint": "",
+        "revision": 0,
+        "enabled": False,
+        "policy_version": "peerassist.model-policy.v1",
+        "configuration_id": "legacy",
     }
+
+
+def _is_organization_admin(actor: Actor, request: Request) -> bool:
+    with request.app.state.dependencies.uow_factory(actor) as uow:
+        return any(
+            membership.status == "active"
+            and membership.revoked_at is None
+            and membership.role is Role.ORGANIZATION_ADMIN
+            for membership in uow.organizations.list_for_user(actor.actor_id)
+        )
+
+
+def _require_admin(actor: Actor, request: Request) -> JSONResponse | None:
+    if _is_organization_admin(actor, request):
+        return None
+    # Treat this global resource as absent to avoid leaking settings existence.
+    return _safe_error(request, "资源不存在。", status_code=404)
 
 
 def _safe_error(request: Request, message: str, *, status_code: int = 400) -> JSONResponse:
@@ -92,6 +120,9 @@ def discover_model_settings(
     _actor: ModelSettingsActor,
     request: Request,
 ) -> dict[str, object] | JSONResponse:
+    denied = _require_admin(_actor, request)
+    if denied is not None:
+        return denied
     try:
         return {"models": discover_models(body.as_input())}
     except ModelSettingsError as exc:
@@ -111,8 +142,13 @@ def save_model_settings_route(
     _actor: ModelSettingsActor,
     request: Request,
 ) -> dict[str, object] | JSONResponse:
+    denied = _require_admin(_actor, request)
+    if denied is not None:
+        return denied
     try:
         stored = save_model_settings(body.as_input())
+    except ModelSettingsConflict as exc:
+        return _safe_error(request, str(exc), status_code=409)
     except ModelSettingsError as exc:
         return _safe_error(request, str(exc))
     except Exception:
