@@ -657,6 +657,27 @@ def test_external_service_consent_is_immutable_and_effective_only_for_current_gr
         consent.status = "denied"  # type: ignore[misc]
 
 
+def test_external_service_consent_is_not_effective_before_its_decision_time() -> None:
+    decided_at = NOW + timedelta(minutes=5)
+    consent = _consent(
+        decided_at=decided_at,
+        expires_at=decided_at + timedelta(hours=1),
+    )
+
+    assert not consent.is_effective(provider_config_revision=3, at=NOW)
+    assert consent.is_effective(provider_config_revision=3, at=decided_at)
+
+
+def test_not_required_consent_must_record_a_decision() -> None:
+    with pytest.raises(ValueError, match="decision"):
+        _consent(
+            status="not_required",
+            decided_by=None,
+            decided_at=None,
+            expires_at=None,
+        )
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [

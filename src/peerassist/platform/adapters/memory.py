@@ -116,8 +116,10 @@ class _State:
     review_jobs: dict[UUID, ReviewJob] = field(default_factory=dict)
     review_events: dict[UUID, list[ReviewEvent]] = field(default_factory=dict)
     consents: dict[UUID, ExternalServiceConsent] = field(default_factory=dict)
-    current_consent_ids: dict[tuple[UUID, UUID, str], UUID] = field(default_factory=dict)
-    review_documents: dict[UUID, ReviewDocument] = field(default_factory=dict)
+    current_consent_ids: dict[tuple[UUID, UUID, UUID, UUID, str], UUID] = field(
+        default_factory=dict
+    )
+    review_documents: dict[tuple[UUID, UUID, UUID], ReviewDocument] = field(default_factory=dict)
     artifacts: dict[UUID, Artifact] = field(default_factory=dict)
     commands: dict[tuple[UUID, UUID, str, str], CommandRecord] = field(default_factory=dict)
     work_items: dict[UUID, WorkItem] = field(default_factory=dict)
@@ -514,12 +516,22 @@ class _ReviewJobs:
             raise NotFound()
         self._state.review_jobs.pop(job_id, None)
         self._state.review_events.pop(job_id, None)
-        self._state.review_documents.pop(job_id, None)
+        self._state.review_documents.pop((job.organization_id, job.project_id, job_id), None)
         for consent_id, consent in tuple(self._state.consents.items()):
-            if consent.review_job_id == job_id:
+            if (
+                consent.organization_id == job.organization_id
+                and consent.project_id == job.project_id
+                and consent.review_job_id == job_id
+            ):
                 del self._state.consents[consent_id]
                 self._state.current_consent_ids.pop(
-                    (consent.review_job_id, consent.paper_version_id, consent.service),
+                    (
+                        consent.organization_id,
+                        consent.project_id,
+                        consent.review_job_id,
+                        consent.paper_version_id,
+                        consent.service,
+                    ),
                     None,
                 )
         for artifact_id, artifact in tuple(self._state.artifacts.items()):
@@ -553,8 +565,14 @@ class _Consents:
         self._state = state
 
     @staticmethod
-    def _key(consent: ExternalServiceConsent) -> tuple[UUID, UUID, str]:
-        return consent.review_job_id, consent.paper_version_id, consent.service
+    def _key(consent: ExternalServiceConsent) -> tuple[UUID, UUID, UUID, UUID, str]:
+        return (
+            consent.organization_id,
+            consent.project_id,
+            consent.review_job_id,
+            consent.paper_version_id,
+            consent.service,
+        )
 
     def get_current(
         self,
@@ -563,8 +581,16 @@ class _Consents:
         paper_version_id: UUID,
         service: str,
     ) -> ExternalServiceConsent | None:
+        if scope.project_id is None:
+            return None
         consent_id = self._state.current_consent_ids.get(
-            (review_job_id, paper_version_id, service)
+            (
+                scope.organization_id,
+                scope.project_id,
+                review_job_id,
+                paper_version_id,
+                service,
+            )
         )
         item = self._state.consents.get(consent_id) if consent_id is not None else None
         return (
@@ -600,7 +626,12 @@ class _Consents:
         expected_version: int,
     ) -> None:
         _require_project_scope(scope, consent)
-        current = self.get_current(scope, *self._key(consent))
+        current = self.get_current(
+            scope,
+            consent.review_job_id,
+            consent.paper_version_id,
+            consent.service,
+        )
         if current is None:
             raise NotFound()
         _check_replacement_version(current, consent, expected_version)
@@ -618,7 +649,12 @@ class _Consents:
     ) -> None:
         _require_project_scope(scope, superseded)
         _require_project_scope(scope, replacement)
-        current = self.get_current(scope, *self._key(superseded))
+        current = self.get_current(
+            scope,
+            superseded.review_job_id,
+            superseded.paper_version_id,
+            superseded.service,
+        )
         if current is None:
             raise NotFound()
         _check_replacement_version(current, superseded, expected_version)
@@ -668,8 +704,16 @@ class _ReviewDocuments:
     def __init__(self, state: _State) -> None:
         self._state = state
 
+    @staticmethod
+    def _key(document: ReviewDocument) -> tuple[UUID, UUID, UUID]:
+        return document.organization_id, document.project_id, document.review_job_id
+
     def get(self, scope: TenantScope, review_job_id: UUID) -> ReviewDocument | None:
-        item = self._state.review_documents.get(review_job_id)
+        if scope.project_id is None:
+            return None
+        item = self._state.review_documents.get(
+            (scope.organization_id, scope.project_id, review_job_id)
+        )
         return (
             item
             if item is not None
@@ -683,14 +727,15 @@ class _ReviewDocuments:
             raise StaleVersion(
                 details={"expected_version": 1, "current_version": document.document_version}
             )
-        existing = self._state.review_documents.get(document.review_job_id)
+        key = self._key(document)
+        existing = self._state.review_documents.get(key)
         if existing == document:
             return
         if existing is not None:
             raise ValueError("review document already exists for job")
         if any(item.id == document.id for item in self._state.review_documents.values()):
             raise ValueError("review document ID already exists")
-        self._state.review_documents[document.review_job_id] = document
+        self._state.review_documents[key] = document
 
     def save(
         self,
@@ -726,7 +771,7 @@ class _ReviewDocuments:
         )
         if any(getattr(current, name) != getattr(document, name) for name in immutable_names):
             raise ValueError("review document identity is immutable")
-        self._state.review_documents[document.review_job_id] = document
+        self._state.review_documents[self._key(document)] = document
 
 
 class _Artifacts:

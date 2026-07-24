@@ -478,6 +478,45 @@ def test_consent_reapply_is_atomic_when_the_new_generation_is_invalid(uow_factor
         ) == original
 
 
+def test_consent_current_keys_are_isolated_when_tenants_reuse_job_and_version_ids(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    shared_project_id = uuid4()
+    first_scope = TenantScope(uuid4(), shared_project_id)
+    second_scope = TenantScope(uuid4(), shared_project_id)
+    first = consent(first_scope, clock())
+    second = replace(
+        first,
+        id=uuid4(),
+        organization_id=second_scope.organization_id,
+    )
+
+    with uow_factory(principal) as uow:
+        uow.consents.add(first_scope, first)
+        uow.consents.add(second_scope, second)
+        uow.commit()
+
+    first_updated = replace(first, status="revoked", version=2)
+    with uow_factory(principal) as uow:
+        uow.consents.save(first_scope, first_updated, expected_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.consents.get_current(
+            first_scope,
+            first.review_job_id,
+            first.paper_version_id,
+            first.service,
+        ) == first_updated
+        assert uow.consents.get_current(
+            second_scope,
+            second.review_job_id,
+            second.paper_version_id,
+            second.service,
+        ) == second
+
+
 def test_review_document_repository_enforces_one_per_job_cas_and_tenant_scope(
     uow_factory,
     clock,
@@ -516,6 +555,40 @@ def test_review_document_repository_enforces_one_per_job_cas_and_tenant_scope(
         uow.commit()
     with uow_factory(principal) as uow:
         assert uow.review_documents.get(scope, original.review_job_id) == updated
+
+
+def test_review_document_keys_are_isolated_when_tenants_reuse_job_ids(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    shared_project_id = uuid4()
+    first_scope = TenantScope(uuid4(), shared_project_id)
+    second_scope = TenantScope(uuid4(), shared_project_id)
+    first = document(first_scope, clock())
+    second = replace(
+        first,
+        id=uuid4(),
+        organization_id=second_scope.organization_id,
+        last_edited_by=uuid4(),
+    )
+
+    with uow_factory(principal) as uow:
+        uow.review_documents.add(first_scope, first)
+        uow.review_documents.add(second_scope, second)
+        uow.commit()
+
+    first_updated = replace(first, document_version=2)
+    with uow_factory(principal) as uow:
+        uow.review_documents.save(
+            first_scope,
+            first_updated,
+            expected_document_version=1,
+        )
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.review_documents.get(first_scope, first.review_job_id) == first_updated
+        assert uow.review_documents.get(second_scope, second.review_job_id) == second
 
 
 def test_setting_default_project_membership_clears_previous_default_in_same_organization(

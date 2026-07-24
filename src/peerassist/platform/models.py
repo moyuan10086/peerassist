@@ -721,7 +721,7 @@ class ExternalServiceConsent:
             raise ValueError("decided_by and decided_at must be recorded together")
         for name in ("decided_at", "expires_at", "superseded_at", "created_at", "updated_at"):
             _utc(getattr(self, name), name)
-        if self.status in {"granted", "denied", "revoked", "expired"} and self.decided_at is None:
+        if self.status in {"granted", "denied", "revoked", "expired", "not_required"} and self.decided_at is None:
             raise ValueError(f"{self.status} consent must include a decision")
         if self.expires_at is not None and self.decided_at is not None and self.expires_at <= self.decided_at:
             raise ValueError("expires_at must be after decided_at")
@@ -735,6 +735,8 @@ class ExternalServiceConsent:
         _utc(at, "at")
         return (
             self.status == "granted"
+            and self.decided_at is not None
+            and self.decided_at <= at
             and self.superseded_at is None
             and self.provider_config_revision == provider_config_revision
             and (self.expires_at is None or at < self.expires_at)
