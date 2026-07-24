@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Computed,
@@ -25,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.engine import Connection, Engine
 
-from .postgres_v0001_signature import (
+from .postgres_v0002_signature import (
     CATALOG_INSPECTION_SQL,
     EXPECTED_CATALOG_FINGERPRINT,
     EXPECTED_CATALOG_SIGNATURE,
@@ -34,7 +35,7 @@ from .postgres_v0001_signature import (
     catalog_signature_from_row,
 )
 
-HEAD_REVISION = "0001_platform_m1"
+HEAD_REVISION = "0002_review_workspace"
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -228,6 +229,7 @@ project_memberships = Table(
     _timestamp("created_at"),
     _timestamp("updated_at"),
     _timestamp("revoked_at", nullable=True),
+    Column("is_default", Boolean, nullable=False, server_default=text("false")),
     ForeignKeyConstraint(
         ["organization_id", "project_id"],
         ["projects.organization_id", "projects.id"],
@@ -242,6 +244,13 @@ project_memberships = Table(
     _check("version > 0", "ck_project_memberships_version_positive"),
 )
 Index("ix_project_memberships_tenant_user", project_memberships.c.organization_id, project_memberships.c.user_id)
+Index(
+    "uq_project_memberships_default_user_organization",
+    project_memberships.c.organization_id,
+    project_memberships.c.user_id,
+    unique=True,
+    postgresql_where=text("is_default AND status = 'active' AND revoked_at IS NULL"),
+)
 
 papers = Table(
     "papers",
@@ -421,10 +430,124 @@ review_events = Table(
         name="fk_review_events_job_tenant",
     ),
     UniqueConstraint("job_id", "aggregate_sequence", name="uq_review_events_job_sequence"),
+    UniqueConstraint(
+        "organization_id",
+        "project_id",
+        "job_id",
+        "id",
+        name="uq_review_events_tenant_id",
+    ),
     _check("aggregate_sequence > 0", "ck_review_events_sequence_positive"),
     _check("schema_version > 0", "ck_review_events_schema_version_positive"),
 )
 Index("ix_review_events_tenant_cursor", review_events.c.organization_id, review_events.c.project_id, review_events.c.created_at, review_events.c.id)
+
+external_service_consents = Table(
+    "external_service_consents",
+    metadata,
+    _uuid("id", primary_key=True),
+    _uuid("organization_id"),
+    _uuid("project_id"),
+    _uuid("review_job_id"),
+    _uuid("paper_version_id"),
+    Column("service", String(128), nullable=False),
+    Column("provider_config_revision", Integer, nullable=False),
+    Column("policy_version", String(128), nullable=False),
+    _json("data_scope"),
+    Column("status", String(32), nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("version", Integer, nullable=False),
+    _uuid("decided_by", nullable=True),
+    _timestamp("decided_at", nullable=True),
+    _timestamp("expires_at", nullable=True),
+    _timestamp("superseded_at", nullable=True),
+    _timestamp("created_at"),
+    _timestamp("updated_at"),
+    ForeignKeyConstraint(
+        ["organization_id", "project_id", "review_job_id"],
+        ["review_jobs.organization_id", "review_jobs.project_id", "review_jobs.id"],
+        name="fk_external_service_consents_job_tenant",
+    ),
+    ForeignKeyConstraint(
+        ["organization_id", "project_id", "paper_version_id"],
+        ["paper_versions.organization_id", "paper_versions.project_id", "paper_versions.id"],
+        name="fk_external_service_consents_paper_version_tenant",
+    ),
+    ForeignKeyConstraint(
+        ["decided_by"], ["users.id"], name="fk_external_service_consents_decided_by"
+    ),
+    UniqueConstraint(
+        "review_job_id",
+        "paper_version_id",
+        "service",
+        "generation",
+        name="uq_external_service_consents_generation",
+    ),
+    _check(
+        "provider_config_revision > 0 AND generation > 0 AND version > 0",
+        "ck_external_service_consents_versions_positive",
+    ),
+    _values("status", tuple(sorted(("pending", "granted", "denied", "revoked", "expired", "not_required"))), "ck_external_service_consents_status"),
+    _check(
+        "(decided_by IS NULL) = (decided_at IS NULL)",
+        "ck_external_service_consents_decision_pair",
+    ),
+)
+Index(
+    "uq_external_service_consents_current",
+    external_service_consents.c.review_job_id,
+    external_service_consents.c.paper_version_id,
+    external_service_consents.c.service,
+    unique=True,
+    postgresql_where=text("superseded_at IS NULL"),
+)
+Index(
+    "ix_external_service_consents_tenant_job",
+    external_service_consents.c.organization_id,
+    external_service_consents.c.project_id,
+    external_service_consents.c.review_job_id,
+)
+
+review_documents = Table(
+    "review_documents",
+    metadata,
+    _uuid("id", primary_key=True),
+    _uuid("organization_id"),
+    _uuid("project_id"),
+    _uuid("review_job_id"),
+    _json("blocks"),
+    Column("document_version", Integer, nullable=False),
+    _uuid("base_decision_event_id", nullable=True),
+    _uuid("last_edited_by"),
+    _timestamp("created_at"),
+    _timestamp("updated_at"),
+    ForeignKeyConstraint(
+        ["organization_id", "project_id", "review_job_id"],
+        ["review_jobs.organization_id", "review_jobs.project_id", "review_jobs.id"],
+        name="fk_review_documents_job_tenant",
+    ),
+    ForeignKeyConstraint(
+        ["organization_id", "project_id", "review_job_id", "base_decision_event_id"],
+        [
+            "review_events.organization_id",
+            "review_events.project_id",
+            "review_events.job_id",
+            "review_events.id",
+        ],
+        name="fk_review_documents_base_event_tenant",
+    ),
+    ForeignKeyConstraint(
+        ["last_edited_by"], ["users.id"], name="fk_review_documents_last_edited_by"
+    ),
+    UniqueConstraint("review_job_id", name="uq_review_documents_job"),
+    _check("document_version > 0", "ck_review_documents_version_positive"),
+)
+Index(
+    "ix_review_documents_tenant_job",
+    review_documents.c.organization_id,
+    review_documents.c.project_id,
+    review_documents.c.review_job_id,
+)
 
 commands = Table(
     "commands",

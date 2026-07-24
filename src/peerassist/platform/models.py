@@ -865,6 +865,41 @@ class ReviewDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportVersion:
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    job_id: UUID
+    revision: int
+    schema_version: int
+    content_sha256: str
+    status: str
+    created_by: UUID
+    created_at: datetime
+    published_at: datetime | None = None
+    superseded_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _uuid(self.id, "id")
+        _tenant_ids(self.organization_id, self.project_id)
+        _uuid(self.job_id, "job_id")
+        _uuid(self.created_by, "created_by")
+        _positive(self.revision, "revision")
+        _positive(self.schema_version, "schema_version")
+        _sha256(self.content_sha256, "content_sha256")
+        if self.status not in {"draft", "published", "superseded"}:
+            raise ValueError("status must be draft, published, or superseded")
+        for name in ("created_at", "published_at", "superseded_at"):
+            _utc(getattr(self, name), name)
+        if self.published_at is not None and self.published_at < self.created_at:
+            raise ValueError("published_at must not precede created_at")
+        if self.superseded_at is not None and (
+            self.published_at is None or self.superseded_at < self.published_at
+        ):
+            raise ValueError("superseded_at must not precede published_at")
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewEvent:
     id: UUID
     organization_id: UUID

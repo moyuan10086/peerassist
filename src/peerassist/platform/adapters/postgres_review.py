@@ -9,9 +9,12 @@ from sqlalchemy import and_, delete, insert, or_, select, update
 from peerassist.platform.errors import NotFound, StaleVersion
 from peerassist.platform.models import (
     Artifact,
+    ExternalServiceConsent,
     LegacyRegistration,
     Paper,
     PaperVersion,
+    ReportVersion,
+    ReviewDocument,
     ReviewEvent,
     ReviewJob,
     TenantScope,
@@ -20,15 +23,18 @@ from peerassist.platform.models import (
 from . import postgres_schema as schema
 from .postgres_core import (
     _artifact,
+    _consent,
     _json,
     _legacy,
     _paper,
     _paper_version,
     _project_filter,
+    _report_version,
     _Repository,
     _require_initial,
     _require_next,
     _require_project,
+    _review_document,
     _review_event,
     _review_job,
 )
@@ -245,6 +251,12 @@ class _ReviewJobs(_Repository):
             return _project_filter(table, scope) & (table.c.job_id == job_id)
         # Delete children first because the M1 schema deliberately keeps audit
         # history but does not cascade ReviewJob-owned operational records.
+        for table in (schema.review_documents, schema.external_service_consents):
+            self.connection.execute(
+                delete(table).where(
+                    _project_filter(table, scope), table.c.review_job_id == job_id
+                )
+            )
         for table in (
             schema.artifacts,
             schema.work_items,
@@ -310,6 +322,414 @@ class _ReviewJobs(_Repository):
             .order_by(schema.review_events.c.aggregate_sequence)
         ).mappings()
         return tuple(_review_event(row) for row in rows)
+
+
+def _consent_values(consent: ExternalServiceConsent) -> dict[str, object]:
+    return {
+        "id": consent.id,
+        "organization_id": consent.organization_id,
+        "project_id": consent.project_id,
+        "review_job_id": consent.review_job_id,
+        "paper_version_id": consent.paper_version_id,
+        "service": consent.service,
+        "provider_config_revision": consent.provider_config_revision,
+        "policy_version": consent.policy_version,
+        "data_scope": _json(consent.data_scope),
+        "status": consent.status,
+        "generation": consent.generation,
+        "version": consent.version,
+        "decided_by": consent.decided_by,
+        "decided_at": consent.decided_at,
+        "expires_at": consent.expires_at,
+        "superseded_at": consent.superseded_at,
+        "created_at": consent.created_at,
+        "updated_at": consent.updated_at,
+    }
+
+
+class _Consents(_Repository):
+    @staticmethod
+    def _identity_filter(consent: ExternalServiceConsent):
+        return and_(
+            schema.external_service_consents.c.review_job_id == consent.review_job_id,
+            schema.external_service_consents.c.paper_version_id == consent.paper_version_id,
+            schema.external_service_consents.c.service == consent.service,
+        )
+
+    def get_current(
+        self,
+        scope: TenantScope,
+        review_job_id: UUID,
+        paper_version_id: UUID,
+        service: str,
+    ) -> ExternalServiceConsent | None:
+        row = self._one(
+            select(schema.external_service_consents)
+            .where(
+                _project_filter(schema.external_service_consents, scope),
+                schema.external_service_consents.c.review_job_id == review_job_id,
+                schema.external_service_consents.c.paper_version_id == paper_version_id,
+                schema.external_service_consents.c.service == service,
+                schema.external_service_consents.c.superseded_at.is_(None),
+            )
+            .with_for_update()
+        )
+        return None if row is None else _consent(row)
+
+    def add(self, scope: TenantScope, consent: ExternalServiceConsent) -> None:
+        _require_project(scope, consent)
+        _require_initial(consent)
+        if consent.generation != 1:
+            raise ValueError("initial consent generation must be 1")
+        if consent.superseded_at is not None:
+            raise ValueError("a new consent must be current")
+        existing = self._one(
+            select(schema.external_service_consents)
+            .where(
+                _project_filter(schema.external_service_consents, scope),
+                or_(
+                    schema.external_service_consents.c.id == consent.id,
+                    and_(
+                        self._identity_filter(consent),
+                        schema.external_service_consents.c.superseded_at.is_(None),
+                    ),
+                ),
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            if _consent(existing) == consent:
+                return
+            raise ValueError("current consent already exists")
+        self._integrity(
+            lambda: self.connection.execute(
+                insert(schema.external_service_consents).values(**_consent_values(consent))
+            ),
+            "consent already exists or is invalid",
+        )
+
+    def save(
+        self,
+        scope: TenantScope,
+        consent: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None:
+        _require_project(scope, consent)
+        current = self.get_current(
+            scope,
+            consent.review_job_id,
+            consent.paper_version_id,
+            consent.service,
+        )
+        if current is None:
+            raise NotFound()
+        self._require_replacement(current, consent, expected_version)
+        if consent.superseded_at is not None:
+            raise ValueError("save cannot supersede a consent")
+        result = self.connection.execute(
+            update(schema.external_service_consents)
+            .where(
+                _project_filter(schema.external_service_consents, scope),
+                schema.external_service_consents.c.id == consent.id,
+                schema.external_service_consents.c.version == expected_version,
+                schema.external_service_consents.c.superseded_at.is_(None),
+            )
+            .values(**_consent_values(consent))
+        )
+        if result.rowcount != 1:
+            raise StaleVersion(
+                details={"expected_version": expected_version, "current_version": None}
+            )
+
+    def supersede_and_add(
+        self,
+        scope: TenantScope,
+        superseded: ExternalServiceConsent,
+        replacement: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None:
+        _require_project(scope, superseded)
+        _require_project(scope, replacement)
+        current = self.get_current(
+            scope,
+            superseded.review_job_id,
+            superseded.paper_version_id,
+            superseded.service,
+        )
+        if current is None:
+            raise NotFound()
+        self._require_replacement(current, superseded, expected_version)
+        if superseded.superseded_at is None:
+            raise ValueError("superseded consent must record superseded_at")
+        if self._identity(replacement) != self._identity(current):
+            raise ValueError("replacement consent must retain the current consent key")
+        if replacement.generation != current.generation + 1:
+            raise ValueError("replacement consent generation must advance exactly once")
+        if replacement.version != 1:
+            raise StaleVersion(
+                details={"expected_version": 1, "current_version": replacement.version}
+            )
+        if replacement.status != "pending" or replacement.superseded_at is not None:
+            raise ValueError("replacement consent must be a current pending decision")
+
+        def operation() -> None:
+            result = self.connection.execute(
+                update(schema.external_service_consents)
+                .where(
+                    _project_filter(schema.external_service_consents, scope),
+                    schema.external_service_consents.c.id == superseded.id,
+                    schema.external_service_consents.c.version == expected_version,
+                    schema.external_service_consents.c.superseded_at.is_(None),
+                )
+                .values(**_consent_values(superseded))
+            )
+            if result.rowcount != 1:
+                raise StaleVersion(
+                    details={"expected_version": expected_version, "current_version": None}
+                )
+            self.connection.execute(
+                insert(schema.external_service_consents).values(**_consent_values(replacement))
+            )
+
+        self._integrity(operation, "replacement consent already exists or is invalid")
+
+    @staticmethod
+    def _identity(consent: ExternalServiceConsent) -> tuple[object, ...]:
+        return (
+            consent.organization_id,
+            consent.project_id,
+            consent.review_job_id,
+            consent.paper_version_id,
+            consent.service,
+        )
+
+    @classmethod
+    def _require_replacement(
+        cls,
+        current: ExternalServiceConsent,
+        replacement: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None:
+        if current.version != expected_version or replacement.version != expected_version + 1:
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_version,
+                    "current_version": current.version,
+                }
+            )
+        immutable = (
+            "id",
+            "organization_id",
+            "project_id",
+            "review_job_id",
+            "paper_version_id",
+            "service",
+            "provider_config_revision",
+            "policy_version",
+            "data_scope",
+            "generation",
+            "created_at",
+        )
+        if any(getattr(current, name) != getattr(replacement, name) for name in immutable):
+            raise ValueError("consent identity and generation are immutable")
+
+
+def _document_blocks(document: ReviewDocument) -> list[dict[str, object]]:
+    return [
+        {
+            "id": str(block.id),
+            "section": block.section,
+            "text": block.text,
+            "source_type": block.source_type,
+            "finding_lineage_id": block.finding_lineage_id,
+            "finding_id": block.finding_id,
+            "finding_revision": block.finding_revision,
+            "evidence_ids": list(block.evidence_ids),
+            "evidence_locator": None
+            if block.evidence_locator is None
+            else _json(block.evidence_locator),
+        }
+        for block in document.blocks
+    ]
+
+
+def _document_values(document: ReviewDocument) -> dict[str, object]:
+    return {
+        "id": document.id,
+        "organization_id": document.organization_id,
+        "project_id": document.project_id,
+        "review_job_id": document.review_job_id,
+        "blocks": _document_blocks(document),
+        "document_version": document.document_version,
+        "base_decision_event_id": document.base_decision_event_id,
+        "last_edited_by": document.last_edited_by,
+        "created_at": document.created_at,
+        "updated_at": document.updated_at,
+    }
+
+
+class _ReviewDocuments(_Repository):
+    def get(self, scope: TenantScope, review_job_id: UUID) -> ReviewDocument | None:
+        row = self._one(
+            select(schema.review_documents)
+            .where(
+                _project_filter(schema.review_documents, scope),
+                schema.review_documents.c.review_job_id == review_job_id,
+            )
+            .with_for_update()
+        )
+        return None if row is None else _review_document(row)
+
+    def add(self, scope: TenantScope, document: ReviewDocument) -> None:
+        _require_project(scope, document)
+        if document.document_version != 1:
+            raise StaleVersion(
+                details={"expected_version": 1, "current_version": document.document_version}
+            )
+        existing = self._one(
+            select(schema.review_documents)
+            .where(
+                _project_filter(schema.review_documents, scope),
+                or_(
+                    schema.review_documents.c.id == document.id,
+                    schema.review_documents.c.review_job_id == document.review_job_id,
+                ),
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            if _review_document(existing) == document:
+                return
+            raise ValueError("review document already exists for job")
+        self._integrity(
+            lambda: self.connection.execute(
+                insert(schema.review_documents).values(**_document_values(document))
+            ),
+            "review document already exists for job or is invalid",
+        )
+
+    def save(
+        self,
+        scope: TenantScope,
+        document: ReviewDocument,
+        expected_document_version: int,
+    ) -> None:
+        _require_project(scope, document)
+        current = self.get(scope, document.review_job_id)
+        if current is None:
+            raise NotFound()
+        if (
+            current.document_version != expected_document_version
+            or document.document_version != expected_document_version + 1
+        ):
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_document_version,
+                    "current_version": current.document_version,
+                }
+            )
+        immutable = ("id", "organization_id", "project_id", "review_job_id", "created_at")
+        if any(getattr(current, name) != getattr(document, name) for name in immutable):
+            raise ValueError("review document identity is immutable")
+        result = self.connection.execute(
+            update(schema.review_documents)
+            .where(
+                _project_filter(schema.review_documents, scope),
+                schema.review_documents.c.review_job_id == document.review_job_id,
+                schema.review_documents.c.document_version == expected_document_version,
+            )
+            .values(**_document_values(document))
+        )
+        if result.rowcount != 1:
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_document_version,
+                    "current_version": None,
+                }
+            )
+
+
+def _report_version_values(report_version: ReportVersion) -> dict[str, object]:
+    return {
+        "id": report_version.id,
+        "organization_id": report_version.organization_id,
+        "project_id": report_version.project_id,
+        "job_id": report_version.job_id,
+        "revision": report_version.revision,
+        "schema_version": report_version.schema_version,
+        "content_sha256": report_version.content_sha256,
+        "status": report_version.status,
+        "created_by": report_version.created_by,
+        "created_at": report_version.created_at,
+        "published_at": report_version.published_at,
+        "superseded_at": report_version.superseded_at,
+    }
+
+
+class _ReportVersions(_Repository):
+    def get(self, scope: TenantScope, report_version_id: UUID) -> ReportVersion | None:
+        row = self._one(
+            select(schema.report_versions).where(
+                _project_filter(schema.report_versions, scope),
+                schema.report_versions.c.id == report_version_id,
+            )
+        )
+        return None if row is None else _report_version(row)
+
+    def list_for_job(
+        self,
+        scope: TenantScope,
+        review_job_id: UUID,
+    ) -> tuple[ReportVersion, ...]:
+        rows = self.connection.execute(
+            select(schema.report_versions)
+            .where(
+                _project_filter(schema.report_versions, scope),
+                schema.report_versions.c.job_id == review_job_id,
+            )
+            .order_by(schema.report_versions.c.revision)
+        ).mappings()
+        return tuple(_report_version(row) for row in rows)
+
+    def add(self, scope: TenantScope, report_version: ReportVersion) -> None:
+        _require_project(scope, report_version)
+        existing = self._one(
+            select(schema.report_versions)
+            .where(
+                _project_filter(schema.report_versions, scope),
+                or_(
+                    schema.report_versions.c.id == report_version.id,
+                    and_(
+                        schema.report_versions.c.job_id == report_version.job_id,
+                        schema.report_versions.c.revision == report_version.revision,
+                    ),
+                ),
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            if _report_version(existing) == report_version:
+                return
+            raise ValueError("report version revision already exists")
+        latest = self._one(
+            select(schema.report_versions)
+            .where(
+                _project_filter(schema.report_versions, scope),
+                schema.report_versions.c.job_id == report_version.job_id,
+            )
+            .order_by(schema.report_versions.c.revision.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        expected_revision = (0 if latest is None else latest["revision"]) + 1
+        if report_version.revision != expected_revision:
+            raise ValueError("report version revision must advance exactly once")
+        self._integrity(
+            lambda: self.connection.execute(
+                insert(schema.report_versions).values(**_report_version_values(report_version))
+            ),
+            "report version revision already exists or is invalid",
+        )
 
 
 class _Artifacts(_Repository):

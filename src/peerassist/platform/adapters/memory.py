@@ -45,6 +45,7 @@ from ..models import (
     PaperVersion,
     Project,
     ProjectMembership,
+    ReportVersion,
     ReviewDocument,
     ReviewEvent,
     ReviewJob,
@@ -120,6 +121,7 @@ class _State:
         default_factory=dict
     )
     review_documents: dict[tuple[UUID, UUID, UUID], ReviewDocument] = field(default_factory=dict)
+    report_versions: dict[UUID, ReportVersion] = field(default_factory=dict)
     artifacts: dict[UUID, Artifact] = field(default_factory=dict)
     commands: dict[tuple[UUID, UUID, str, str], CommandRecord] = field(default_factory=dict)
     work_items: dict[UUID, WorkItem] = field(default_factory=dict)
@@ -537,6 +539,9 @@ class _ReviewJobs:
         for artifact_id, artifact in tuple(self._state.artifacts.items()):
             if artifact.job_id == job_id:
                 del self._state.artifacts[artifact_id]
+        for report_version_id, report_version in tuple(self._state.report_versions.items()):
+            if report_version.job_id == job_id:
+                del self._state.report_versions[report_version_id]
         for item_id, item in tuple(self._state.work_items.items()):
             if item.job_id == job_id:
                 del self._state.work_items[item_id]
@@ -772,6 +777,50 @@ class _ReviewDocuments:
         if any(getattr(current, name) != getattr(document, name) for name in immutable_names):
             raise ValueError("review document identity is immutable")
         self._state.review_documents[self._key(document)] = document
+
+
+class _ReportVersions:
+    def __init__(self, state: _State) -> None:
+        self._state = state
+
+    def get(self, scope: TenantScope, report_version_id: UUID) -> ReportVersion | None:
+        item = self._state.report_versions.get(report_version_id)
+        return (
+            item
+            if item is not None
+            and _project_scope_matches(scope, item.organization_id, item.project_id)
+            else None
+        )
+
+    def list_for_job(
+        self,
+        scope: TenantScope,
+        review_job_id: UUID,
+    ) -> tuple[ReportVersion, ...]:
+        return tuple(
+            sorted(
+                (
+                    item
+                    for item in self._state.report_versions.values()
+                    if item.job_id == review_job_id
+                    and _project_scope_matches(scope, item.organization_id, item.project_id)
+                ),
+                key=lambda item: item.revision,
+            )
+        )
+
+    def add(self, scope: TenantScope, report_version: ReportVersion) -> None:
+        _require_project_scope(scope, report_version)
+        current = self._state.report_versions.get(report_version.id)
+        if current == report_version:
+            return
+        if current is not None:
+            raise ValueError("report version ID already exists")
+        revisions = self.list_for_job(scope, report_version.job_id)
+        expected_revision = (revisions[-1].revision if revisions else 0) + 1
+        if report_version.revision != expected_revision:
+            raise ValueError("report version revision must advance exactly once")
+        self._state.report_versions[report_version.id] = report_version
 
 
 class _Artifacts:
@@ -1144,6 +1193,10 @@ class _OidcTransactions:
 
 
 class MemoryUnitOfWork:
+    consents: _Consents
+    review_documents: _ReviewDocuments
+    report_versions: _ReportVersions
+
     def __init__(self, factory: MemoryUnitOfWorkFactory, actor: Actor) -> None:
         self._factory = factory
         self.actor = actor
@@ -1167,6 +1220,7 @@ class MemoryUnitOfWork:
         self.review_jobs = _ReviewJobs(self._state)
         self.consents = _Consents(self._state)
         self.review_documents = _ReviewDocuments(self._state)
+        self.report_versions = _ReportVersions(self._state)
         self.artifacts = _Artifacts(self._state)
         self.commands = _Commands(self._state)
         self.work_items = _WorkItems(self._state, self._factory._clock)

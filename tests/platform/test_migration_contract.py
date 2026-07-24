@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 import pytest
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, ForeignKeyConstraint, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 
 EXPECTED_TABLES = {
@@ -30,6 +30,8 @@ EXPECTED_TABLES = {
     "artifacts",
     "legacy_registrations",
     "audit_events",
+    "external_service_consents",
+    "review_documents",
 }
 
 
@@ -111,6 +113,53 @@ def test_schema_names_tenant_constraints_and_required_deduplication_keys() -> No
         "ix_review_events_tenant_cursor",
     }.issubset(indexes)
     assert all(isinstance(index, Index) for index in indexes.values())
+
+
+def test_consent_document_default_metadata_preserves_tenant_and_version_lineage() -> None:
+    from peerassist.platform.adapters.postgres_schema import metadata
+
+    consents = metadata.tables["external_service_consents"]
+    documents = metadata.tables["review_documents"]
+    memberships = metadata.tables["project_memberships"]
+
+    assert isinstance(consents.c.data_scope.type, JSONB)
+    assert isinstance(documents.c.blocks.type, JSONB)
+    assert isinstance(memberships.c.is_default.type, Boolean)
+    assert memberships.c.is_default.nullable is False
+
+    assert _column_names(_constraint(metadata, "fk_external_service_consents_job_tenant")) == {
+        "organization_id",
+        "project_id",
+        "review_job_id",
+    }
+    assert _column_names(
+        _constraint(metadata, "fk_external_service_consents_paper_version_tenant")
+    ) == {"organization_id", "project_id", "paper_version_id"}
+    assert _column_names(_constraint(metadata, "fk_review_documents_job_tenant")) == {
+        "organization_id",
+        "project_id",
+        "review_job_id",
+    }
+    assert _column_names(
+        _constraint(metadata, "uq_external_service_consents_generation")
+    ) == {"review_job_id", "paper_version_id", "service", "generation"}
+    assert _column_names(_constraint(metadata, "uq_review_documents_job")) == {
+        "review_job_id"
+    }
+
+    indexes = {
+        index.name: index for table in metadata.tables.values() for index in table.indexes
+    }
+    assert str(indexes["uq_external_service_consents_current"].dialect_options["postgresql"]["where"]) == (
+        "superseded_at IS NULL"
+    )
+    default_where = str(
+        indexes["uq_project_memberships_default_user_organization"]
+        .dialect_options["postgresql"]["where"]
+    )
+    assert "is_default" in default_where
+    assert "status" in default_where
+    assert "revoked_at" in default_where
 
 
 def test_artifact_stage_manifest_reference_preserves_tenant_and_job_scope() -> None:
@@ -248,7 +297,7 @@ def test_alembic_configuration_is_deterministic_and_revision_is_reversible() -> 
     root = Path(__file__).parents[2]
     config = (root / "alembic.ini").read_text(encoding="utf-8")
     environment = (root / "infrastructure/migrations/env.py").read_text(encoding="utf-8")
-    revision_path = root / "infrastructure/migrations/versions/0001_platform_m1.py"
+    revision_path = root / "infrastructure/migrations/versions/0002_review_workspace.py"
     revision = revision_path.read_text(
         encoding="utf-8"
     )
@@ -266,9 +315,9 @@ def test_alembic_configuration_is_deterministic_and_revision_is_reversible() -> 
         if isinstance(node, ast.ImportFrom)
     }
     assert "peerassist.platform.adapters.postgres_schema" not in imports
-    assert "infrastructure.migrations.v0001_schema" in imports
-    assert "upgrade_v0001" in revision
-    assert "downgrade_v0001" in revision
+    assert "infrastructure.migrations.v0002_review_workspace" in imports
+    assert "upgrade_v0002" in revision
+    assert "downgrade_v0002" in revision
     assert "drop_all" not in revision
 
 
@@ -281,14 +330,33 @@ def test_frozen_v0001_schema_does_not_depend_on_live_application_metadata() -> N
     assert "REVISION_TABLES" in snapshot
 
 
+def test_frozen_v0002_migration_does_not_depend_on_live_application_metadata() -> None:
+    root = Path(__file__).parents[2]
+    snapshot = (root / "infrastructure/migrations/v0002_review_workspace.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "peerassist.platform.adapters.postgres_schema" not in snapshot
+    assert "external_service_consents" in snapshot
+    assert "review_documents" in snapshot
+    assert "is_default" in snapshot
+
+
 def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
     from peerassist.platform.adapters.postgres_v0001_signature import (
         CATALOG_INSPECTION_SQL,
         EXPECTED_CATALOG_FINGERPRINT,
         EXPECTED_CATALOG_SIGNATURE,
     )
+    from peerassist.platform.adapters.postgres_v0002_signature import (
+        EXPECTED_CATALOG_FINGERPRINT as EXPECTED_V0002_FINGERPRINT,
+    )
+    from peerassist.platform.adapters.postgres_v0002_signature import (
+        EXPECTED_CATALOG_SIGNATURE as EXPECTED_V0002_SIGNATURE,
+    )
 
     assert len(EXPECTED_CATALOG_SIGNATURE["tables"]) == 22
+    assert len(EXPECTED_V0002_SIGNATURE["tables"]) == 24
     assert set(EXPECTED_CATALOG_SIGNATURE) == {
         "tables",
         "columns",
@@ -302,6 +370,8 @@ def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
         "peerassist_reject_audit_mutation||plpgsql|"
     )
     assert len(EXPECTED_CATALOG_FINGERPRINT) == 64
+    assert len(EXPECTED_V0002_FINGERPRINT) == 64
+    assert EXPECTED_V0002_FINGERPRINT != EXPECTED_CATALOG_FINGERPRINT
     normalized = " ".join(CATALOG_INSPECTION_SQL.lower().split())
     for expression in (
         "format_type",
@@ -327,8 +397,12 @@ def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
     frozen_source = (root / "infrastructure/migrations/v0001_schema.py").read_text(
         encoding="utf-8"
     )
-    assert "postgres_v0001_signature" in readiness_source
+    assert "postgres_v0002_signature" in readiness_source
     assert "EXPECTED_CATALOG_FINGERPRINT" in frozen_source
+    frozen_v0002_source = (
+        root / "infrastructure/migrations/v0002_review_workspace.py"
+    ).read_text(encoding="utf-8")
+    assert EXPECTED_V0002_FINGERPRINT in frozen_v0002_source
     assert "EXPECTED_SCHEMA_CONSTRAINTS.issubset" not in readiness_source
 
 
@@ -349,7 +423,7 @@ def test_migration_module_does_not_auto_run_when_imported(
     monkeypatch.delenv("PEERASSIST_TEST_DATABASE_URL", raising=False)
     module = importlib.import_module("peerassist.platform.adapters.postgres_schema")
 
-    assert module.HEAD_REVISION == "0001_platform_m1"
+    assert module.HEAD_REVISION == "0002_review_workspace"
 
 
 def _constraint(metadata: object, name: str) -> object:

@@ -10,6 +10,7 @@ from peerassist.platform.adapters.memory import _Commands as MemoryCommands
 from peerassist.platform.adapters.memory import _Organizations as MemoryOrganizations
 from peerassist.platform.adapters.memory import _Papers as MemoryPapers
 from peerassist.platform.adapters.memory import _Projects as MemoryProjects
+from peerassist.platform.adapters.memory import _ReportVersions as MemoryReportVersions
 from peerassist.platform.adapters.memory import _ReviewJobs as MemoryReviewJobs
 from peerassist.platform.adapters.memory import _Users as MemoryUsers
 from peerassist.platform.adapters.memory import _WorkItems as MemoryWorkItems
@@ -21,8 +22,21 @@ from peerassist.platform.adapters.postgres_repositories import (
 )
 from peerassist.platform.adapters.postgres_repositories import _Projects as PostgresProjects
 from peerassist.platform.adapters.postgres_repositories import _Users as PostgresUsers
-from peerassist.platform.adapters.postgres_review import _Papers as PostgresPapers
-from peerassist.platform.adapters.postgres_review import _ReviewJobs as PostgresReviewJobs
+from peerassist.platform.adapters.postgres_review import (
+    _Consents as PostgresConsents,
+)
+from peerassist.platform.adapters.postgres_review import (
+    _Papers as PostgresPapers,
+)
+from peerassist.platform.adapters.postgres_review import (
+    _ReportVersions as PostgresReportVersions,
+)
+from peerassist.platform.adapters.postgres_review import (
+    _ReviewDocuments as PostgresReviewDocuments,
+)
+from peerassist.platform.adapters.postgres_review import (
+    _ReviewJobs as PostgresReviewJobs,
+)
 
 
 def test_repository_protocols_include_all_shared_contract_operations() -> None:
@@ -64,6 +78,11 @@ def test_repository_protocols_include_all_shared_contract_operations() -> None:
                 "expected_document_version",
             ),
         },
+        getattr(ports, "ReportVersionRepository"): {
+            "get": ("self", "scope", "report_version_id"),
+            "list_for_job": ("self", "scope", "review_job_id"),
+            "add": ("self", "scope", "report_version"),
+        },
     }
     for protocol, methods in expected.items():
         for name, parameters in methods.items():
@@ -77,6 +96,13 @@ def test_memory_and_postgres_repositories_conform_to_protocol_method_signatures(
         (ports.ProjectRepository, MemoryProjects, PostgresProjects),
         (ports.PaperRepository, MemoryPapers, PostgresPapers),
         (ports.ReviewJobRepository, MemoryReviewJobs, PostgresReviewJobs),
+        (ports.ConsentRepository, memory_adapters._Consents, PostgresConsents),
+        (
+            ports.ReviewDocumentRepository,
+            memory_adapters._ReviewDocuments,
+            PostgresReviewDocuments,
+        ),
+        (ports.ReportVersionRepository, MemoryReportVersions, PostgresReportVersions),
         (ports.CommandRepository, MemoryCommands, PostgresCommands),
         (ports.WorkItemRepository, MemoryWorkItems, PostgresWorkItems),
         (ports.AuditRepository, MemoryAudit, PostgresAudit),
@@ -90,7 +116,7 @@ def test_memory_and_postgres_repositories_conform_to_protocol_method_signatures(
                 assert tuple(inspect.signature(getattr(implementation, name)).parameters) == expected
 
 
-def test_memory_consent_document_repositories_match_their_ports_and_uow() -> None:
+def test_review_workspace_repositories_are_exposed_by_both_uows() -> None:
     pairs = (
         (ports.ConsentRepository, memory_adapters._Consents),
         (ports.ReviewDocumentRepository, memory_adapters._ReviewDocuments),
@@ -106,3 +132,16 @@ def test_memory_consent_document_repositories_match_their_ports_and_uow() -> Non
     annotations = get_type_hints(ports.UnitOfWork)
     assert annotations["consents"] is ports.ConsentRepository
     assert annotations["review_documents"] is ports.ReviewDocumentRepository
+    assert annotations["report_versions"] is ports.ReportVersionRepository
+
+    assert {
+        "consents",
+        "review_documents",
+        "report_versions",
+    }.issubset(memory_adapters.MemoryUnitOfWork.__dict__.get("__annotations__", {}))
+
+    from peerassist.platform.adapters.postgres import PostgresUnitOfWork
+
+    assert {"consents", "review_documents", "report_versions"}.issubset(
+        PostgresUnitOfWork._repository_names
+    )

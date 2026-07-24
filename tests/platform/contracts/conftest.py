@@ -71,6 +71,11 @@ def uow_factory(request: pytest.FixtureRequest, clock: MutableClock):
     return MemoryUnitOfWorkFactory(clock=clock)
 
 
+@pytest.fixture
+def supports_cross_tenant_id_reuse(request: pytest.FixtureRequest) -> bool:
+    return request.config.getoption("--adapter") == "memory"
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     if config.getoption("--adapter") in {"postgresql", "minio", "keycloak"}:
         for item in items:
@@ -135,7 +140,8 @@ class _ContractPostgresFactory:
 
 class _ContractPostgresUow:
     _repository_names = (
-        "users", "organizations", "projects", "papers", "review_jobs", "artifacts",
+        "users", "organizations", "projects", "papers", "review_jobs", "consents",
+        "review_documents", "report_versions", "artifacts",
         "commands", "work_items", "outbox", "audit", "legacy_registrations",
         "browser_sessions", "oidc_transactions",
     )
@@ -278,7 +284,8 @@ class _ContractRepository:
         scope = args[0] if hasattr(args[0], "organization_id") else None
         value = args[1] if len(args) > 1 else None
         project_repositories = {
-            "projects", "papers", "review_jobs", "artifacts", "work_items", "legacy_registrations"
+            "projects", "papers", "review_jobs", "consents", "review_documents",
+            "report_versions", "artifacts", "work_items", "legacy_registrations"
         }
         if self._name in project_repositories and scope.project_id is None:
             return
@@ -296,6 +303,18 @@ class _ContractRepository:
             self._uow.ensure_user(version.created_by)
         elif self._name == "review_jobs" and operation == "add":
             self._uow.ensure_paper_version(scope, value.paper_version_id, value.created_by)
+        elif self._name == "consents" and operation in {"add", "supersede_and_add"}:
+            consent = value if operation == "add" else args[2]
+            self._uow.ensure_job(scope, consent.review_job_id)
+            self._uow.ensure_paper_version(scope, consent.paper_version_id)
+            if consent.decided_by is not None:
+                self._uow.ensure_user(consent.decided_by)
+        elif self._name == "review_documents" and operation == "add":
+            self._uow.ensure_job(scope, value.review_job_id)
+            self._uow.ensure_user(value.last_edited_by)
+        elif self._name == "report_versions" and operation == "add":
+            self._uow.ensure_job(scope, value.job_id)
+            self._uow.ensure_user(value.created_by)
         elif self._name == "artifacts" and operation == "add":
             self._uow.ensure_job(scope, value.job_id)
         elif self._name == "legacy_registrations" and operation == "add":

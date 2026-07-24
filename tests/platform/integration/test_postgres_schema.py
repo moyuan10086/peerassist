@@ -82,7 +82,7 @@ async def test_real_postgres_upgrade_downgrade_and_repeat(
 
     command.upgrade(alembic_config, "head")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0001_platform_m1"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == live_schema.HEAD_REVISION
     assert await readiness.check() is True
     _assert_relationship_integrity(engine)
     await _assert_readiness_detects_catalog_drift(engine, readiness)

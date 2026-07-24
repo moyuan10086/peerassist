@@ -22,6 +22,7 @@ from peerassist.platform.models import (
     BrowserSession,
     CommandRecord,
     ExternalIdentity,
+    ExternalServiceConsent,
     LegacyRegistration,
     ObjectDescriptor,
     OidcTransaction,
@@ -32,6 +33,9 @@ from peerassist.platform.models import (
     PaperVersion,
     Project,
     ProjectMembership,
+    ReportVersion,
+    ReviewDocument,
+    ReviewDocumentBlock,
     ReviewEvent,
     ReviewJob,
     Role,
@@ -134,6 +138,7 @@ def _project_membership(row: Mapping[str, Any]) -> ProjectMembership:
     return ProjectMembership(
         row["id"], row["organization_id"], row["project_id"], row["user_id"], Role(row["role"]),
         row["status"], row["version"], row["created_at"], row["updated_at"], row["revoked_at"],
+        row["is_default"],
     )
 
 
@@ -164,6 +169,75 @@ def _review_event(row: Mapping[str, Any]) -> ReviewEvent:
     return ReviewEvent(
         row["id"], row["organization_id"], row["project_id"], row["job_id"],
         row["aggregate_sequence"], row["event_type"], row["schema_version"], row["payload"], row["created_at"],
+    )
+
+
+def _consent(row: Mapping[str, Any]) -> ExternalServiceConsent:
+    return ExternalServiceConsent(
+        row["id"],
+        row["organization_id"],
+        row["project_id"],
+        row["review_job_id"],
+        row["paper_version_id"],
+        row["service"],
+        row["provider_config_revision"],
+        row["policy_version"],
+        row["data_scope"],
+        row["status"],
+        row["generation"],
+        row["version"],
+        row["decided_by"],
+        row["decided_at"],
+        row["expires_at"],
+        row["superseded_at"],
+        row["created_at"],
+        row["updated_at"],
+    )
+
+
+def _review_document(row: Mapping[str, Any]) -> ReviewDocument:
+    blocks = tuple(
+        ReviewDocumentBlock(
+            id=UUID(block["id"]),
+            section=block["section"],
+            text=block["text"],
+            source_type=block["source_type"],
+            finding_lineage_id=block.get("finding_lineage_id"),
+            finding_id=block.get("finding_id"),
+            finding_revision=block.get("finding_revision"),
+            evidence_ids=tuple(block.get("evidence_ids", ())),
+            evidence_locator=block.get("evidence_locator"),
+        )
+        for block in row["blocks"]
+    )
+    return ReviewDocument(
+        row["id"],
+        row["organization_id"],
+        row["project_id"],
+        row["review_job_id"],
+        blocks,
+        row["document_version"],
+        row["base_decision_event_id"],
+        row["last_edited_by"],
+        row["created_at"],
+        row["updated_at"],
+    )
+
+
+def _report_version(row: Mapping[str, Any]) -> ReportVersion:
+    return ReportVersion(
+        row["id"],
+        row["organization_id"],
+        row["project_id"],
+        row["job_id"],
+        row["revision"],
+        row["schema_version"],
+        row["content_sha256"],
+        row["status"],
+        row["created_by"],
+        row["created_at"],
+        row["published_at"],
+        row["superseded_at"],
     )
 
 

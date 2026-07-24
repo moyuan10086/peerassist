@@ -25,6 +25,7 @@ from peerassist.platform.models import (
     PaperVersion,
     Project,
     ProjectMembership,
+    ReportVersion,
     ReviewEvent,
     ReviewJob,
     Role,
@@ -134,6 +135,23 @@ def document(scope: TenantScope, now, *, version: int = 1):
         ),
         version,
         None,
+        uuid4(),
+        now,
+        now,
+    )
+
+
+def report_version(scope: TenantScope, now, *, job_id=None, revision: int = 1) -> ReportVersion:
+    assert scope.project_id is not None
+    return ReportVersion(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        job_id or uuid4(),
+        revision,
+        1,
+        "b" * 64,
+        "published",
         uuid4(),
         now,
         now,
@@ -481,7 +499,10 @@ def test_consent_reapply_is_atomic_when_the_new_generation_is_invalid(uow_factor
 def test_consent_current_keys_are_isolated_when_tenants_reuse_job_and_version_ids(
     uow_factory,
     clock,
+    supports_cross_tenant_id_reuse,
 ) -> None:
+    if not supports_cross_tenant_id_reuse:
+        pytest.skip("adapter uses globally unique aggregate IDs")
     principal = actor()
     shared_project_id = uuid4()
     first_scope = TenantScope(uuid4(), shared_project_id)
@@ -560,7 +581,10 @@ def test_review_document_repository_enforces_one_per_job_cas_and_tenant_scope(
 def test_review_document_keys_are_isolated_when_tenants_reuse_job_ids(
     uow_factory,
     clock,
+    supports_cross_tenant_id_reuse,
 ) -> None:
+    if not supports_cross_tenant_id_reuse:
+        pytest.skip("adapter uses globally unique aggregate IDs")
     principal = actor()
     shared_project_id = uuid4()
     first_scope = TenantScope(uuid4(), shared_project_id)
@@ -627,6 +651,28 @@ def test_setting_default_project_membership_clears_previous_default_in_same_orga
         assert stored_first.is_default is False
         assert stored_first.version == 2
         assert stored_second == second
+
+
+def test_report_versions_are_immutable_revisioned_and_tenant_scoped(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    hidden_scope = TenantScope(uuid4(), scope.project_id)
+    first = report_version(scope, clock())
+    second = report_version(scope, clock(), job_id=first.job_id, revision=2)
+
+    with uow_factory(principal) as uow:
+        uow.report_versions.add(scope, first)
+        uow.report_versions.add(scope, first)
+        with pytest.raises(ValueError, match="revision"):
+            uow.report_versions.add(scope, replace(first, id=uuid4()))
+        uow.report_versions.add(scope, second)
+        uow.commit()
+
+    with uow_factory(principal) as uow:
+        assert uow.report_versions.get(scope, first.id) == first
+        assert uow.report_versions.get(hidden_scope, first.id) is None
+        assert uow.report_versions.list_for_job(scope, first.job_id) == (first, second)
+        assert uow.report_versions.list_for_job(hidden_scope, first.job_id) == ()
 
 
 def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clock) -> None:

@@ -354,24 +354,59 @@ class _Projects(_Repository):
             "role": membership.role.value, "status": membership.status, "version": membership.version,
             "created_at": membership.created_at, "updated_at": membership.updated_at,
             "revoked_at": membership.revoked_at,
+            "is_default": membership.is_default,
         }
-        if expected_version is None:
-            self._integrity(
-                lambda: self.connection.execute(insert(schema.project_memberships).values(**values)),
-                "project membership already exists or is invalid",
+        def operation() -> None:
+            if membership.is_default:
+                self.connection.execute(
+                    select(schema.project_memberships.c.id)
+                    .where(
+                        schema.project_memberships.c.organization_id
+                        == scope.organization_id,
+                        schema.project_memberships.c.user_id == membership.user_id,
+                        schema.project_memberships.c.is_default.is_(True),
+                    )
+                    .with_for_update()
+                )
+                self.connection.execute(
+                    update(schema.project_memberships)
+                    .where(
+                        schema.project_memberships.c.organization_id
+                        == scope.organization_id,
+                        schema.project_memberships.c.user_id == membership.user_id,
+                        schema.project_memberships.c.id != membership.id,
+                        schema.project_memberships.c.is_default.is_(True),
+                    )
+                    .values(
+                        is_default=False,
+                        version=schema.project_memberships.c.version + 1,
+                        updated_at=membership.updated_at,
+                    )
+                )
+            if expected_version is None:
+                self.connection.execute(insert(schema.project_memberships).values(**values))
+                return
+            result = self.connection.execute(
+                update(schema.project_memberships)
+                .where(
+                    _project_filter(schema.project_memberships, scope),
+                    schema.project_memberships.c.user_id == membership.user_id,
+                    schema.project_memberships.c.version == expected_version,
+                )
+                .values(**values)
             )
-            return
-        result = self.connection.execute(
-            update(schema.project_memberships)
-            .where(
-                _project_filter(schema.project_memberships, scope),
-                schema.project_memberships.c.user_id == membership.user_id,
-                schema.project_memberships.c.version == expected_version,
-            )
-            .values(**values)
+            if result.rowcount != 1:
+                raise StaleVersion(
+                    details={
+                        "expected_version": expected_version,
+                        "current_version": None,
+                    }
+                )
+
+        self._integrity(
+            operation,
+            "project membership already exists or is invalid",
         )
-        if result.rowcount != 1:
-            raise StaleVersion(details={"expected_version": expected_version, "current_version": None})
 
 
 class _BrowserSessions(_Repository):

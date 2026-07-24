@@ -29,6 +29,7 @@ from .models import (
     PaperVersion,
     Project,
     ProjectMembership,
+    ReportVersion,
     ReviewDocument,
     ReviewEvent,
     ReviewJob,
@@ -140,6 +141,16 @@ class ReviewDocumentRepository(Protocol):
         document: ReviewDocument,
         expected_document_version: int,
     ) -> None: ...
+
+
+class ReportVersionRepository(Protocol):
+    def get(self, scope: TenantScope, report_version_id: UUID) -> ReportVersion | None: ...
+    def list_for_job(
+        self,
+        scope: TenantScope,
+        review_job_id: UUID,
+    ) -> tuple[ReportVersion, ...]: ...
+    def add(self, scope: TenantScope, report_version: ReportVersion) -> None: ...
 
 
 class ArtifactRepository(Protocol):
@@ -275,6 +286,7 @@ class UnitOfWork(Protocol):
     review_jobs: ReviewJobRepository
     consents: ConsentRepository
     review_documents: ReviewDocumentRepository
+    report_versions: ReportVersionRepository
     artifacts: ArtifactRepository
     commands: CommandRepository
     work_items: WorkItemRepository

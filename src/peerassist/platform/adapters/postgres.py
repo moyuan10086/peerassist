@@ -20,14 +20,23 @@ from .postgres_repositories import (
     _Projects,
     _Users,
 )
-from .postgres_review import _Artifacts, _LegacyRegistrations, _Papers, _ReviewJobs
+from .postgres_review import (
+    _Artifacts,
+    _Consents,
+    _LegacyRegistrations,
+    _Papers,
+    _ReportVersions,
+    _ReviewDocuments,
+    _ReviewJobs,
+)
 
 
 class PostgresUnitOfWork:
     """One explicit database transaction with adapter-private connection state."""
 
     _repository_names = (
-        "users", "organizations", "projects", "papers", "review_jobs", "artifacts", "commands",
+        "users", "organizations", "projects", "papers", "review_jobs", "consents",
+        "review_documents", "report_versions", "artifacts", "commands",
         "work_items", "outbox", "audit", "legacy_registrations", "browser_sessions", "oidc_transactions",
     )
 
@@ -70,6 +79,9 @@ class PostgresUnitOfWork:
             "projects": _Projects(self),
             "papers": _Papers(self),
             "review_jobs": _ReviewJobs(self),
+            "consents": _Consents(self),
+            "review_documents": _ReviewDocuments(self),
+            "report_versions": _ReportVersions(self),
             "artifacts": _Artifacts(self),
             "commands": _Commands(self),
             "work_items": _WorkItems(self, self._factory.clock),
