@@ -1,5 +1,7 @@
 # PeerAssist 真实论文端到端审稿设计
 
+**状态说明：** 底层 Paper、ReviewJob、检查点、人工确认和不可变产物协议继续有效；教师端导航、默认快速模式、服务端审稿文档、平台模型授权和导出完成语义以 `2026-07-24-peerassist-evidence-review-workspace-positioning-design.md` 为准。
+
 ## 1. 目标
 
 把 PeerAssist 从“绑定固定 run 目录的审稿展示页”升级为可上传真实论文、持续执行、刷新恢复并最终进入人工确认与报告导出的审稿系统。

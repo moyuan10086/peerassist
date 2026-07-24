@@ -4,6 +4,8 @@
 **日期：** 2026-07-24
 **适用范围：** 教师端产品、聚合 API、平台数据模型与现有审稿流水线
 
+本规格覆盖 `2026-07-20-peerassist-editorial-workspace-ui-design.md` 中“阅读/审稿/证据/交付”导航、本地浏览器草稿和确认后才从旧 Artifact 导出的约定；PDF 阅读、响应式布局、焦点管理与证据定位行为继续沿用。它也覆盖 `2026-07-13-peerassist-end-to-end-review-design.md` 中教师端直接暴露任务时间线、工具调用和多模式选择的约定；底层可恢复任务与不可变产物协议继续沿用。
+
 ## 1. 产品定位
 
 PeerAssist 是面向高校教师和科研人员的证据驱动 AI 审稿工作台。它帮助用户快速理解论文、定位值得核查的问题、形成有原文依据的审稿意见，并导出到现有期刊、会议或教学流程。
@@ -28,12 +30,12 @@ PeerAssist 的价值不是代替审稿人作判断，也不是重建期刊或会
 - AI 输出是审稿线索和草稿，不是自动接收、拒稿、学术不端或研究诚信判定。
 - 主要意见必须有可定位证据；证据不足时必须标为“待核查”，不能伪装成确定结论。
 - 上传、解析、模型、保存或导出部分失败时，已上传论文和已编辑内容不能丢失。
-- 兼容现有 `Paper`、`PaperVersion`、`ReviewJob`、`Artifact`、`ReviewEvent`、Concern/Decision 与 Project 数据隔离，不为产品改名而重建底层。
+- 兼容现有 `Paper`、`PaperVersion`、`ReviewJob`、`Artifact`、`ReviewEvent`、候选 finding 与老师决策事件，以及 Project 数据隔离，不为产品改名而重建底层。平台 `Decision` 是权限判定枚举，不是审稿意见对象。
 - 普通老师不需要理解 Project、Agent、队列、事件流、对象存储或内部产物路径。
 
 ### 2.3 事实与假设
 
-已确认的事实：系统已有 PDF 上传与阅读、任务状态、证据产物、人工决策、草稿保存、导出基础、OIDC、PostgreSQL、对象存储和 Worker；旧文件任务模型已有逐任务外部服务授权，但 M1 平台模型尚未形成同等的权威授权记录；当前草稿以事件载荷保存，缺少独立可并发编辑的审稿文档。
+已确认的事实：系统已有 PDF 上传与阅读、任务状态、证据产物、人工决策事件、草稿保存、导出基础、OIDC、PostgreSQL、对象存储和 Worker；旧文件任务模型已有逐任务外部服务授权，但 M1 平台模型尚未形成同等的权威授权记录；当前草稿以 `review_job.draft_saved` 事件载荷保存，缺少独立可并发编辑的审稿文档；当前平台 `finalize()` 会先把任务改为 completed，尚未以导出 Artifact 成功登记作为完成条件。
 
 当前产品假设：教师最常见的使用方式是单人审阅一篇 PDF，再把意见提交到外部系统。团队指派、编辑部工作流和多人实时协作只有在试用数据证明必要后再进入范围。
 
@@ -95,7 +97,7 @@ PeerAssist 的价值不是代替审稿人作判断，也不是重建期刊或会
 
 ### 6.1 我的审稿
 
-- 首次进入直接显示 PDF 上传区，不要求先创建项目或配置 Agent。
+- 首次进入直接显示 PDF 上传区，不要求先创建项目或配置 Agent。P0 默认启动快速审稿，不让首次用户选择运行模式；完整审稿模式在 P1 经过质量和耗时验证后再显示。
 - 上传成功后立即创建可恢复的论文记录；重复上传相同文件时复用已有论文，并询问继续已有审稿还是新建一次审稿。
 - 任务卡只显示老师能理解的状态：准备论文、生成概要、生成意见、待核查、可导出、失败。
 - 每个非终态都说明当前发生了什么和下一步动作；失败任务可以重试或删除，删除失败记录不删除共享的原始论文，除非用户明确删除论文。
@@ -132,13 +134,18 @@ PeerAssist 的价值不是代替审稿人作判断，也不是重建期刊或会
 - `ReviewJob`：一次审稿及其可恢复状态。
 - `Artifact`：解析、概要、证据、候选意见和导出物。
 - `ReviewEvent`：任务状态和可审计事件。
-- Concern / Decision：AI 意见和老师处理动作。
+- 候选 finding Artifact：AI 意见及其 lineage、revision 和证据绑定。
+- `ReviewEvent` 中的老师决策事件：接受、改写、降级和删除动作的追加事实；服务端按事件序列折叠出当前决策投影。
 - `Project`：数据隔离基础设施，不作为教师工作概念。
 
 平台侧只新增两个权威对象：
 
-1. `ExternalServiceConsent`：绑定 `review_job_id + service + manuscript_version`，记录 pending/granted/denied、决定人、决定时间、数据范围和策略版本。旧文件任务中的 consent 在迁移时映射到该对象，不能同时存在两个可写真相来源。
-2. `ReviewDocument`：绑定 `review_job_id`，保存结构化正文、引用的 finding/evidence ID、版本号、最后编辑人和时间。现有 `review_job.draft_saved` 事件只作为迁移来源和审计记录，不再承载完整文档的权威当前值。
+1. `ExternalServiceConsent`：包含不可变 record ID、单调 `generation`、`organization_id`、`project_id`、`review_job_id`、`paper_version_id`、`service`、`provider_config_revision`、`policy_version`、`data_scope`、`status`、`decided_by`、`decided_at`、`expires_at`、`superseded_at`、`version` 和时间戳。状态为 `pending/granted/denied/revoked/expired/not_required`；只有 granted、未过期、未撤销、未被 supersede、论文版本与任务一致且 provider 配置 revision 未被管理员停用时有效。唯一约束为 `(review_job_id, paper_version_id, service, generation)`，并以部分唯一约束保证同一 job/version/service 只有一个 `superseded_at IS NULL` 的 current record。变更使用独立乐观版本。grant/deny 只能从 pending 进入；granted 可进入 revoked/expired；denied/revoked/expired 后重新授权，或论文版本、策略、provider 配置和数据范围变化时，在同一事务中 supersede current record 并以 `generation + 1` 创建新的 pending，不能把旧决定改回 granted。
+2. `ReviewDocument`：每个 `review_job_id` 唯一，使用独立于 `ReviewJob.version` 的 `document_version`。正文 schema 固定为总体评价、主要问题、次要问题、修改建议四个 section；每个 block 保存用户文本、可选 `finding_lineage_id + finding_id + finding_revision`、evidence ID/locator 和来源类型。对象还记录 `base_decision_event_id`、最后编辑人和时间。保存使用 `expected_document_version`，引用已被新 finding revision 取代时返回可合并冲突，而不是静默改写。
+
+平台 `Decision` 权限枚举不参与审稿数据模型。老师决策的权威事实仍是追加的 `ReviewEvent`；读取时按单调 event ID 对同一 finding lineage 折叠当前值。最终导出冻结 `ReviewDocument.document_version + base_decision_event_id + finding revisions`，从而避免草稿与意见在导出过程中漂移。
+
+旧文件任务迁移必须先通过 legacy registration 或内容摘要，把 legacy `paper_id` 映射到平台 `PaperVersion.id`。旧 `ExternalServiceConsent` 和平台已有 `review_job.decision_recorded` consent 事件只可在映射唯一、决定字段完整且目标 provider 配置仍启用时导入；无法唯一映射或字段不足时保持 blocked 并要求用户重新授权，绝不能推断为 granted。切换后平台对象是唯一可写真相，旧记录只读。
 
 ### 7.2 教师端聚合 API
 
@@ -149,25 +156,38 @@ GET    /api/v1/review-workspace
 POST   /api/v1/papers
 POST   /api/v1/papers/{paper_id}/reviews
 GET    /api/v1/reviews/{review_id}
+POST   /api/v1/reviews/{review_id}/cancel
+POST   /api/v1/reviews/{review_id}/retry
+DELETE /api/v1/reviews/{review_id}
 POST   /api/v1/reviews/{review_id}/consents/model
 GET    /api/v1/reviews/{review_id}/evidence
+POST   /api/v1/reviews/{review_id}/findings/{lineage_id}/decision
+GET    /api/v1/reviews/{review_id}/document
 PUT    /api/v1/reviews/{review_id}/document
 POST   /api/v1/reviews/{review_id}/export
+GET    /api/v1/reviews/{review_id}/exports
+GET    /api/v1/reviews/{review_id}/exports/{artifact_id}/download
 ```
 
-聚合 API 从登录会话推导默认 Project，不接受客户端用任意 Project ID 绕过隔离。写操作使用幂等键和 `expected_version`；错误返回稳定错误码、可恢复性和建议动作，前端不根据 HTTP 文案猜状态。
+`POST /papers` 返回 `created`、`duplicate_with_reviews` 或 `duplicate_without_review`。相同幂等键重放返回原响应；相同内容使用新幂等键时不重复存储 Paper/PaperVersion，但允许客户端用 `review_action=continue_existing|create_new` 明确选择审稿行为。重解析通过 review retry 在失败阶段恢复，不覆盖原论文。
+
+`GET /review-workspace` 返回最近论文、审稿状态、当前 Project 解析结果和可执行动作。用户只有一个 active Project membership 时由服务端选为默认；没有时由 bootstrap 原子创建个人默认 Project，或在无法创建时返回 `workspace_unavailable`；有多个但没有服务端持久化的 default membership 时返回 `workspace_selection_required`，用户选择后保存默认值。绝不按列表顺序或浏览器缓存选择。所有资源读取仍按资源所属 Project 重新授权。
+
+finding decision 请求必须携带准确的 `lineage_id`、`finding_id`、`finding_revision`、`action=accept|rewrite|downgrade|delete`、可选改写文本、`expected_review_version`、`expected_document_version` 和 `last_decision_event_id`。服务端在同一数据库事务中校验 finding revision、追加决策事件、把动作投影到 `ReviewDocument` 并更新 `base_decision_event_id`；任一版本过期则整体不写入并返回 `finding_revision_conflict` 或 `document_version_conflict`。自由撰写和段落编辑继续走 document PUT。
+
+版本域必须显式区分：review cancel/retry/delete 使用 `expected_review_version`，授权使用 `expected_consent_version`，文档保存使用 `expected_document_version`，导出请求携带要冻结的 `document_version` 和 `decision_event_id`。model consent 端点接受 grant/deny/revoke/reapply，状态转换不合法时返回 `consent_state_conflict`。除 GET 和文件下载外，写操作使用幂等键。API 返回稳定错误码、`retryable`、当前版本和建议动作；异步 retry/export 返回 operation 状态并由 review/exports GET 轮询，前端不根据 HTTP 文案猜状态。
 
 ### 7.3 状态原则
 
 - 论文状态、任务状态、文档状态和导出状态彼此独立，页面组合展示，不用一个 `completed` 覆盖所有事实。
-- Worker 只能在已持久化且仍有效的同任务授权下调用外部模型。
-- 导出流程为 `draft_ready → exporting → exported`；生成文件并登记 Artifact 成功后，审稿任务才可标为完成。
+- Worker 必须在每次外部调用前重新读取授权并校验租户、任务、论文版本、service、provider 配置、策略、数据范围、状态和有效期；排队时的旧检查不能代替执行前检查。
+- 导出不新增第三个业务对象：复用 `CommandRecord` 提供幂等身份，`WorkItem/Outbox` 驱动异步执行，`Artifact` 保存权威结果。导出 logical name 由 `review_id + document_version + decision_event_id + format` 确定，并建立 `(job_id, logical_name)` 唯一约束。流程为 `draft_ready → exporting → exported`；对象先写 deterministic staging key，校验后在同一数据库事务登记 Artifact、追加事件并把任务标为 completed。若对象已发布但事务失败，重试按 command/logical name 对账并复用；若对象生成失败则清理 staging key。只有权威 Artifact 为 ready 后才能完成。
 - 所有状态转换由服务器持有；浏览器缓存只优化体验，不是权威来源。
 
 ## 8. 隐私、授权与管理员边界
 
 - 授权界面必须说明服务提供方、发送的数据、用途以及拒绝后的本地能力。
-- 授权按审稿任务和论文版本生效，不能用一次全局同意覆盖未来稿件；论文版本变化后需要重新确认。
+- 授权按审稿任务、论文版本、服务、策略和数据范围生效，不能用一次全局同意覆盖未来稿件；论文版本或发送范围变化后需要重新确认。管理员停用 provider 配置后，相关授权不再有效。
 - 拒绝授权不是错误。系统进入本地模式并保留后续再次授权入口。
 - API Key 只保存在服务端密钥存储；前端只显示掩码、提供连通性测试和模型列表拉取。
 - 管理员可配置模型和查看服务状态，普通老师只看“可用/不可用/需授权”，不接触 Base URL、密钥或内部模型路由。
@@ -184,7 +204,7 @@ POST   /api/v1/reviews/{review_id}/export
 | 模型超时、限流或返回畸形数据 | 保留本地产物和已编辑文档；记录可重试失败；不把半成品标为完成 |
 | 两个标签页同时编辑 | 第二个保存收到版本冲突并由用户处理；不得最后写入者静默覆盖 |
 | 刷新、退出再登录或 Worker 重启 | 从服务器状态恢复；不依赖旧浏览器缓存伪造任务 |
-| 导出生成成功但登记失败 | 状态保持可重试的导出失败；清理或回收孤立文件；不标记完成 |
+| 导出生成成功但登记失败 | 用确定性 staging key 和 logical name 对账；重试复用已校验对象并登记 Artifact；不标记完成 |
 | 删除失败任务时对象删除部分失败 | 先做权威软删除/墓碑，后台幂等清理；列表立即不再展示该失败记录 |
 | 越权 ID、过期会话或普通账号访问管理 API | 返回无内容泄露的 401/403/404；不能从错误差异推断论文存在 |
 | 原文包含 prompt injection | 作为不可信论文内容处理；不能改变系统规则、调用权限或导出边界 |
@@ -217,12 +237,14 @@ POST   /api/v1/reviews/{review_id}/export
 - 普通老师首次进入只需理解四个一级入口，无需配置 Project、Agent 或模型内部参数。
 - 使用一篇可选择文本的 PDF 能完成“上传、本地解析、授权选择、概要、证据核查、编辑、导出”全流程。
 - 拒绝外部模型后仍可阅读 PDF、使用本地解析结果、编辑并导出人工内容。
-- 至少 95% 的主要 AI 意见能定位到页码或原文片段；不能定位的意见明确标为待核查。
+- 使用 5 篇不同结构的公开、可选择文本 PDF 做 P0 样本；主要 AI 意见证据可定位率以“带有效页码或原文 locator 的主要意见数 / 主要 AI 意见总数”计算，不低于 95%，其余必须明确标为待核查。
 - 刷新、重登、普通模型失败和 Worker 重启不丢论文与审稿文档。
 - 并发编辑不会静默覆盖，导出失败不会出现假完成。
 - 重复上传、重复提交和重复导出不生成不可控的重复记录。
 - 老师端不出现 Agent、队列、trace、Artifact 路径等实现术语。
-- 试用中至少 80% 的教师无需讲解完成主流程，系统意见接受或改写后进入最终稿的比例达到 50%。
+- P1 邀请 5 名未参与开发的教师各完成至少 1 篇真实审稿；至少 4 人无需讲解完成主流程。意见保留率以“被接受或改写后进入冻结导出版本的 AI 意见数 / 该任务展示给用户的 AI 意见数”计算，汇总不低于 50%。该指标是试用目标，不作为 P0 发布阻断门禁。
+- 契约测试覆盖重复上传与幂等重放、零/单/多 Project 解析、授权拒绝/撤销/过期/版本变化、两个标签页文档冲突、模型部分失败、导出对象与数据库部分失败、失败任务删除、Worker 重启、越权 ID 和过期会话。
+- 安全测试使用包含 prompt injection 的公开或合成 PDF fixture，验证论文文本不能改变系统指令、扩大工具权限、自动授权外传或把隐藏指令写入最终报告。
 
 ## 12. 决策摘要
 
