@@ -10,7 +10,7 @@ sections.
 - Document token: XuVIdkaGgoykehxox9Kc3Qnhnw2
 - Owner identity used to create it: user 陈昊
 - Created on: 2026-07-10
-- Last verified revision: 279
+- Last verified revision: 292
 - Current product source: `docs/superpowers/specs/2026-07-24-peerassist-evidence-review-workspace-positioning-design.md`
 - Current structure: exactly ten stable h2 chapters; historical progress is retained under chapter 九, while chapter 十 contains only current actions.
 
@@ -26,6 +26,11 @@ baseline, four-entry information architecture, canvas/Agent deferral,
 task-scoped external-model consent, recovery semantics, phased acceptance,
 fact sources, and current actions. Do not append a dated h2 progress section for
 this positioning; update the stable chapter that owns the information.
+
+The DESIGN.md contract and its DTCG validation workflow are recorded in the
+repository at `docs/design-system.md` and synchronized in chapter 十. The
+Feishu document is a progress mirror only; the repository files remain the
+normative design and engineering source.
 
 M1 synchronization must record the delivered login/admin/member/model configuration surfaces,
 PostgreSQL/Keycloak/MinIO authority, real PDF-to-summary workflow, 35-operation OpenAPI contract,
