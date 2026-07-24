@@ -153,6 +153,8 @@ The primary button is unique within its immediate workflow region. Secondary act
 
 Evidence warnings explain what must be checked and link back to the source location. Semantic statuses always retain readable text on paper white. Form controls, icon buttons, and row actions inherit the 44px minimum target even when their visible icon is smaller.
 
+DTCG export contains foundational tokens only; component definitions and the complete typography contract remain normative in this `DESIGN.md`.
+
 ## Do's and Don'ts
 
 - Do preserve the paper title, review state, and next action across reading and writing views.

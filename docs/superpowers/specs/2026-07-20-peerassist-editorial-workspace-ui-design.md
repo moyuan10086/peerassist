@@ -7,6 +7,8 @@
 
 根目录 `DESIGN.md` 是 PeerAssist 视觉 token、组件样式约束与无障碍对比度要求的规范性来源，所有前端实现和设计评审必须以其为准。
 
+导出的 DTCG JSON 只提供基础 token，组件与完整 typography 契约仍以根目录 `DESIGN.md` 为准。
+
 ## 目标
 
 让老师在一个连续工作流中完成：上传论文、快速理解、定位证据、修改意见和导出结果。界面不把 Review Job、Agent、EventSource 等实现概念放在主路径上。
