@@ -204,6 +204,24 @@ class ReviewWorkspaceService:
             uow.commit()
             return document
 
+    def get_evidence(
+        self,
+        actor: Actor,
+        project_id: UUID,
+        job_id: UUID,
+    ) -> Mapping[str, JsonValue]:
+        """Return the validated review-result projection for the teacher workspace."""
+
+        with self._uow_factory(actor) as uow:
+            project = self._reviews._require_project_action(
+                uow,
+                actor,
+                project_id,
+                Action.ARTIFACT_READ,
+            )
+            job = self._job(uow, project.scope, job_id)
+            return self._review_result(uow, project.scope, job)
+
     def save_document(
         self,
         actor: Actor,

@@ -10,6 +10,7 @@ from .organizations import router as organizations_router
 from .papers import router as papers_router
 from .projects import router as projects_router
 from .review_jobs import router as review_jobs_router
+from .review_workspace import router as review_workspace_router
 from .system import router as system_router
 
 
@@ -23,6 +24,7 @@ def platform_routers() -> tuple[APIRouter, ...]:
         projects_router,
         papers_router,
         review_jobs_router,
+        review_workspace_router,
         artifacts_router,
         model_settings_router,
         legacy_router,
