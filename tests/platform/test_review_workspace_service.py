@@ -9,7 +9,12 @@ from uuid import uuid4
 import pytest
 
 from peerassist.platform.adapters.memory import MemoryObjectStore, MemoryUnitOfWorkFactory
-from peerassist.platform.errors import Forbidden, IdempotencyConflict, StaleVersion
+from peerassist.platform.errors import (
+    DependencyUnavailable,
+    Forbidden,
+    IdempotencyConflict,
+    StaleVersion,
+)
 from peerassist.platform.models import (
     Actor,
     ActorKind,
@@ -145,29 +150,38 @@ def _consent(
     )
 
 
-def _publish_review_result(factory, store, actor, project, job, *, revision=2):
-    payload = {
-        "schema_version": "peerassist.review_result.v1",
-        "concerns": [
+def _publish_review_result(
+    factory,
+    store,
+    actor,
+    project,
+    job,
+    *,
+    revision=2,
+    concern_overrides=None,
+):
+    concern = {
+        "finding_lineage_id": "lineage-method",
+        "finding_id": "finding-method-v2",
+        "revision": revision,
+        "level": "major_concern",
+        "title": "Sampling method",
+        "impact": "The sampling design limits the strength of the conclusions.",
+        "author_action": "Explain the sampling limitations and mitigation.",
+        "evidence_ids": ["evidence-page-3"],
+        "evidence": [
             {
-                "finding_lineage_id": "lineage-method",
-                "finding_id": "finding-method-v2",
-                "revision": revision,
-                "level": "major_concern",
-                "title": "Sampling method",
-                "impact": "The sampling design limits the strength of the conclusions.",
-                "author_action": "Explain the sampling limitations and mitigation.",
-                "evidence_ids": ["evidence-page-3"],
-                "evidence": [
-                    {
-                        "id": "evidence-page-3",
-                        "locator": "pdf:page:3",
-                        "page": 3,
-                        "text": "Participants were recruited by convenience sampling.",
-                    }
-                ],
+                "id": "evidence-page-3",
+                "locator": "pdf:page:3",
+                "page": 3,
+                "text": "Participants were recruited by convenience sampling.",
             }
         ],
+    }
+    concern.update(concern_overrides or {})
+    payload = {
+        "schema_version": "peerassist.review_result.v1",
+        "concerns": [concern],
     }
     raw = json.dumps(payload).encode("utf-8")
     upload_id = store.create_temporary(project.scope, len(raw))
@@ -676,6 +690,72 @@ def test_document_save_cannot_mutate_or_add_finding_projections() -> None:
                 is None
             )
     assert accepted.document_version == current_document.document_version
+
+
+def test_finding_decision_rejects_artifact_descriptor_mismatch_without_writes() -> None:
+    workspace, reviews, factory, store, actors, project, version = _seed()
+    job = _job(reviews, actors["reviewer"], project, version)
+    _publish_review_result(factory, store, actors["reviewer"], project, job)
+    document = workspace.get_document(actors["reviewer"], project.id, job.id)
+    with factory(actors["reviewer"]) as uow:
+        commands_before = tuple(uow.commands._state.commands.values())
+    with factory(actors["reviewer"]) as uow:
+        artifact = next(iter(uow.artifacts.list_for_job(project.scope, job.id)))
+        uow.artifacts._state.artifacts[artifact.id] = replace(
+            artifact,
+            object=replace(artifact.object, size_bytes=artifact.object.size_bytes + 1),
+        )
+        uow.commit()
+    events_before = reviews.events(actors["reviewer"], project.id, job.id)
+    with pytest.raises(DependencyUnavailable):
+        workspace.decide_finding(actors["reviewer"], _decision(project, job, document))
+    assert reviews.get(actors["reviewer"], project.id, job.id) == job
+    assert workspace.get_document(actors["reviewer"], project.id, job.id) == document
+    assert reviews.events(actors["reviewer"], project.id, job.id) == events_before
+    with factory(actors["reviewer"]) as uow:
+        assert tuple(uow.commands._state.commands.values()) == commands_before
+
+
+@pytest.mark.parametrize(
+    "concern_overrides",
+    [
+        {"evidence": {"id": "evidence-page-3"}},
+        {"evidence": [{"locator": "pdf:page:3"}]},
+        {
+            "evidence": [
+                {"id": "duplicate", "locator": "pdf:page:1"},
+                {"id": "duplicate", "locator": "pdf:page:2"},
+            ],
+            "evidence_ids": ["duplicate"],
+        },
+        {"evidence_ids": ["dangling"]},
+        {"evidence_ids": ["evidence-page-3", "evidence-page-3"]},
+    ],
+)
+def test_finding_decision_rejects_malformed_or_dangling_evidence(
+    concern_overrides,
+) -> None:
+    workspace, reviews, factory, store, actors, project, version = _seed()
+    job = _job(reviews, actors["reviewer"], project, version)
+    _publish_review_result(
+        factory,
+        store,
+        actors["reviewer"],
+        project,
+        job,
+        concern_overrides=concern_overrides,
+    )
+    document = workspace.get_document(actors["reviewer"], project.id, job.id)
+    events_before = reviews.events(actors["reviewer"], project.id, job.id)
+    with factory(actors["reviewer"]) as uow:
+        commands_before = tuple(uow.commands._state.commands.values())
+    with pytest.raises(ValueError, match="evidence"):
+        workspace.decide_finding(actors["reviewer"], _decision(project, job, document))
+    assert reviews.get(actors["reviewer"], project.id, job.id) == job
+    assert workspace.get_document(actors["reviewer"], project.id, job.id) == document
+    assert reviews.events(actors["reviewer"], project.id, job.id) == events_before
+    with factory(actors["reviewer"]) as uow:
+        assert tuple(uow.commands._state.commands.values()) == commands_before
 
 
 def test_finding_rewrite_downgrade_delete_replace_only_the_lineage_projection() -> None:

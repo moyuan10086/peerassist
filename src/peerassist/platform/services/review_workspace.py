@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid5
 
-from ..errors import NotFound, StaleVersion
+from ..errors import DependencyUnavailable, NotFound, StaleVersion
 from ..models import (
     Action,
     Actor,
@@ -643,11 +643,31 @@ class ReviewWorkspaceService:
         if not isinstance(concerns, list):
             raise ValueError("review_result.json concerns must be an array")
         lineage_found = False
+        identities: set[tuple[str, str, int]] = set()
         for item in concerns:
-            if not isinstance(item, Mapping) or item.get("finding_lineage_id") != lineage_id:
+            if not isinstance(item, Mapping):
+                raise ValueError("review_result.json concerns must contain objects")
+            item_lineage = item.get("finding_lineage_id")
+            item_id = item.get("finding_id")
+            item_revision = item.get("revision")
+            if (
+                not isinstance(item_lineage, str)
+                or not item_lineage.strip()
+                or not isinstance(item_id, str)
+                or not item_id.strip()
+                or not isinstance(item_revision, int)
+                or isinstance(item_revision, bool)
+                or item_revision <= 0
+            ):
+                raise ValueError("finding identity must contain lineage, ID, and positive revision")
+            identity = (item_lineage, item_id, item_revision)
+            if identity in identities:
+                raise ValueError("finding identity must be unique")
+            identities.add(identity)
+            if item_lineage != lineage_id:
                 continue
             lineage_found = True
-            if item.get("finding_id") == finding_id and item.get("revision") == revision:
+            if item_id == finding_id and item_revision == revision:
                 return item
         if lineage_found:
             raise StaleVersion()
@@ -669,6 +689,14 @@ class ReviewWorkspaceService:
         )
         if artifact is None:
             raise NotFound()
+        descriptor = self._object_store.metadata(scope, artifact.object.object_id)
+        if (
+            descriptor is None
+            or descriptor.object_id != artifact.object.object_id
+            or descriptor.size_bytes != artifact.object.size_bytes
+            or descriptor.sha256 != artifact.object.sha256
+        ):
+            raise DependencyUnavailable()
         stream = self._object_store.open_immutable(scope, artifact.object.object_id)
         try:
             raw = stream.read(8 * 1024 * 1024 + 1)
@@ -697,6 +725,7 @@ class ReviewWorkspaceService:
             for block in document.blocks
             if block.finding_lineage_id != request.finding_lineage_id
         )
+        evidence_ids, locator = ReviewWorkspaceService._validated_evidence(concern)
         if request.action == "delete":
             return blocks
         section = ReviewWorkspaceService._finding_section(concern, request.action)
@@ -707,20 +736,6 @@ class ReviewWorkspaceService:
         )
         if not isinstance(raw_text, str) or not raw_text.strip():
             raise ValueError("finding must contain projection text")
-        evidence = concern.get("evidence")
-        evidence_rows = evidence if isinstance(evidence, list) else []
-        raw_evidence_ids = concern.get("evidence_ids")
-        if isinstance(raw_evidence_ids, list) and all(
-            isinstance(item, str) for item in raw_evidence_ids
-        ):
-            evidence_ids = tuple(raw_evidence_ids)
-        else:
-            evidence_ids = tuple(
-                item["id"]
-                for item in evidence_rows
-                if isinstance(item, Mapping) and isinstance(item.get("id"), str)
-            )
-        locator = evidence_rows[0] if evidence_rows and isinstance(evidence_rows[0], Mapping) else None
         projected = ReviewDocumentBlock(
             id=uuid5(document.id, f"finding:{request.finding_lineage_id}"),
             section=section,
@@ -733,6 +748,39 @@ class ReviewWorkspaceService:
             evidence_locator=locator,
         )
         return (*blocks, projected)
+
+    @staticmethod
+    def _validated_evidence(
+        concern: Mapping[str, JsonValue],
+    ) -> tuple[tuple[str, ...], Mapping[str, JsonValue] | None]:
+        rows = concern.get("evidence")
+        if not isinstance(rows, list):
+            raise ValueError("evidence must be a list")
+        row_ids: list[str] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError("evidence rows must be objects")
+            evidence_id = row.get("id")
+            if not isinstance(evidence_id, str) or not evidence_id.strip():
+                raise ValueError("evidence rows must contain a string id")
+            if evidence_id in row_ids:
+                raise ValueError("evidence row IDs must be unique")
+            row_ids.append(evidence_id)
+        raw_ids = concern.get("evidence_ids")
+        if raw_ids is None:
+            evidence_ids = tuple(row_ids)
+        else:
+            if not isinstance(raw_ids, list) or any(
+                not isinstance(item, str) or not item.strip() for item in raw_ids
+            ):
+                raise ValueError("evidence_ids must be a list of strings")
+            if len(set(raw_ids)) != len(raw_ids):
+                raise ValueError("evidence_ids must not contain duplicates")
+            if set(raw_ids) != set(row_ids):
+                raise ValueError("evidence_ids must match evidence row IDs")
+            evidence_ids = tuple(raw_ids)
+        locator = rows[0] if rows else None
+        return evidence_ids, locator
 
     @staticmethod
     def _finding_section(concern: Mapping[str, JsonValue], action: str) -> str:
