@@ -622,6 +622,62 @@ def test_finding_decision_appends_authoritative_event_and_projects_evidence_atom
         )
 
 
+def test_document_save_cannot_mutate_or_add_finding_projections() -> None:
+    workspace, reviews, factory, store, actors, project, version = _seed()
+    job = _job(reviews, actors["reviewer"], project, version)
+    _publish_review_result(factory, store, actors["reviewer"], project, job)
+    document = workspace.get_document(actors["reviewer"], project.id, job.id)
+    accepted = workspace.decide_finding(actors["reviewer"], _decision(project, job, document))
+    current_job = reviews.get(actors["reviewer"], project.id, job.id)
+    current_document = workspace.get_document(actors["reviewer"], project.id, job.id)
+    finding = next(
+        block for block in current_document.blocks if block.finding_lineage_id == "lineage-method"
+    )
+    mutations = (
+        replace(finding, text="Forged text"),
+        replace(finding, evidence_ids=("forged-evidence",)),
+        replace(finding, section="minor_issues"),
+        ReviewDocumentBlock(
+            uuid4(),
+            "major_issues",
+            "Forged finding",
+            "finding_decision",
+            "forged-lineage",
+            "forged-id",
+            1,
+        ),
+    )
+    events_before = reviews.events(actors["reviewer"], project.id, job.id)
+    for index, mutation in enumerate(mutations):
+        blocks = tuple(mutation if block.id == finding.id else block for block in current_document.blocks)
+        with pytest.raises(StaleVersion):
+            workspace.save_document(
+                actors["reviewer"],
+                SaveReviewDocument(
+                    project.id,
+                    job.id,
+                    blocks,
+                    current_document.document_version,
+                    f"forged-{index}",
+                    f"request-forged-{index}",
+                ),
+            )
+        assert reviews.get(actors["reviewer"], project.id, job.id) == current_job
+        assert workspace.get_document(actors["reviewer"], project.id, job.id) == current_document
+        assert reviews.events(actors["reviewer"], project.id, job.id) == events_before
+        with factory(actors["reviewer"]) as uow:
+            assert (
+                uow.commands.get(
+                    project.scope,
+                    actors["reviewer"].actor_id,
+                    "review_workspace.document_save",
+                    f"forged-{index}",
+                )
+                is None
+            )
+    assert accepted.document_version == current_document.document_version
+
+
 def test_finding_rewrite_downgrade_delete_replace_only_the_lineage_projection() -> None:
     workspace, reviews, factory, store, actors, project, version = _seed()
     job = _job(reviews, actors["reviewer"], project, version)

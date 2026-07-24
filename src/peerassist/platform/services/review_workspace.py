@@ -243,7 +243,7 @@ class ReviewWorkspaceService:
                         "current_version": document.document_version,
                     }
                 )
-            self._validate_projected_findings(uow, scope, job, request.blocks)
+            self._validate_projected_findings(uow, scope, job, document, request.blocks)
             changed = replace(
                 document,
                 blocks=request.blocks,
@@ -578,17 +578,36 @@ class ReviewWorkspaceService:
         uow: UnitOfWork,
         scope: TenantScope,
         job: ReviewJob,
+        document: ReviewDocument,
         blocks: tuple[ReviewDocumentBlock, ...],
     ) -> None:
         finding_blocks = tuple(
             block for block in blocks if block.finding_lineage_id is not None
         )
         if not finding_blocks:
+            if any(block.finding_lineage_id is not None for block in document.blocks):
+                raise StaleVersion()
             return
         payload = self._review_result(uow, scope, job)
-        for block in blocks:
-            if block.finding_lineage_id is None:
-                continue
+        current_by_lineage = {
+            block.finding_lineage_id: block
+            for block in document.blocks
+            if block.finding_lineage_id is not None
+        }
+        submitted_by_lineage: dict[str, ReviewDocumentBlock] = {}
+        for block in finding_blocks:
+            lineage = block.finding_lineage_id
+            if lineage is None or lineage in submitted_by_lineage:
+                raise StaleVersion()
+            submitted_by_lineage[lineage] = block
+        if set(current_by_lineage) != set(submitted_by_lineage):
+            raise StaleVersion()
+        if any(
+            submitted_by_lineage[lineage] != current
+            for lineage, current in current_by_lineage.items()
+        ):
+            raise StaleVersion()
+        for block in finding_blocks:
             self._find_concern_in_payload(
                 payload,
                 block.finding_lineage_id,
