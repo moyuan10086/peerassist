@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -151,10 +152,18 @@ def test_model_settings_write_and_discovery_are_hidden_from_non_admins(tmp_path,
     app = create_app(_settings(), dependencies)
     app.dependency_overrides[require_request_actor] = lambda: teacher
     with TestClient(app) as client:
+        get_response = client.get("/api/model-settings")
         response = client.post(
             "/api/model-settings",
             json={"provider": "openai-compatible", "base_url": "https://provider.example/v1", "model": "m"},
         )
+    assert get_response.status_code == 200
+    assert "base_url" not in get_response.json()["settings"]
+    assert "model" not in get_response.json()["settings"]
+    assert "revision" not in get_response.json()["settings"]
+    assert "policy_version" not in get_response.json()["settings"]
+    assert "configuration_id" not in get_response.json()["settings"]
+    assert "api_key_hint" not in get_response.json()["settings"]
     assert response.status_code == 404
 
 
@@ -176,3 +185,30 @@ def test_model_settings_revision_uses_compare_and_swap(tmp_path) -> None:
         assert "revision" in str(exc).lower()
     else:
         raise AssertionError("stale model settings write must fail")
+
+
+def test_model_settings_concurrent_compare_and_swap_has_one_winner(tmp_path) -> None:
+    from peerassist.model_settings import ModelSettingsInput, save_model_settings
+
+    path = tmp_path / "settings.json"
+    save_model_settings(
+        ModelSettingsInput("openai-compatible", "https://provider.example/v1", "model-a"),
+        path=path,
+    )
+
+    def update(model: str):
+        try:
+            return save_model_settings(
+                ModelSettingsInput(
+                    "openai-compatible", "https://provider.example/v1", model,
+                    expected_revision=1,
+                ),
+                path=path,
+            )
+        except Exception as exc:  # one stable conflict is the expected loser
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(update, ("model-b", "model-c")))
+    assert sum(hasattr(result, "revision") for result in results) == 1
+    assert sum(type(result).__name__ == "ModelSettingsConflict" for result in results) == 1

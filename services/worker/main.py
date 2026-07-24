@@ -10,6 +10,7 @@ import signal
 import socket
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ import requests
 from pypdf import PdfReader
 
 from peerassist.model_review import ModelReviewConfig, resolve_model_review_config, run_model_review_text
+from peerassist.model_settings import ModelSettingsError, model_settings_lock
 from peerassist.platform.adapters.workspace import StageArtifactPublisher, WorkspaceMaterializer
 from peerassist.platform.errors import DependencyUnavailable, NotFound
 from peerassist.platform.models import (
@@ -49,6 +51,9 @@ def _same_model_snapshot(left: ModelReviewConfig, right: ModelReviewConfig) -> b
         and left.policy_version == right.policy_version
         and left.configuration_id == right.configuration_id
         and left.enabled == right.enabled
+        and left.provider == right.provider
+        and left.base_url == right.base_url
+        and left.model == right.model
     )
 
 
@@ -233,20 +238,26 @@ class ReviewWorker:
     ) -> tuple[str, str, str, str | None]:
         title, text = _extract_pdf(pdf_bytes)
         if text:
-            config, reason = self._model_consent_gate(service_actor, scope, job, version)
-            if config is not None:
-                latest = resolve_model_review_config()
-                if latest is None or not _same_model_snapshot(config, latest):
-                    return (*_fallback_documents(title, text), "local_fallback", "model_config_changed")
-                try:
-                    summary, report = _generate_with_model(title, text, config)
-                    return summary, report, "external_model", None
-                except Exception:
-                    return (*_fallback_documents(title, text), "local_fallback", "model_request_failed")
-            return (*_fallback_documents(title, text), "local_fallback", reason)
+            with model_settings_lock(exclusive=False), self._model_consent_gate(
+                service_actor, scope, job, version
+            ) as (config, reason):
+                    if config is not None:
+                        try:
+                            latest = resolve_model_review_config()
+                        except (ModelSettingsError, ValueError):
+                            latest = None
+                        if latest is None or not _same_model_snapshot(config, latest):
+                            return (*_fallback_documents(title, text), "local_fallback", "model_config_changed")
+                        try:
+                            summary, report = _generate_with_model(title, text, config)
+                            return summary, report, "external_model", None
+                        except Exception:
+                            return (*_fallback_documents(title, text), "local_fallback", "model_request_failed")
+                    return (*_fallback_documents(title, text), "local_fallback", reason)
         reason = "empty_input"
         return (*_fallback_documents(title, text), "local_fallback", reason)
 
+    @contextmanager
     def _model_consent_gate(
         self,
         service_actor: Actor,
@@ -256,37 +267,58 @@ class ReviewWorker:
     ) -> tuple[ModelReviewConfig | None, str]:
         # This transaction is deliberately opened after claim and immediately before I/O.
         with self._uow_factory(service_actor) as uow:
-            config = resolve_model_review_config()
+            try:
+                config = resolve_model_review_config()
+            except (ModelSettingsError, ValueError):
+                yield None, "model_unavailable"
+                return
             if config is None:
-                return None, "model_unavailable"
+                yield None, "model_unavailable"
+                return
             current_job = uow.review_jobs.get(scope, job.id)
             if current_job is None:
-                return None, "job_missing"
+                yield None, "job_missing"
+                return
+            if current_job.status in {"cancelled", "completed", "failed"}:
+                yield None, "job_not_runnable"
+                return
             current_version = uow.papers.get_version(scope, current_job.paper_version_id)
             if current_version is None or current_version.id != version.id:
-                return None, "paper_version_mismatch"
+                yield None, "paper_version_mismatch"
+                return
             consent = uow.consents.get_current(scope, current_job.id, current_version.id, "model")
             now = self._clock()
             if not config.enabled:
-                return None, "model_disabled"
+                yield None, "model_disabled"
+                return
             if consent is None:
-                return None, "consent_missing"
+                yield None, "consent_missing"
+                return
             if consent.paper_version_id != current_version.id:
-                return None, "paper_version_mismatch"
+                yield None, "paper_version_mismatch"
+                return
             if consent.policy_version != config.policy_version:
-                return None, "policy_version_mismatch"
+                yield None, "policy_version_mismatch"
+                return
             if consent.data_scope != MODEL_DATA_SCOPE:
-                return None, "data_scope_mismatch"
+                yield None, "data_scope_mismatch"
+                return
+            if config.provider_config_revision <= 0:
+                yield None, "legacy_provider_config"
+                return
             if not consent.is_effective(
                 provider_config_revision=config.provider_config_revision,
                 at=now,
             ):
                 if consent.status != "granted":
-                    return None, f"consent_{consent.status}"
+                    yield None, f"consent_{consent.status}"
+                    return
                 if consent.expires_at is not None and now >= consent.expires_at:
-                    return None, "consent_expired"
-                return None, "provider_revision_mismatch"
-            return config, ""
+                    yield None, "consent_expired"
+                    return
+                yield None, "provider_revision_mismatch"
+                return
+            yield config, ""
 
     def _fail(
         self,
@@ -319,12 +351,6 @@ class ReviewWorker:
 
 def generate_review_documents(pdf_bytes: bytes) -> tuple[str, str]:
     title, text = _extract_pdf(pdf_bytes)
-    config = resolve_model_review_config()
-    if config is not None and text:
-        try:
-            return _generate_with_model(title, text, config)
-        except Exception:
-            pass
     return _fallback_documents(title, text)
 
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from services.worker.main import ReviewWorker
+from services.worker.main import ReviewWorker, generate_review_documents
 from tests.platform.test_paper_service import _seed
 
 from peerassist.model_review import ModelReviewConfig
@@ -333,8 +334,101 @@ def test_worker_rechecks_model_snapshot_after_consent_gate_before_external_call(
     monkeypatch.setattr("services.worker.main._generate_with_model", lambda *_args: calls.__setitem__("external", calls["external"] + 1))
     # No consent is needed to prove the config snapshot is checked after the gate.
     worker = ReviewWorker(paper_service._uow_factory, store, tmp_path, clock=paper_service._clock)
-    monkeypatch.setattr(worker, "_model_consent_gate", lambda *_args: (resolve_config(), ""))
+    @contextmanager
+    def fake_gate(*_args):
+        yield resolve_config(), ""
+
+    monkeypatch.setattr(worker, "_model_consent_gate", fake_gate)
 
     processed = worker.run_once(worker_id="race-worker")
 
     assert processed is not None and calls["external"] == 0
+
+
+def test_worker_corrupt_model_settings_falls_back_without_failing_or_calling_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paper_service, store, actors, project = _seed()
+    uploaded = paper_service.upload(
+        actors["reviewer"],
+        UploadPaper(
+            project.id, "paper.pdf", "application/pdf", 1024,
+            "worker-corrupt-settings", "worker-corrupt-settings-request",
+        ),
+        io.BytesIO(b"%PDF-1.7\ncorrupt settings fixture\n%%EOF\n"),
+    )
+    job = ReviewService(paper_service._uow_factory, clock=paper_service._clock).create(
+        actors["reviewer"],
+        CreateReviewJob(
+            project.id, uploaded.version.id, "full", "worker-corrupt-review", "worker-corrupt-review-request"
+        ),
+    )
+    settings_path = tmp_path / "broken-settings.json"
+    settings_path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setattr(
+        "services.worker.main._extract_pdf",
+        lambda _pdf: ("Synthetic paper", "A sufficiently long extracted paper text for model gating."),
+    )
+    calls = {"external": 0}
+    monkeypatch.setattr("services.worker.main._generate_with_model", lambda *_args: calls.__setitem__("external", 1))
+    worker = ReviewWorker(paper_service._uow_factory, store, tmp_path, clock=paper_service._clock)
+
+    processed = worker.run_once(worker_id="corrupt-settings-worker")
+
+    assert processed is not None and processed.id == job.id and processed.status == "blocked"
+    assert calls["external"] == 0
+
+
+def test_legacy_document_generator_is_local_only(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.worker.main.resolve_model_review_config",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy generator must not resolve model config")),
+    )
+    monkeypatch.setattr(
+        "services.worker.main._generate_with_model",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("legacy generator must not call model")),
+    )
+
+    summary, report = generate_review_documents(b"not a parseable pdf")
+
+    assert "本地文本抽取" in summary
+    assert "审阅报告" in report
+
+
+def test_legacy_environment_model_config_falls_back_without_is_effective_zero_revision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paper_service, store, actors, project = _seed()
+    uploaded = paper_service.upload(
+        actors["reviewer"],
+        UploadPaper(
+            project.id, "paper.pdf", "application/pdf", 1024,
+            "worker-legacy-settings", "worker-legacy-settings-request",
+        ),
+        io.BytesIO(b"%PDF-1.7\nlegacy settings fixture\n%%EOF\n"),
+    )
+    job = ReviewService(paper_service._uow_factory, clock=paper_service._clock).create(
+        actors["reviewer"],
+        CreateReviewJob(
+            project.id, uploaded.version.id, "full", "worker-legacy-review", "worker-legacy-review-request"
+        ),
+    )
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "missing-settings.json"))
+    monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "legacy-key")
+    monkeypatch.setenv("PEERASSIST_OPENAI_BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv("PEERASSIST_OPENAI_MODEL", "legacy-model")
+    from common.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "services.worker.main._extract_pdf",
+        lambda _pdf: ("Synthetic paper", "A sufficiently long extracted paper text for model gating."),
+    )
+    calls = {"external": 0}
+    monkeypatch.setattr("services.worker.main._generate_with_model", lambda *_args: calls.__setitem__("external", 1))
+    worker = ReviewWorker(paper_service._uow_factory, store, tmp_path, clock=paper_service._clock)
+
+    processed = worker.run_once(worker_id="legacy-settings-worker")
+
+    assert processed is not None and processed.id == job.id and processed.status == "blocked"
+    assert calls["external"] == 0

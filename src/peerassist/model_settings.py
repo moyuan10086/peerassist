@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -103,8 +105,21 @@ def model_settings_path() -> Path:
     return Path.home() / ".config" / "peerassist" / "model-settings.json"
 
 
-def load_model_settings(*, path: Path | None = None) -> StoredModelSettings | None:
+@contextmanager
+def model_settings_lock(*, path: Path | None = None, exclusive: bool = False):
+    """Hold the independent settings lock across reads or external model I/O."""
     target = path or model_settings_path()
+    lock_path = target.with_name(f"{target.name}.lock")
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _load_model_settings_unlocked(target: Path) -> StoredModelSettings | None:
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -134,55 +149,62 @@ def load_model_settings(*, path: Path | None = None) -> StoredModelSettings | No
         raise ModelSettingsError("模型配置文件格式无效。") from None
 
 
+def load_model_settings(*, path: Path | None = None) -> StoredModelSettings | None:
+    target = path or model_settings_path()
+    with model_settings_lock(path=target):
+        return _load_model_settings_unlocked(target)
+
+
 def save_model_settings(
     value: ModelSettingsInput,
     *,
     path: Path | None = None,
 ) -> StoredModelSettings:
     target = path or model_settings_path()
-    existing = load_model_settings(path=target)
-    current_revision = existing.revision if existing is not None else 0
-    if value.expected_revision is not None and value.expected_revision != current_revision:
-        raise ModelSettingsConflict("模型配置 revision 冲突。")
-    api_key = "" if value.clear_api_key else value.api_key or (existing.api_key if existing else "")
-    stored = StoredModelSettings(
-        provider=value.provider,
-        base_url=value.base_url,
-        model=_validate_model(value.model, required=True),
-        api_key=api_key,
-        revision=current_revision + 1,
-        enabled=value.enabled,
-        policy_version=value.policy_version,
-        configuration_id=uuid4().hex,
-    )
-    payload = {
-        "schema_version": _SCHEMA_VERSION,
-        "provider": stored.provider,
-        "base_url": stored.base_url,
-        "model": stored.model,
-        "api_key": stored.api_key,
-        "revision": stored.revision,
-        "enabled": stored.enabled,
-        "policy_version": stored.policy_version,
-        "configuration_id": stored.configuration_id,
-    }
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp")
-    file_mode = _settings_file_mode()
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, file_mode)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, file_mode)
-        os.replace(temporary, target)
-        os.chmod(target, file_mode)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return stored
+    with model_settings_lock(path=target, exclusive=True):
+        existing = _load_model_settings_unlocked(target)
+        current_revision = existing.revision if existing is not None else 0
+        if value.expected_revision is not None and value.expected_revision != current_revision:
+            raise ModelSettingsConflict("模型配置 revision 冲突。")
+        api_key = "" if value.clear_api_key else value.api_key or (existing.api_key if existing else "")
+        stored = StoredModelSettings(
+            provider=value.provider,
+            base_url=value.base_url,
+            model=_validate_model(value.model, required=True),
+            api_key=api_key,
+            revision=current_revision + 1,
+            enabled=value.enabled,
+            policy_version=value.policy_version,
+            configuration_id=uuid4().hex,
+        )
+        payload = {
+            "schema_version": _SCHEMA_VERSION,
+            "provider": stored.provider,
+            "base_url": stored.base_url,
+            "model": stored.model,
+            "api_key": stored.api_key,
+            "revision": stored.revision,
+            "enabled": stored.enabled,
+            "policy_version": stored.policy_version,
+            "configuration_id": stored.configuration_id,
+        }
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.tmp")
+        file_mode = _settings_file_mode()
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, file_mode)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, file_mode)
+            os.replace(temporary, target)
+            os.chmod(target, file_mode)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return stored
 
 
 def _settings_file_mode() -> int:

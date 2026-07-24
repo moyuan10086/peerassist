@@ -106,6 +106,13 @@ def get_model_settings(_actor: ModelSettingsActor, request: Request) -> dict[str
         stored = load_model_settings()
     except ModelSettingsError as exc:
         return _safe_error(request, str(exc))
+    if not _is_organization_admin(_actor, request):
+        return {
+            "settings": {
+                "api_key_configured": bool(stored and stored.api_key),
+                "enabled": bool(stored and stored.enabled),
+            }
+        }
     return {"settings": stored.public_view() if stored is not None else _empty_settings()}
 
 
