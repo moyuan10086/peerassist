@@ -742,6 +742,15 @@ report_versions = Table(
     ),
     _check("revision > 0 AND schema_version > 0", "ck_report_versions_versions_positive"),
     _values("status", ("draft", "published", "superseded"), "ck_report_versions_status"),
+    _check(
+        "(status = 'draft' AND published_at IS NULL AND superseded_at IS NULL) OR "
+        "(status = 'published' AND published_at IS NOT NULL AND "
+        "published_at >= created_at AND superseded_at IS NULL) OR "
+        "(status = 'superseded' AND published_at IS NOT NULL AND "
+        "published_at >= created_at AND superseded_at IS NOT NULL AND "
+        "superseded_at >= published_at)",
+        "ck_report_versions_state_timestamps",
+    ),
     _check("char_length(content_sha256) = 64", "ck_report_versions_digest"),
 )
 

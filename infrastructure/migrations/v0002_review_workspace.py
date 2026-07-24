@@ -8,10 +8,20 @@ from sqlalchemy.dialects import postgresql
 
 REVISION = "0002_review_workspace"
 V0001_CATALOG_FINGERPRINT = "9473563169d5a7d77afb227c64de954cf5f7bf8b471d239f3ceeccd982304e4d"
-V0002_CATALOG_FINGERPRINT = "4821a463423baf155a91f096cdc57dbefb85ea7dc83bdf92fac615ef7aa12441"
+V0002_CATALOG_FINGERPRINT = "df9d06223cafb3ca982a8de3724f61744bf7415ef2dff0c68bf2adf4fb7d64d5"
 
 
 def upgrade_v0002(op: Operations) -> None:
+    op.create_check_constraint(
+        "ck_report_versions_state_timestamps",
+        "report_versions",
+        "(status = 'draft' AND published_at IS NULL AND superseded_at IS NULL) OR "
+        "(status = 'published' AND published_at IS NOT NULL AND "
+        "published_at >= created_at AND superseded_at IS NULL) OR "
+        "(status = 'superseded' AND published_at IS NOT NULL AND "
+        "published_at >= created_at AND superseded_at IS NOT NULL AND "
+        "superseded_at >= published_at)",
+    )
     op.add_column(
         "project_memberships",
         sa.Column("is_default", sa.Boolean(), server_default=sa.text("false"), nullable=False),
@@ -152,6 +162,9 @@ def downgrade_v0002(op: Operations) -> None:
         table_name="project_memberships",
     )
     op.drop_column("project_memberships", "is_default")
+    op.drop_constraint(
+        "ck_report_versions_state_timestamps", "report_versions", type_="check"
+    )
     _set_revision(op, "0001_platform_m1", V0001_CATALOG_FINGERPRINT)
 
 

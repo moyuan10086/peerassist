@@ -540,7 +540,11 @@ class _ReviewJobs:
             if artifact.job_id == job_id:
                 del self._state.artifacts[artifact_id]
         for report_version_id, report_version in tuple(self._state.report_versions.items()):
-            if report_version.job_id == job_id:
+            if (
+                report_version.organization_id == job.organization_id
+                and report_version.project_id == job.project_id
+                and report_version.job_id == job_id
+            ):
                 del self._state.report_versions[report_version_id]
         for item_id, item in tuple(self._state.work_items.items()):
             if item.job_id == job_id:

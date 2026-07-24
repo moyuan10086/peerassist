@@ -26,6 +26,7 @@ from peerassist.platform.models import (
     OutboxEvent,
     PaperVersion,
     Project,
+    ReportVersion,
     ReviewEvent,
     TenantScope,
     User,
@@ -98,6 +99,62 @@ def test_project_rejects_an_unscoped_or_mismatched_tenant() -> None:
     assert project.scope == TenantScope(organization_id=organization_id, project_id=project_id)
     with pytest.raises(ValueError, match="project_id"):
         TenantScope(organization_id=organization_id, project_id=UUID(int=0))
+
+
+def _report_version(**overrides) -> ReportVersion:
+    values = {
+        "id": uuid4(),
+        "organization_id": uuid4(),
+        "project_id": uuid4(),
+        "job_id": uuid4(),
+        "revision": 1,
+        "schema_version": 1,
+        "content_sha256": "a" * 64,
+        "status": "draft",
+        "created_by": uuid4(),
+        "created_at": NOW,
+        "published_at": None,
+        "superseded_at": None,
+    }
+    return ReportVersion(**(values | overrides))
+
+
+def test_report_version_status_has_exact_timestamp_invariants() -> None:
+    published_at = NOW + timedelta(minutes=1)
+    superseded_at = NOW + timedelta(minutes=2)
+
+    assert _report_version(status="draft").status == "draft"
+    assert _report_version(status="published", published_at=published_at).status == "published"
+    assert _report_version(
+        status="superseded",
+        published_at=published_at,
+        superseded_at=superseded_at,
+    ).status == "superseded"
+
+    invalid = (
+        {"status": "draft", "published_at": published_at},
+        {
+            "status": "draft",
+            "published_at": published_at,
+            "superseded_at": superseded_at,
+        },
+        {"status": "published"},
+        {
+            "status": "published",
+            "published_at": published_at,
+            "superseded_at": superseded_at,
+        },
+        {"status": "superseded"},
+        {"status": "superseded", "published_at": published_at},
+        {
+            "status": "superseded",
+            "published_at": published_at,
+            "superseded_at": NOW,
+        },
+    )
+    for timestamps in invalid:
+        with pytest.raises(ValueError, match=r"status.*timestamp"):
+            _report_version(**timestamps)
 
 
 def test_work_item_enforces_sequence_attempt_and_lease_semantics() -> None:

@@ -893,10 +893,22 @@ class ReportVersion:
             _utc(getattr(self, name), name)
         if self.published_at is not None and self.published_at < self.created_at:
             raise ValueError("published_at must not precede created_at")
-        if self.superseded_at is not None and (
-            self.published_at is None or self.superseded_at < self.published_at
-        ):
-            raise ValueError("superseded_at must not precede published_at")
+        valid_state_timestamps = (
+            self.status == "draft"
+            and self.published_at is None
+            and self.superseded_at is None
+        ) or (
+            self.status == "published"
+            and self.published_at is not None
+            and self.superseded_at is None
+        ) or (
+            self.status == "superseded"
+            and self.published_at is not None
+            and self.superseded_at is not None
+            and self.superseded_at >= self.published_at
+        )
+        if not valid_state_timestamps:
+            raise ValueError("status and timestamps must describe the same report lifecycle state")
 
 
 @dataclass(frozen=True, slots=True)

@@ -457,7 +457,22 @@ class _Consents(_Repository):
             superseded.service,
         )
         if current is None:
-            raise NotFound()
+            latest = self._latest_for_identity(scope, superseded)
+            if latest is None:
+                raise NotFound()
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_version,
+                    "current_version": latest.version,
+                }
+            )
+        if current.id != superseded.id or current.generation != superseded.generation:
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_version,
+                    "current_version": current.version,
+                }
+            )
         self._require_replacement(current, superseded, expected_version)
         if superseded.superseded_at is None:
             raise ValueError("superseded consent must record superseded_at")
@@ -492,6 +507,23 @@ class _Consents(_Repository):
             )
 
         self._integrity(operation, "replacement consent already exists or is invalid")
+
+    def _latest_for_identity(
+        self,
+        scope: TenantScope,
+        consent: ExternalServiceConsent,
+    ) -> ExternalServiceConsent | None:
+        row = self._one(
+            select(schema.external_service_consents)
+            .where(
+                _project_filter(schema.external_service_consents, scope),
+                self._identity_filter(consent),
+            )
+            .order_by(schema.external_service_consents.c.generation.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        return None if row is None else _consent(row)
 
     @staticmethod
     def _identity(consent: ExternalServiceConsent) -> tuple[object, ...]:

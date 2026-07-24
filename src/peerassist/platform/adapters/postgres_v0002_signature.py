@@ -111,6 +111,7 @@ _V0002_DELTA = {
         "review_events|pk_review_events|p|PRIMARY KEY (id)",
         "review_events|uq_review_events_job_sequence|u|UNIQUE (job_id, aggregate_sequence)",
         "review_events|uq_review_events_tenant_id|u|UNIQUE (organization_id, project_id, job_id, id)",
+        "report_versions|ck_report_versions_state_timestamps|c|CHECK (status::text = 'draft'::text AND published_at IS NULL AND superseded_at IS NULL OR status::text = 'published'::text AND published_at IS NOT NULL AND published_at >= created_at AND superseded_at IS NULL OR status::text = 'superseded'::text AND published_at IS NOT NULL AND published_at >= created_at AND superseded_at IS NOT NULL AND superseded_at >= published_at)",
     ),
     "indexes": (
         "external_service_consents|ix_external_service_consents_tenant_job|CREATE INDEX ix_external_service_consents_tenant_job ON external_service_consents USING btree (organization_id, project_id, review_job_id)",
@@ -145,6 +146,24 @@ def _merge(key: str) -> tuple[str, ...]:
     ] + list(_V0002_DELTA.get(key, ()))
     for entry in entries:
         groups.setdefault(_table_name(entry), []).append(entry)
+    if key == "constraints":
+        report_constraints = groups.get("report_versions", [])
+        state_constraint = next(
+            (
+                entry
+                for entry in report_constraints
+                if "|ck_report_versions_state_timestamps|" in entry
+            ),
+            None,
+        )
+        if state_constraint is not None:
+            report_constraints.remove(state_constraint)
+            digest_index = next(
+                index
+                for index, entry in enumerate(report_constraints)
+                if "|ck_report_versions_digest|" in entry
+            )
+            report_constraints.insert(digest_index + 1, state_constraint)
     return tuple(entry for table in sorted(groups) for entry in groups[table])
 
 

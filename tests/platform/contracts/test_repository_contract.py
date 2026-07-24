@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -673,6 +674,94 @@ def test_report_versions_are_immutable_revisioned_and_tenant_scoped(uow_factory,
         assert uow.report_versions.get(hidden_scope, first.id) is None
         assert uow.report_versions.list_for_job(scope, first.job_id) == (first, second)
         assert uow.report_versions.list_for_job(hidden_scope, first.job_id) == ()
+
+
+def test_review_job_delete_keeps_cross_tenant_report_version_with_same_job_id(
+    uow_factory,
+    clock,
+    supports_cross_tenant_id_reuse,
+) -> None:
+    if not supports_cross_tenant_id_reuse:
+        pytest.skip("adapter uses globally unique aggregate IDs")
+    principal = actor()
+    shared_project_id = uuid4()
+    visible_scope = TenantScope(uuid4(), shared_project_id)
+    hidden_scope = TenantScope(uuid4(), shared_project_id)
+    visible_job = job(visible_scope, clock())
+    visible_report = report_version(visible_scope, clock(), job_id=visible_job.id)
+    hidden_report = replace(
+        visible_report,
+        id=uuid4(),
+        organization_id=hidden_scope.organization_id,
+    )
+
+    with uow_factory(principal) as uow:
+        uow.review_jobs.add(visible_scope, visible_job)
+        uow.report_versions.add(visible_scope, visible_report)
+        uow.report_versions.add(hidden_scope, hidden_report)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        uow.review_jobs.delete(visible_scope, visible_job.id)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.report_versions.get(visible_scope, visible_report.id) is None
+        assert uow.report_versions.get(hidden_scope, hidden_report.id) == hidden_report
+
+
+def test_postgres_concurrent_consent_reapply_loser_is_stale(
+    uow_factory,
+    clock,
+    request,
+) -> None:
+    if request.config.getoption("--adapter") != "postgresql":
+        pytest.skip("concurrent row-lock contract is PostgreSQL-specific")
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    original = consent(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.consents.add(scope, original)
+        uow.commit()
+
+    ready = Barrier(2)
+
+    def reapply(offset: int) -> str:
+        changed_at = clock() + timedelta(minutes=offset)
+        superseded = replace(
+            original,
+            version=2,
+            superseded_at=changed_at,
+            updated_at=changed_at,
+        )
+        replacement = replace(
+            original,
+            id=uuid4(),
+            status="pending",
+            generation=2,
+            decided_by=None,
+            decided_at=None,
+            expires_at=None,
+            created_at=changed_at,
+            updated_at=changed_at,
+        )
+        ready.wait()
+        try:
+            with uow_factory(principal) as uow:
+                uow.consents.supersede_and_add(
+                    scope,
+                    superseded,
+                    replacement,
+                    expected_version=1,
+                )
+                uow.commit()
+            return "committed"
+        except StaleVersion:
+            return "stale_version"
+        except Exception as error:  # pragma: no cover - assertion reports the unstable mapping
+            return type(error).__name__
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(reapply, (1, 2)))
+    assert sorted(outcomes) == ["committed", "stale_version"]
 
 
 def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clock) -> None:

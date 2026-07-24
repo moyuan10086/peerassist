@@ -285,6 +285,7 @@ def test_mutable_versions_statuses_and_enums_have_strict_checks() -> None:
         "ck_work_items_lease_pair",
         "ck_stage_manifests_status",
         "ck_report_versions_status",
+        "ck_report_versions_state_timestamps",
         "ck_artifacts_status",
         "ck_legacy_registrations_status",
         "ck_audit_events_outcome",
@@ -340,6 +341,7 @@ def test_frozen_v0002_migration_does_not_depend_on_live_application_metadata() -
     assert "external_service_consents" in snapshot
     assert "review_documents" in snapshot
     assert "is_default" in snapshot
+    assert "ck_report_versions_state_timestamps" in snapshot
 
 
 def test_readiness_uses_the_frozen_semantic_catalog_signature() -> None:
