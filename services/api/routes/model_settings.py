@@ -102,17 +102,12 @@ def _safe_error(request: Request, message: str, *, status_code: int = 400) -> JS
     response_model=None,
 )
 def get_model_settings(_actor: ModelSettingsActor, request: Request) -> dict[str, object] | JSONResponse:
+    if not _is_organization_admin(_actor, request):
+        return {"settings": {"api_key_configured": False, "enabled": False}}
     try:
         stored = load_model_settings()
     except ModelSettingsError as exc:
         return _safe_error(request, str(exc))
-    if not _is_organization_admin(_actor, request):
-        return {
-            "settings": {
-                "api_key_configured": bool(stored and stored.api_key),
-                "enabled": bool(stored and stored.enabled),
-            }
-        }
     return {"settings": stored.public_view() if stored is not None else _empty_settings()}
 
 
