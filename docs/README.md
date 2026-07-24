@@ -9,6 +9,7 @@ Repository documents are the source of truth for product intent, architecture de
 - [Security policy](../SECURITY.md)
 - [PeerAssist platform PRD](product/peerassist-platform-prd.md)
 - [API conventions](api/conventions.md)
+- [Design system and DESIGN.md workflow](design-system.md)
 
 ## Architecture Decisions
 

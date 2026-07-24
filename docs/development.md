@@ -14,6 +14,12 @@ make verify-fast
 Keep credentials in an untracked `.env`; never add keys to Dockerfiles, Compose files, or shell
 history. Pull Git LFS assets before running checks that inspect the demo PDF.
 
+UI changes follow the repository-root [`DESIGN.md`](../DESIGN.md) contract. Run
+`make design` after changing tokens or component guidance; it invokes the
+official DESIGN.md linter and verifies that the committed DTCG export is
+current. The full workflow and review checklist are in
+[`docs/design-system.md`](design-system.md).
+
 ## Two-service Compose profile
 
 The development profile uses one fixed-UID non-root image. The Review API is private and writes

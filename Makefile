@@ -1,4 +1,4 @@
-.PHONY: verify verify-fast test lint frontend docs secrets dependencies dist compose-up compose-down m1-smoke m1-system platform m1-all m1-compose-config
+.PHONY: verify verify-fast test lint frontend docs design secrets dependencies dist compose-up compose-down m1-smoke m1-system platform m1-all m1-compose-config
 
 verify:
 	python scripts/verify_repository.py all
@@ -17,6 +17,9 @@ frontend:
 
 docs:
 	python scripts/verify_repository.py docs
+
+design:
+	python scripts/check_design_md.py
 
 secrets:
 	python scripts/verify_repository.py secrets

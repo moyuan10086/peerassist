@@ -109,6 +109,13 @@ components:
     typography: "{typography.body-sm}"
     rounded: "{rounded.sm}"
     padding: 8px
+  text-muted:
+    backgroundColor: "{colors.paper}"
+    textColor: "{colors.muted}"
+    typography: "{typography.body-sm}"
+  surface-divider:
+    backgroundColor: "{colors.border}"
+    height: 1px
 ---
 
 ## Overview
