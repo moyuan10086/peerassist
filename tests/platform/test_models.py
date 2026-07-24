@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError, fields, replace
 from datetime import UTC, datetime, timedelta, timezone
 from inspect import getmembers, isfunction, signature
 from pathlib import Path
@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from peerassist.platform import models
 from peerassist.platform.errors import Forbidden, IdempotencyConflict
 from peerassist.platform.models import (
     Action,
@@ -608,3 +609,136 @@ def test_all_tenant_repository_mutations_require_scope_first() -> None:
                 repository.__name__,
                 method_name,
             )
+
+
+def _consent(**changes: object):
+    values = {
+        "id": uuid4(),
+        "organization_id": uuid4(),
+        "project_id": uuid4(),
+        "review_job_id": uuid4(),
+        "paper_version_id": uuid4(),
+        "service": "model",
+        "provider_config_revision": 3,
+        "policy_version": "model-policy-v1",
+        "data_scope": {"fields": ["title", "abstract"]},
+        "status": "granted",
+        "generation": 1,
+        "version": 1,
+        "decided_by": uuid4(),
+        "decided_at": NOW,
+        "expires_at": NOW + timedelta(hours=1),
+        "superseded_at": None,
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+    values.update(changes)
+    return models.ExternalServiceConsent(**values)
+
+
+def test_external_service_consent_is_immutable_and_effective_only_for_current_grant() -> None:
+    source_scope = {"fields": ["title", "abstract"]}
+    consent = _consent(data_scope=source_scope)
+
+    source_scope["fields"].append("full_text")
+    assert consent.data_scope["fields"] == ("title", "abstract")
+    assert consent.is_effective(provider_config_revision=3, at=NOW + timedelta(minutes=30))
+    assert not consent.is_effective(provider_config_revision=4, at=NOW + timedelta(minutes=30))
+    assert not consent.is_effective(provider_config_revision=3, at=NOW + timedelta(hours=1))
+    assert not replace(consent, status="denied").is_effective(
+        provider_config_revision=3,
+        at=NOW,
+    )
+    assert not replace(consent, superseded_at=NOW).is_effective(
+        provider_config_revision=3,
+        at=NOW,
+    )
+    with pytest.raises(FrozenInstanceError):
+        consent.status = "denied"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"status": "approved"}, "status"),
+        ({"generation": 0}, "generation"),
+        ({"version": 0}, "version"),
+        ({"provider_config_revision": 0}, "provider_config_revision"),
+        ({"data_scope": {"fields": ("abstract",)}}, "JSON"),
+        ({"data_scope": {"value": float("nan")}}, "JSON"),
+    ],
+)
+def test_external_service_consent_rejects_invalid_state_and_json(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        _consent(**changes)
+
+
+def _document_block(**changes: object):
+    values = {
+        "id": uuid4(),
+        "section": "major_issues",
+        "text": "The evidence does not support this conclusion.",
+        "source_type": "finding",
+        "finding_lineage_id": "fln_statistics_claim",
+        "finding_id": "finding_statistics_claim_r1",
+        "finding_revision": 1,
+        "evidence_ids": ("evidence-1",),
+        "evidence_locator": {"page": 3, "spans": [{"start": 12, "end": 42}]},
+    }
+    values.update(changes)
+    return models.ReviewDocumentBlock(**values)
+
+
+def test_review_document_blocks_have_fixed_sections_and_immutable_references() -> None:
+    locator = {"page": 3, "spans": [{"start": 12, "end": 42}]}
+    block = _document_block(evidence_locator=locator)
+
+    locator["spans"][0]["start"] = 99
+    assert models.REVIEW_DOCUMENT_SECTIONS == (
+        "overall_assessment",
+        "major_issues",
+        "minor_issues",
+        "revision_suggestions",
+    )
+    assert block.evidence_ids == ("evidence-1",)
+    assert block.evidence_locator["spans"][0]["start"] == 12
+    with pytest.raises(TypeError):
+        block.evidence_locator["page"] = 4  # type: ignore[index]
+    with pytest.raises(ValueError, match="section"):
+        _document_block(section="appendix")
+    with pytest.raises(ValueError, match="finding"):
+        _document_block(finding_id=None, finding_revision=None)
+    with pytest.raises(ValueError, match="text"):
+        _document_block(text="x" * 100_001)
+    with pytest.raises((TypeError, ValueError), match="JSON"):
+        _document_block(evidence_locator={"page": (3,)})
+
+
+def test_review_document_empty_factory_and_document_version_are_independent() -> None:
+    document_id = uuid4()
+    organization_id = uuid4()
+    project_id = uuid4()
+    job_id = uuid4()
+    editor_id = uuid4()
+
+    document = models.ReviewDocument.empty(
+        id=document_id,
+        organization_id=organization_id,
+        project_id=project_id,
+        review_job_id=job_id,
+        last_edited_by=editor_id,
+        created_at=NOW,
+    )
+
+    assert document.id == document_id
+    assert document.blocks == ()
+    assert document.document_version == 1
+    assert document.base_decision_event_id is None
+    assert document.last_edited_by == editor_id
+    assert document.created_at == NOW
+    assert document.updated_at == NOW
+    with pytest.raises(ValueError, match="document_version"):
+        replace(document, document_version=0)

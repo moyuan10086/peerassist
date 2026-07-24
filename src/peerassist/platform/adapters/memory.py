@@ -34,6 +34,7 @@ from ..models import (
     CommandRecord,
     DownloadDescriptor,
     ExternalIdentity,
+    ExternalServiceConsent,
     LegacyRegistration,
     ObjectDescriptor,
     OidcTransaction,
@@ -44,6 +45,7 @@ from ..models import (
     PaperVersion,
     Project,
     ProjectMembership,
+    ReviewDocument,
     ReviewEvent,
     ReviewJob,
     TemporaryObjectDescriptor,
@@ -113,6 +115,9 @@ class _State:
     paper_versions: dict[UUID, PaperVersion] = field(default_factory=dict)
     review_jobs: dict[UUID, ReviewJob] = field(default_factory=dict)
     review_events: dict[UUID, list[ReviewEvent]] = field(default_factory=dict)
+    consents: dict[UUID, ExternalServiceConsent] = field(default_factory=dict)
+    current_consent_ids: dict[tuple[UUID, UUID, str], UUID] = field(default_factory=dict)
+    review_documents: dict[UUID, ReviewDocument] = field(default_factory=dict)
     artifacts: dict[UUID, Artifact] = field(default_factory=dict)
     commands: dict[tuple[UUID, UUID, str, str], CommandRecord] = field(default_factory=dict)
     work_items: dict[UUID, WorkItem] = field(default_factory=dict)
@@ -379,6 +384,20 @@ class _Projects:
         _require_project_scope(scope, membership)
         key = (membership.project_id, membership.user_id)
         _check_replacement_version(self._state.project_memberships.get(key), membership, expected_version)
+        if membership.is_default:
+            for other_key, other in tuple(self._state.project_memberships.items()):
+                if (
+                    other_key != key
+                    and other.organization_id == membership.organization_id
+                    and other.user_id == membership.user_id
+                    and other.is_default
+                ):
+                    self._state.project_memberships[other_key] = replace(
+                        other,
+                        is_default=False,
+                        version=other.version + 1,
+                        updated_at=membership.updated_at,
+                    )
         self._state.project_memberships[key] = membership
 
 
@@ -495,6 +514,14 @@ class _ReviewJobs:
             raise NotFound()
         self._state.review_jobs.pop(job_id, None)
         self._state.review_events.pop(job_id, None)
+        self._state.review_documents.pop(job_id, None)
+        for consent_id, consent in tuple(self._state.consents.items()):
+            if consent.review_job_id == job_id:
+                del self._state.consents[consent_id]
+                self._state.current_consent_ids.pop(
+                    (consent.review_job_id, consent.paper_version_id, consent.service),
+                    None,
+                )
         for artifact_id, artifact in tuple(self._state.artifacts.items()):
             if artifact.job_id == job_id:
                 del self._state.artifacts[artifact_id]
@@ -519,6 +546,187 @@ class _ReviewJobs:
             for event in self._state.review_events.get(job_id, [])
             if _project_scope_matches(scope, event.organization_id, event.project_id)
         )
+
+
+class _Consents:
+    def __init__(self, state: _State) -> None:
+        self._state = state
+
+    @staticmethod
+    def _key(consent: ExternalServiceConsent) -> tuple[UUID, UUID, str]:
+        return consent.review_job_id, consent.paper_version_id, consent.service
+
+    def get_current(
+        self,
+        scope: TenantScope,
+        review_job_id: UUID,
+        paper_version_id: UUID,
+        service: str,
+    ) -> ExternalServiceConsent | None:
+        consent_id = self._state.current_consent_ids.get(
+            (review_job_id, paper_version_id, service)
+        )
+        item = self._state.consents.get(consent_id) if consent_id is not None else None
+        return (
+            item
+            if item is not None
+            and item.superseded_at is None
+            and _project_scope_matches(scope, item.organization_id, item.project_id)
+            else None
+        )
+
+    def add(self, scope: TenantScope, consent: ExternalServiceConsent) -> None:
+        _require_project_scope(scope, consent)
+        _require_initial_version(consent)
+        if consent.generation != 1:
+            raise ValueError("initial consent generation must be 1")
+        if consent.superseded_at is not None:
+            raise ValueError("a new consent must be current")
+        existing = self._state.consents.get(consent.id)
+        key = self._key(consent)
+        if existing == consent and self._state.current_consent_ids.get(key) == consent.id:
+            return
+        if existing is not None:
+            raise ValueError("consent ID already exists")
+        if key in self._state.current_consent_ids:
+            raise ValueError("current consent already exists")
+        self._state.consents[consent.id] = consent
+        self._state.current_consent_ids[key] = consent.id
+
+    def save(
+        self,
+        scope: TenantScope,
+        consent: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None:
+        _require_project_scope(scope, consent)
+        current = self.get_current(scope, *self._key(consent))
+        if current is None:
+            raise NotFound()
+        _check_replacement_version(current, consent, expected_version)
+        self._require_same_record(current, consent)
+        if consent.superseded_at is not None:
+            raise ValueError("save cannot supersede a consent")
+        self._state.consents[consent.id] = consent
+
+    def supersede_and_add(
+        self,
+        scope: TenantScope,
+        superseded: ExternalServiceConsent,
+        replacement: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None:
+        _require_project_scope(scope, superseded)
+        _require_project_scope(scope, replacement)
+        current = self.get_current(scope, *self._key(superseded))
+        if current is None:
+            raise NotFound()
+        _check_replacement_version(current, superseded, expected_version)
+        self._require_same_record(current, superseded)
+        if superseded.superseded_at is None:
+            raise ValueError("superseded consent must record superseded_at")
+        if self._key(replacement) != self._key(current):
+            raise ValueError("replacement consent must retain the current consent key")
+        if replacement.id in self._state.consents:
+            raise ValueError("replacement consent ID already exists")
+        if replacement.generation != current.generation + 1:
+            raise ValueError("replacement consent generation must advance exactly once")
+        if replacement.version != 1:
+            raise StaleVersion(
+                details={"expected_version": 1, "current_version": replacement.version}
+            )
+        if replacement.status != "pending" or replacement.superseded_at is not None:
+            raise ValueError("replacement consent must be a current pending decision")
+        key = self._key(current)
+        self._state.consents[superseded.id] = superseded
+        self._state.consents[replacement.id] = replacement
+        self._state.current_consent_ids[key] = replacement.id
+
+    @staticmethod
+    def _require_same_record(
+        current: ExternalServiceConsent,
+        replacement: ExternalServiceConsent,
+    ) -> None:
+        immutable_names = (
+            "id",
+            "organization_id",
+            "project_id",
+            "review_job_id",
+            "paper_version_id",
+            "service",
+            "provider_config_revision",
+            "policy_version",
+            "data_scope",
+            "generation",
+            "created_at",
+        )
+        if any(getattr(current, name) != getattr(replacement, name) for name in immutable_names):
+            raise ValueError("consent identity and generation are immutable")
+
+
+class _ReviewDocuments:
+    def __init__(self, state: _State) -> None:
+        self._state = state
+
+    def get(self, scope: TenantScope, review_job_id: UUID) -> ReviewDocument | None:
+        item = self._state.review_documents.get(review_job_id)
+        return (
+            item
+            if item is not None
+            and _project_scope_matches(scope, item.organization_id, item.project_id)
+            else None
+        )
+
+    def add(self, scope: TenantScope, document: ReviewDocument) -> None:
+        _require_project_scope(scope, document)
+        if document.document_version != 1:
+            raise StaleVersion(
+                details={"expected_version": 1, "current_version": document.document_version}
+            )
+        existing = self._state.review_documents.get(document.review_job_id)
+        if existing == document:
+            return
+        if existing is not None:
+            raise ValueError("review document already exists for job")
+        if any(item.id == document.id for item in self._state.review_documents.values()):
+            raise ValueError("review document ID already exists")
+        self._state.review_documents[document.review_job_id] = document
+
+    def save(
+        self,
+        scope: TenantScope,
+        document: ReviewDocument,
+        expected_document_version: int,
+    ) -> None:
+        _require_project_scope(scope, document)
+        current = self.get(scope, document.review_job_id)
+        if current is None:
+            raise NotFound()
+        if current.document_version != expected_document_version:
+            raise StaleVersion(
+                details={
+                    "expected_version": expected_document_version,
+                    "current_version": current.document_version,
+                }
+            )
+        required_version = expected_document_version + 1
+        if document.document_version != required_version:
+            raise StaleVersion(
+                details={
+                    "expected_version": required_version,
+                    "current_version": document.document_version,
+                }
+            )
+        immutable_names = (
+            "id",
+            "organization_id",
+            "project_id",
+            "review_job_id",
+            "created_at",
+        )
+        if any(getattr(current, name) != getattr(document, name) for name in immutable_names):
+            raise ValueError("review document identity is immutable")
+        self._state.review_documents[document.review_job_id] = document
 
 
 class _Artifacts:
@@ -912,6 +1120,8 @@ class MemoryUnitOfWork:
         self.projects = _Projects(self._state)
         self.papers = _Papers(self._state)
         self.review_jobs = _ReviewJobs(self._state)
+        self.consents = _Consents(self._state)
+        self.review_documents = _ReviewDocuments(self._state)
         self.artifacts = _Artifacts(self._state)
         self.commands = _Commands(self._state)
         self.work_items = _WorkItems(self._state, self._factory._clock)

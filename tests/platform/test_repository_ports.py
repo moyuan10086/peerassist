@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from typing import get_type_hints
 
 from peerassist.platform import ports
+from peerassist.platform.adapters import memory as memory_adapters
 from peerassist.platform.adapters.memory import _Audit as MemoryAudit
 from peerassist.platform.adapters.memory import _Commands as MemoryCommands
 from peerassist.platform.adapters.memory import _Organizations as MemoryOrganizations
@@ -34,6 +36,34 @@ def test_repository_protocols_include_all_shared_contract_operations() -> None:
             "get": ("self", "scope", "item_id"),
             "renew": ("self", "scope", "item_id", "lease_owner", "lease_seconds"),
         },
+        getattr(ports, "ConsentRepository"): {
+            "get_current": (
+                "self",
+                "scope",
+                "review_job_id",
+                "paper_version_id",
+                "service",
+            ),
+            "add": ("self", "scope", "consent"),
+            "save": ("self", "scope", "consent", "expected_version"),
+            "supersede_and_add": (
+                "self",
+                "scope",
+                "superseded",
+                "replacement",
+                "expected_version",
+            ),
+        },
+        getattr(ports, "ReviewDocumentRepository"): {
+            "get": ("self", "scope", "review_job_id"),
+            "add": ("self", "scope", "document"),
+            "save": (
+                "self",
+                "scope",
+                "document",
+                "expected_document_version",
+            ),
+        },
     }
     for protocol, methods in expected.items():
         for name, parameters in methods.items():
@@ -58,3 +88,21 @@ def test_memory_and_postgres_repositories_conform_to_protocol_method_signatures(
             expected = tuple(inspect.signature(method).parameters)
             for implementation in implementations:
                 assert tuple(inspect.signature(getattr(implementation, name)).parameters) == expected
+
+
+def test_memory_consent_document_repositories_match_their_ports_and_uow() -> None:
+    pairs = (
+        (ports.ConsentRepository, memory_adapters._Consents),
+        (ports.ReviewDocumentRepository, memory_adapters._ReviewDocuments),
+    )
+    for protocol, implementation in pairs:
+        for name, method in protocol.__dict__.items():
+            if name.startswith("_") or not inspect.isfunction(method):
+                continue
+            assert tuple(inspect.signature(getattr(implementation, name)).parameters) == tuple(
+                inspect.signature(method).parameters
+            )
+
+    annotations = get_type_hints(ports.UnitOfWork)
+    assert annotations["consents"] is ports.ConsentRepository
+    assert annotations["review_documents"] is ports.ReviewDocumentRepository

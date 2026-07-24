@@ -18,6 +18,7 @@ from .models import (
     CommandRecord,
     DownloadDescriptor,
     ExternalIdentity,
+    ExternalServiceConsent,
     LegacyRegistration,
     ObjectDescriptor,
     OidcTransaction,
@@ -28,6 +29,7 @@ from .models import (
     PaperVersion,
     Project,
     ProjectMembership,
+    ReviewDocument,
     ReviewEvent,
     ReviewJob,
     StageInputManifest,
@@ -103,6 +105,41 @@ class ReviewJobRepository(Protocol):
     def delete(self, scope: TenantScope, job_id: UUID) -> None: ...
     def append_event(self, scope: TenantScope, event: ReviewEvent) -> None: ...
     def list_events(self, scope: TenantScope, job_id: UUID) -> tuple[ReviewEvent, ...]: ...
+
+
+class ConsentRepository(Protocol):
+    def get_current(
+        self,
+        scope: TenantScope,
+        review_job_id: UUID,
+        paper_version_id: UUID,
+        service: str,
+    ) -> ExternalServiceConsent | None: ...
+    def add(self, scope: TenantScope, consent: ExternalServiceConsent) -> None: ...
+    def save(
+        self,
+        scope: TenantScope,
+        consent: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None: ...
+    def supersede_and_add(
+        self,
+        scope: TenantScope,
+        superseded: ExternalServiceConsent,
+        replacement: ExternalServiceConsent,
+        expected_version: int,
+    ) -> None: ...
+
+
+class ReviewDocumentRepository(Protocol):
+    def get(self, scope: TenantScope, review_job_id: UUID) -> ReviewDocument | None: ...
+    def add(self, scope: TenantScope, document: ReviewDocument) -> None: ...
+    def save(
+        self,
+        scope: TenantScope,
+        document: ReviewDocument,
+        expected_document_version: int,
+    ) -> None: ...
 
 
 class ArtifactRepository(Protocol):
@@ -236,6 +273,8 @@ class UnitOfWork(Protocol):
     projects: ProjectRepository
     papers: PaperRepository
     review_jobs: ReviewJobRepository
+    consents: ConsentRepository
+    review_documents: ReviewDocumentRepository
     artifacts: ArtifactRepository
     commands: CommandRepository
     work_items: WorkItemRepository

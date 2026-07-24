@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from peerassist.platform import models as platform_models
 from peerassist.platform.errors import IdempotencyConflict, NotFound, StaleVersion
 from peerassist.platform.idempotency import canonical_json_digest
 from peerassist.platform.models import (
@@ -89,6 +90,53 @@ def paper(scope: TenantScope, now) -> tuple[Paper, PaperVersion]:
         now,
     )
     return aggregate, version
+
+
+def consent(scope: TenantScope, now, *, generation: int = 1):
+    assert scope.project_id is not None
+    return platform_models.ExternalServiceConsent(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        uuid4(),
+        uuid4(),
+        "model",
+        3,
+        "model-policy-v1",
+        {"fields": ["abstract"]},
+        "granted",
+        generation,
+        1,
+        uuid4(),
+        now,
+        now + timedelta(hours=1),
+        None,
+        now,
+        now,
+    )
+
+
+def document(scope: TenantScope, now, *, version: int = 1):
+    assert scope.project_id is not None
+    return platform_models.ReviewDocument(
+        uuid4(),
+        scope.organization_id,
+        scope.project_id,
+        uuid4(),
+        (
+            platform_models.ReviewDocumentBlock(
+                uuid4(),
+                "overall_assessment",
+                "Promising work with revisions required.",
+                "manual",
+            ),
+        ),
+        version,
+        None,
+        uuid4(),
+        now,
+        now,
+    )
 
 
 def test_commit_persists_and_rollback_discards_all_transactional_state(uow_factory, clock) -> None:
@@ -337,6 +385,174 @@ def test_optimistic_save_rejects_a_lower_replacement_version(uow_factory, clock)
     with uow_factory(principal) as uow:
         with pytest.raises(StaleVersion):
             uow.projects.save(scope, original, expected_version=2)
+
+
+def test_consent_repository_enforces_current_key_cas_reapply_and_tenant_scope(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    other_scope = TenantScope(uuid4(), scope.project_id)
+    original = consent(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.consents.add(scope, original)
+        uow.commit()
+
+    with uow_factory(principal) as uow:
+        assert uow.consents.get_current(
+            scope,
+            original.review_job_id,
+            original.paper_version_id,
+            original.service,
+        ) == original
+        assert uow.consents.get_current(
+            other_scope,
+            original.review_job_id,
+            original.paper_version_id,
+            original.service,
+        ) is None
+        with pytest.raises(NotFound):
+            uow.consents.save(other_scope, replace(original, version=2), expected_version=1)
+        with pytest.raises(StaleVersion):
+            uow.consents.save(scope, replace(original, version=2), expected_version=7)
+
+    superseded_at = clock() + timedelta(minutes=1)
+    superseded = replace(
+        original,
+        version=2,
+        superseded_at=superseded_at,
+        updated_at=superseded_at,
+    )
+    reapplied = replace(
+        original,
+        id=uuid4(),
+        status="pending",
+        generation=2,
+        decided_by=None,
+        decided_at=None,
+        expires_at=None,
+        created_at=superseded_at,
+        updated_at=superseded_at,
+    )
+    with uow_factory(principal) as uow:
+        uow.consents.supersede_and_add(scope, superseded, reapplied, expected_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.consents.get_current(
+            scope,
+            original.review_job_id,
+            original.paper_version_id,
+            original.service,
+        ) == reapplied
+
+
+def test_consent_reapply_is_atomic_when_the_new_generation_is_invalid(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    original = consent(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.consents.add(scope, original)
+        uow.commit()
+
+    superseded = replace(
+        original,
+        version=2,
+        superseded_at=clock() + timedelta(minutes=1),
+    )
+    invalid_reapply = replace(original, id=uuid4(), status="pending", decided_by=None, decided_at=None)
+    with uow_factory(principal) as uow:
+        with pytest.raises(ValueError, match="generation"):
+            uow.consents.supersede_and_add(
+                scope,
+                superseded,
+                invalid_reapply,
+                expected_version=1,
+            )
+        assert uow.consents.get_current(
+            scope,
+            original.review_job_id,
+            original.paper_version_id,
+            original.service,
+        ) == original
+
+
+def test_review_document_repository_enforces_one_per_job_cas_and_tenant_scope(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    other_scope = TenantScope(uuid4(), scope.project_id)
+    original = document(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.review_documents.add(scope, original)
+        with pytest.raises(ValueError, match="job"):
+            uow.review_documents.add(scope, replace(original, id=uuid4()))
+        uow.commit()
+
+    updated = replace(
+        original,
+        blocks=(
+            *original.blocks,
+            platform_models.ReviewDocumentBlock(
+                uuid4(),
+                "revision_suggestions",
+                "Clarify the sampling method.",
+                "manual",
+            ),
+        ),
+        document_version=2,
+        updated_at=clock() + timedelta(minutes=1),
+    )
+    with uow_factory(principal) as uow:
+        assert uow.review_documents.get(other_scope, original.review_job_id) is None
+        with pytest.raises(NotFound):
+            uow.review_documents.save(other_scope, updated, expected_document_version=1)
+        with pytest.raises(StaleVersion):
+            uow.review_documents.save(scope, updated, expected_document_version=9)
+        uow.review_documents.save(scope, updated, expected_document_version=1)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.review_documents.get(scope, original.review_job_id) == updated
+
+
+def test_setting_default_project_membership_clears_previous_default_in_same_organization(
+    uow_factory,
+    clock,
+) -> None:
+    principal = actor()
+    organization_id = uuid4()
+    user_id = uuid4()
+    first_scope = TenantScope(organization_id, uuid4())
+    second_scope = TenantScope(organization_id, uuid4())
+    first = ProjectMembership(
+        uuid4(),
+        organization_id,
+        first_scope.project_id,
+        user_id,
+        Role.REVIEWER,
+        "active",
+        1,
+        clock(),
+        clock(),
+        None,
+        True,
+    )
+    second = replace(first, id=uuid4(), project_id=second_scope.project_id)
+
+    with uow_factory(principal) as uow:
+        uow.projects.save_membership(first_scope, first, expected_version=None)
+        uow.projects.save_membership(second_scope, second, expected_version=None)
+        uow.commit()
+
+    with uow_factory(principal) as uow:
+        stored_first = uow.projects.get_membership(first_scope, user_id)
+        stored_second = uow.projects.get_membership(second_scope, user_id)
+        assert stored_first is not None
+        assert stored_first.is_default is False
+        assert stored_first.version == 2
+        assert stored_second == second
 
 
 def test_concurrent_command_replay_and_changed_payload_conflict(uow_factory, clock) -> None:

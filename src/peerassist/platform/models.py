@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -216,6 +217,33 @@ def _nonnegative(value: int, name: str) -> None:
 def _nonempty(value: str, name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be empty")
+
+
+def _bounded_string(value: str, name: str, maximum_length: int, *, empty: bool = False) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not empty and not value.strip():
+        raise ValueError(f"{name} must not be empty")
+    if len(value) > maximum_length:
+        raise ValueError(f"{name} must be at most {maximum_length} characters")
+
+
+def _freeze_bounded_json(
+    value: JsonValue | FrozenJsonValue,
+    name: str,
+    maximum_bytes: int,
+) -> FrozenJsonValue:
+    frozen = freeze_json(value)
+    encoded = json.dumps(
+        mutable_json(frozen),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > maximum_bytes:
+        raise ValueError(f"{name} JSON must be at most {maximum_bytes} bytes")
+    return frozen
 
 
 def _sha256(value: str, name: str) -> None:
@@ -534,6 +562,7 @@ class ProjectMembership:
     created_at: datetime
     updated_at: datetime
     revoked_at: datetime | None = None
+    is_default: bool = False
 
     def __post_init__(self) -> None:
         _uuid(self.id, "id")
@@ -543,6 +572,10 @@ class ProjectMembership:
             raise ValueError("project membership role must be project_owner, reviewer, or viewer")
         _nonempty(self.status, "status")
         _positive(self.version, "version")
+        if not isinstance(self.is_default, bool):
+            raise TypeError("is_default must be a boolean")
+        if self.is_default and (self.status != "active" or self.revoked_at is not None):
+            raise ValueError("only an active project membership may be the default")
         for name in ("created_at", "updated_at", "revoked_at"):
             _utc(getattr(self, name), name)
 
@@ -629,6 +662,194 @@ class ReviewJob:
         _nonnegative(self.attempt, "attempt")
         for name in ("created_at", "updated_at", "cancelled_at"):
             _utc(getattr(self, name), name)
+
+
+CONSENT_STATUSES = frozenset(
+    {"pending", "granted", "denied", "revoked", "expired", "not_required"}
+)
+REVIEW_DOCUMENT_SECTIONS = (
+    "overall_assessment",
+    "major_issues",
+    "minor_issues",
+    "revision_suggestions",
+)
+_REVIEW_DOCUMENT_SECTION_SET = frozenset(REVIEW_DOCUMENT_SECTIONS)
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalServiceConsent:
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    review_job_id: UUID
+    paper_version_id: UUID
+    service: str
+    provider_config_revision: int
+    policy_version: str
+    data_scope: Mapping[str, JsonValue]
+    status: str
+    generation: int
+    version: int
+    decided_by: UUID | None
+    decided_at: datetime | None
+    expires_at: datetime | None
+    superseded_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        _uuid(self.id, "id")
+        _tenant_ids(self.organization_id, self.project_id)
+        _uuid(self.review_job_id, "review_job_id")
+        _uuid(self.paper_version_id, "paper_version_id")
+        _bounded_string(self.service, "service", 128)
+        _positive(self.provider_config_revision, "provider_config_revision")
+        _bounded_string(self.policy_version, "policy_version", 128)
+        if not isinstance(self.data_scope, Mapping):
+            raise TypeError("data_scope must be a JSON object")
+        frozen_scope = _freeze_bounded_json(self.data_scope, "data_scope", 64 * 1024)
+        if not isinstance(frozen_scope, Mapping):
+            raise TypeError("data_scope must be a JSON object")
+        object.__setattr__(self, "data_scope", frozen_scope)
+        if self.status not in CONSENT_STATUSES:
+            raise ValueError(f"status must be one of {sorted(CONSENT_STATUSES)}")
+        _positive(self.generation, "generation")
+        _positive(self.version, "version")
+        if self.decided_by is not None:
+            _uuid(self.decided_by, "decided_by")
+        if (self.decided_by is None) != (self.decided_at is None):
+            raise ValueError("decided_by and decided_at must be recorded together")
+        for name in ("decided_at", "expires_at", "superseded_at", "created_at", "updated_at"):
+            _utc(getattr(self, name), name)
+        if self.status in {"granted", "denied", "revoked", "expired"} and self.decided_at is None:
+            raise ValueError(f"{self.status} consent must include a decision")
+        if self.expires_at is not None and self.decided_at is not None and self.expires_at <= self.decided_at:
+            raise ValueError("expires_at must be after decided_at")
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must not precede created_at")
+        if self.superseded_at is not None and self.superseded_at < self.created_at:
+            raise ValueError("superseded_at must not precede created_at")
+
+    def is_effective(self, *, provider_config_revision: int, at: datetime) -> bool:
+        _positive(provider_config_revision, "provider_config_revision")
+        _utc(at, "at")
+        return (
+            self.status == "granted"
+            and self.superseded_at is None
+            and self.provider_config_revision == provider_config_revision
+            and (self.expires_at is None or at < self.expires_at)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewDocumentBlock:
+    id: UUID
+    section: str
+    text: str
+    source_type: str
+    finding_lineage_id: str | None = None
+    finding_id: str | None = None
+    finding_revision: int | None = None
+    evidence_ids: tuple[str, ...] = ()
+    evidence_locator: Mapping[str, JsonValue] | None = None
+
+    def __post_init__(self) -> None:
+        _uuid(self.id, "id")
+        if self.section not in _REVIEW_DOCUMENT_SECTION_SET:
+            raise ValueError(f"section must be one of {REVIEW_DOCUMENT_SECTIONS}")
+        _bounded_string(self.text, "text", 100_000, empty=True)
+        _bounded_string(self.source_type, "source_type", 64)
+        finding_values = (self.finding_lineage_id, self.finding_id, self.finding_revision)
+        if any(value is not None for value in finding_values) and not all(
+            value is not None for value in finding_values
+        ):
+            raise ValueError("finding lineage, ID, and revision must be recorded together")
+        if self.finding_lineage_id is not None:
+            _bounded_string(self.finding_lineage_id, "finding_lineage_id", 256)
+            _bounded_string(self.finding_id, "finding_id", 256)  # type: ignore[arg-type]
+            _positive(self.finding_revision, "finding_revision")  # type: ignore[arg-type]
+        if not isinstance(self.evidence_ids, (tuple, list)):
+            raise TypeError("evidence_ids must be a tuple or list of identifiers")
+        evidence_ids = tuple(self.evidence_ids)
+        if len(evidence_ids) > 256:
+            raise ValueError("evidence_ids must contain at most 256 identifiers")
+        for evidence_id in evidence_ids:
+            _bounded_string(evidence_id, "evidence_id", 256)
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("evidence_ids must not contain duplicates")
+        object.__setattr__(self, "evidence_ids", evidence_ids)
+        if self.evidence_locator is not None:
+            if not isinstance(self.evidence_locator, Mapping):
+                raise TypeError("evidence_locator must be a JSON object")
+            locator = _freeze_bounded_json(
+                self.evidence_locator,
+                "evidence_locator",
+                64 * 1024,
+            )
+            if not isinstance(locator, Mapping):
+                raise TypeError("evidence_locator must be a JSON object")
+            object.__setattr__(self, "evidence_locator", locator)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewDocument:
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    review_job_id: UUID
+    blocks: tuple[ReviewDocumentBlock, ...]
+    document_version: int
+    base_decision_event_id: UUID | None
+    last_edited_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        _uuid(self.id, "id")
+        _tenant_ids(self.organization_id, self.project_id)
+        _uuid(self.review_job_id, "review_job_id")
+        _uuid(self.last_edited_by, "last_edited_by")
+        if self.base_decision_event_id is not None:
+            _uuid(self.base_decision_event_id, "base_decision_event_id")
+        _positive(self.document_version, "document_version")
+        if not isinstance(self.blocks, (tuple, list)):
+            raise TypeError("blocks must be a tuple or list of ReviewDocumentBlock values")
+        blocks = tuple(self.blocks)
+        if len(blocks) > 10_000:
+            raise ValueError("blocks must contain at most 10000 entries")
+        if any(not isinstance(block, ReviewDocumentBlock) for block in blocks):
+            raise TypeError("blocks must contain only ReviewDocumentBlock values")
+        if len({block.id for block in blocks}) != len(blocks):
+            raise ValueError("block IDs must be unique within a review document")
+        object.__setattr__(self, "blocks", blocks)
+        _utc(self.created_at, "created_at")
+        _utc(self.updated_at, "updated_at")
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must not precede created_at")
+
+    @classmethod
+    def empty(
+        cls,
+        *,
+        id: UUID,
+        organization_id: UUID,
+        project_id: UUID,
+        review_job_id: UUID,
+        last_edited_by: UUID,
+        created_at: datetime,
+    ) -> ReviewDocument:
+        return cls(
+            id=id,
+            organization_id=organization_id,
+            project_id=project_id,
+            review_job_id=review_job_id,
+            blocks=(),
+            document_version=1,
+            base_decision_event_id=None,
+            last_edited_by=last_edited_by,
+            created_at=created_at,
+            updated_at=created_at,
+        )
 
 
 @dataclass(frozen=True, slots=True)
