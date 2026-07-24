@@ -159,6 +159,7 @@ def _publish_review_result(
     *,
     revision=2,
     concern_overrides=None,
+    extra_concerns=None,
 ):
     concern = {
         "finding_lineage_id": "lineage-method",
@@ -181,7 +182,7 @@ def _publish_review_result(
     concern.update(concern_overrides or {})
     payload = {
         "schema_version": "peerassist.review_result.v1",
-        "concerns": [concern],
+        "concerns": [concern, *(extra_concerns or ())],
     }
     raw = json.dumps(payload).encode("utf-8")
     upload_id = store.create_temporary(project.scope, len(raw))
@@ -716,6 +717,41 @@ def test_finding_decision_rejects_artifact_descriptor_mismatch_without_writes() 
         assert tuple(uow.commands._state.commands.values()) == commands_before
 
 
+def test_finding_identity_duplicate_after_target_is_rejected() -> None:
+    workspace, reviews, factory, store, actors, project, version = _seed()
+    job = _job(reviews, actors["reviewer"], project, version)
+    duplicate = {
+        "finding_lineage_id": "lineage-method",
+        "finding_id": "finding-method-v2",
+        "revision": 2,
+        "level": "major_concern",
+        "title": "Duplicate",
+        "impact": "Duplicate identity after target.",
+        "author_action": "Reject duplicate identity.",
+        "evidence_ids": ["duplicate-evidence"],
+        "evidence": [{"id": "duplicate-evidence", "locator": "pdf:page:9"}],
+    }
+    _publish_review_result(
+        factory,
+        store,
+        actors["reviewer"],
+        project,
+        job,
+        extra_concerns=[duplicate],
+    )
+    document = workspace.get_document(actors["reviewer"], project.id, job.id)
+    events_before = reviews.events(actors["reviewer"], project.id, job.id)
+    with factory(actors["reviewer"]) as uow:
+        commands_before = tuple(uow.commands._state.commands.values())
+    with pytest.raises(ValueError, match="identity"):
+        workspace.decide_finding(actors["reviewer"], _decision(project, job, document))
+    assert reviews.get(actors["reviewer"], project.id, job.id) == job
+    assert workspace.get_document(actors["reviewer"], project.id, job.id) == document
+    assert reviews.events(actors["reviewer"], project.id, job.id) == events_before
+    with factory(actors["reviewer"]) as uow:
+        assert tuple(uow.commands._state.commands.values()) == commands_before
+
+
 @pytest.mark.parametrize(
     "concern_overrides",
     [
@@ -730,6 +766,7 @@ def test_finding_decision_rejects_artifact_descriptor_mismatch_without_writes() 
         },
         {"evidence_ids": ["dangling"]},
         {"evidence_ids": ["evidence-page-3", "evidence-page-3"]},
+        {"evidence": [], "evidence_ids": []},
     ],
 )
 def test_finding_decision_rejects_malformed_or_dangling_evidence(

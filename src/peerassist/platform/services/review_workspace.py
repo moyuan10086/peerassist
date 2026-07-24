@@ -643,6 +643,7 @@ class ReviewWorkspaceService:
         if not isinstance(concerns, list):
             raise ValueError("review_result.json concerns must be an array")
         lineage_found = False
+        matched_item: Mapping[str, JsonValue] | None = None
         identities: set[tuple[str, str, int]] = set()
         for item in concerns:
             if not isinstance(item, Mapping):
@@ -668,7 +669,9 @@ class ReviewWorkspaceService:
                 continue
             lineage_found = True
             if item_id == finding_id and item_revision == revision:
-                return item
+                matched_item = item
+        if matched_item is not None:
+            return matched_item
         if lineage_found:
             raise StaleVersion()
         raise NotFound()
@@ -725,9 +728,11 @@ class ReviewWorkspaceService:
             for block in document.blocks
             if block.finding_lineage_id != request.finding_lineage_id
         )
-        evidence_ids, locator = ReviewWorkspaceService._validated_evidence(concern)
         if request.action == "delete":
             return blocks
+        evidence_ids, locator = ReviewWorkspaceService._validated_evidence(concern)
+        if not evidence_ids:
+            raise ValueError("finding evidence must not be empty")
         section = ReviewWorkspaceService._finding_section(concern, request.action)
         raw_text = (
             request.rewrite_text
