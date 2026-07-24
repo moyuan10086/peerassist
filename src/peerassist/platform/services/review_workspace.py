@@ -12,14 +12,17 @@ from ..errors import DependencyUnavailable, NotFound, StaleVersion
 from ..models import (
     Action,
     Actor,
+    Artifact,
     CommandRecord,
     ExternalServiceConsent,
     JsonValue,
+    ReportVersion,
     ReviewDocument,
     ReviewDocumentBlock,
     ReviewEvent,
     ReviewJob,
     TenantScope,
+    WorkItem,
     mutable_json,
 )
 from ..ports import ObjectStore, UnitOfWork, UnitOfWorkFactory
@@ -79,6 +82,33 @@ class FindingDecisionResult:
     document_id: UUID
     document_version: int
     base_decision_event_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitReviewExport:
+    project_id: UUID
+    job_id: UUID
+    expected_review_version: int
+    expected_document_version: int
+    expected_decision_event_id: UUID | None
+    format: str
+    idempotency_key: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExportSubmission:
+    export_id: UUID
+    job_id: UUID
+    status: str
+    document_version: int
+    format: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExportRecord:
+    report: ReportVersion
+    artifact: Artifact
 
 
 class ReviewWorkspaceService:
@@ -423,6 +453,186 @@ class ReviewWorkspaceService:
                 document_version=changed_document.document_version,
                 base_decision_event_id=event.id,
             )
+
+    def submit_export(
+        self,
+        actor: Actor,
+        request: SubmitReviewExport,
+    ) -> ExportSubmission:
+        if request.format != "markdown":
+            raise ValueError("format must be markdown")
+        with self._uow_factory(actor) as uow:
+            project = self._reviews._require_project_action(
+                uow,
+                actor,
+                request.project_id,
+                Action.REPORT_FINALIZE,
+            )
+            scope = project.scope
+            command = self._reviews._reserve(
+                uow,
+                actor,
+                scope,
+                "review_workspace.export",
+                request.idempotency_key,
+                {
+                    "expected_decision_event_id": (
+                        str(request.expected_decision_event_id)
+                        if request.expected_decision_event_id is not None
+                        else None
+                    ),
+                    "expected_document_version": request.expected_document_version,
+                    "expected_review_version": request.expected_review_version,
+                    "format": request.format,
+                    "job_id": str(request.job_id),
+                },
+            )
+            replay = self._replayed_export(command)
+            if replay is not None:
+                return replay
+            job = self._reviews._versioned_job(
+                uow, scope, request.job_id, request.expected_review_version
+            )
+            if job.status not in {"blocked", "awaiting_human_confirmation"}:
+                raise ValueError("review job is not ready for export")
+            document = uow.review_documents.get(scope, job.id)
+            if document is None:
+                raise NotFound()
+            if document.document_version != request.expected_document_version:
+                raise StaleVersion(
+                    details={
+                        "expected_version": request.expected_document_version,
+                        "current_version": document.document_version,
+                    }
+                )
+            if document.base_decision_event_id != request.expected_decision_event_id:
+                raise StaleVersion()
+            now = self._clock()
+            changed = replace(
+                job,
+                stage="export",
+                status="exporting_report",
+                version=job.version + 1,
+                updated_at=now,
+            )
+            uow.review_jobs.save(scope, changed, job.version)
+            self._reviews._append_event(
+                uow,
+                scope,
+                changed,
+                "review_export.requested",
+                payload={
+                    "blocks": [self._block_payload(block) for block in document.blocks],
+                    "command_id": str(command.id),
+                    "decision_event_id": (
+                        str(document.base_decision_event_id)
+                        if document.base_decision_event_id is not None
+                        else None
+                    ),
+                    "document_id": str(document.id),
+                    "document_version": document.document_version,
+                    "finding_revisions": [
+                        {
+                            "finding_id": block.finding_id,
+                            "finding_lineage_id": block.finding_lineage_id,
+                            "finding_revision": block.finding_revision,
+                        }
+                        for block in document.blocks
+                        if block.finding_lineage_id is not None
+                    ],
+                    "format": request.format,
+                },
+            )
+            sequence = uow.review_jobs.list_events(scope, job.id)[-1].aggregate_sequence
+            export_id = uuid5(command.id, "work:export")
+            uow.work_items.enqueue(
+                scope,
+                WorkItem(
+                    export_id,
+                    scope.organization_id,
+                    job.project_id,
+                    job.id,
+                    uuid5(command.id, "attempt:export"),
+                    "export",
+                    sequence,
+                    0,
+                    3,
+                    now,
+                    now,
+                ),
+            )
+            self._reviews._audit(
+                uow,
+                actor,
+                scope,
+                command,
+                changed,
+                request.request_id,
+                action=Action.REPORT_FINALIZE,
+            )
+            self._reviews._outbox(uow, scope, changed, "review_export.requested")
+            submission = ExportSubmission(
+                export_id,
+                job.id,
+                "queued",
+                document.document_version,
+                request.format,
+            )
+            self._complete_command(
+                uow,
+                scope,
+                command,
+                {
+                    "document_version": submission.document_version,
+                    "export_id": str(submission.export_id),
+                    "format": submission.format,
+                    "job_id": str(submission.job_id),
+                    "status": submission.status,
+                },
+                response_status=202,
+            )
+            uow.commit()
+            return submission
+
+    def list_exports(
+        self,
+        actor: Actor,
+        project_id: UUID,
+        job_id: UUID,
+    ) -> tuple[ExportRecord, ...]:
+        with self._uow_factory(actor) as uow:
+            project = self._reviews._require_project_action(
+                uow, actor, project_id, Action.ARTIFACT_READ
+            )
+            scope = project.scope
+            self._job(uow, scope, job_id)
+            records: list[ExportRecord] = []
+            for report in uow.report_versions.list_for_job(scope, job_id):
+                artifact = uow.artifacts.get(scope, self.export_artifact_id(report.id))
+                if artifact is None or artifact.job_id != job_id or artifact.status != "available":
+                    continue
+                records.append(ExportRecord(report, artifact))
+            return tuple(records)
+
+    def get_export(
+        self,
+        actor: Actor,
+        project_id: UUID,
+        job_id: UUID,
+        report_version_id: UUID,
+    ) -> ExportRecord:
+        records = self.list_exports(actor, project_id, job_id)
+        record = next(
+            (item for item in records if item.report.id == report_version_id),
+            None,
+        )
+        if record is None:
+            raise NotFound()
+        return record
+
+    @staticmethod
+    def export_artifact_id(report_version_id: UUID) -> UUID:
+        return uuid5(report_version_id, "artifact:review-export")
 
     def _reapply_consent(
         self,
@@ -990,6 +1200,24 @@ class ReviewWorkspaceService:
         )
 
     @staticmethod
+    def _replayed_export(command: CommandRecord) -> ExportSubmission | None:
+        if command.completed_at is None:
+            return None
+        if not isinstance(command.response_body, Mapping):
+            raise NotFound()
+        response = command.response_body
+        required = {"export_id", "job_id", "status", "document_version", "format"}
+        if not required.issubset(response):
+            raise NotFound()
+        return ExportSubmission(
+            UUID(str(response["export_id"])),
+            UUID(str(response["job_id"])),
+            str(response["status"]),
+            int(response["document_version"]),
+            str(response["format"]),
+        )
+
+    @staticmethod
     def _parse_datetime(value: object) -> datetime | None:
         if value is None:
             return None
@@ -1025,12 +1253,14 @@ class ReviewWorkspaceService:
         scope: TenantScope,
         command: CommandRecord,
         response_body: dict[str, JsonValue],
+        *,
+        response_status: int = 200,
     ) -> None:
         uow.commands.complete(
             scope,
             replace(
                 command,
-                response_status=200,
+                response_status=response_status,
                 response_body=response_body,
                 completed_at=self._clock(),
             ),

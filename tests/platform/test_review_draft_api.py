@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from services.api.routes.organizations import require_management_actor
+from services.worker.main import ReviewWorker
 from tests.platform.test_paper_api import _app
 
 from peerassist.platform.models import Role
 
 
-def test_review_draft_is_saved_and_reloaded_with_version_control() -> None:
+def test_review_draft_is_saved_and_reloaded_with_version_control(tmp_path: Path) -> None:
     app, reviewer, _, project = _app()
     # Publishing is an owner action; keep the test actor explicit instead of
     # widening reviewer permissions just to exercise finalize.
@@ -42,11 +45,16 @@ def test_review_draft_is_saved_and_reloaded_with_version_control() -> None:
             headers={"Idempotency-Key": "draft-job"},
             json={"paper_version_id": uploaded["version"]["id"], "mode": "full"},
         ).json()
+        prepared = ReviewWorker(
+            app.state.dependencies.uow_factory,
+            app.state.dependencies.object_store,
+            tmp_path,
+        ).run_once(worker_id="draft-prepare-worker")
         empty = client.get(f"/api/v1/projects/{project.id}/review-jobs/{job['id']}/draft")
         saved = client.patch(
             f"/api/v1/projects/{project.id}/review-jobs/{job['id']}/draft",
             headers={"Idempotency-Key": "draft-save"},
-            json={"draft": "# 老师的最终意见\n", "expected_version": job["version"]},
+            json={"draft": "# 老师的最终意见\n", "expected_version": empty.json()["version"]},
         )
         loaded = client.get(f"/api/v1/projects/{project.id}/review-jobs/{job['id']}/draft")
         stale = client.patch(
@@ -59,23 +67,26 @@ def test_review_draft_is_saved_and_reloaded_with_version_control() -> None:
             headers={"Idempotency-Key": "draft-finalize"},
             json={"expected_version": saved.json()["version"]},
         )
-        artifacts = client.get(
-            f"/api/v1/projects/{project.id}/review-jobs/{job['id']}/artifacts"
-        )
-        assert finalized.status_code == 200, finalized.text
-        assert artifacts.status_code == 200, artifacts.text
-        final_artifact = next(
-            item for item in artifacts.json() if item["logical_name"] == "final_report.md"
+        assert finalized.status_code == 202, finalized.text
+        processed = ReviewWorker(
+            app.state.dependencies.uow_factory,
+            app.state.dependencies.object_store,
+            tmp_path,
+        ).run_once(worker_id="draft-export-worker")
+        exports = client.get(
+            f"/api/v1/workspace/reviews/{job['id']}/exports"
         )
         final_report = client.get(
-            f"/api/v1/projects/{project.id}/review-jobs/{job['id']}/artifacts/{final_artifact['id']}"
+            f"/api/v1/workspace/reviews/{job['id']}/exports/{exports.json()[0]['id']}"
         )
 
-    assert empty.status_code == 200 and empty.json() == {"draft": "", "version": 1}
-    assert saved.status_code == 200 and saved.json()["version"] == 2
+    assert empty.status_code == 200 and empty.json() == {"draft": "", "version": 2}
+    assert prepared is not None and prepared.status == "blocked"
+    assert saved.status_code == 200 and saved.json()["version"] == 3
     assert loaded.status_code == 200 and loaded.json()["draft"] == "# 老师的最终意见\n"
     assert stale.status_code == 409
-    assert finalized.status_code == 200 and finalized.json()["status"] == "completed"
+    assert finalized.status_code == 202 and finalized.json()["status"] == "queued"
+    assert processed is not None and processed.status == "completed"
     assert final_report.status_code == 200
     assert final_report.headers["content-type"] == "text/markdown; charset=utf-8"
-    assert final_report.text == "# 老师的最终意见\n"
+    assert "# 老师的最终意见" in final_report.text

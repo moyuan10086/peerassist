@@ -7,16 +7,20 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, Query, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from peerassist.platform.models import ExternalServiceConsent, ReviewDocument, ReviewDocumentBlock
+from peerassist.platform.services.artifacts import ArtifactService
 from peerassist.platform.services.papers import PaperService, PaperUploadResult, UploadPaper
 from peerassist.platform.services.review_workspace import (
     ChangeExternalServiceConsent,
     DecideFinding,
+    ExportSubmission,
     FindingDecisionResult,
     ReviewWorkspaceService,
     SaveReviewDocument,
+    SubmitReviewExport,
 )
 from peerassist.platform.services.reviews import (
     ChangeReviewJob,
@@ -139,6 +143,35 @@ class FindingDecisionView(BaseModel):
     document_id: UUID
     document_version: int
     base_decision_event_id: UUID
+
+
+class SubmitExportBody(BaseModel):
+    expected_review_version: int = Field(ge=1)
+    expected_document_version: int = Field(ge=1)
+    expected_decision_event_id: UUID | None = None
+    format: Literal["markdown"] = "markdown"
+
+
+class ExportSubmissionView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    export_id: UUID
+    job_id: UUID
+    status: str
+    document_version: int
+    format: str
+
+
+class ReportVersionView(BaseModel):
+    id: UUID
+    revision: int
+    schema_version: int
+    content_sha256: str
+    status: str
+    created_by: UUID
+    created_at: datetime
+    published_at: datetime | None
+    artifact_id: UUID
+    download_url: str
 
 
 def _bootstrap(request: Request, actor: ManagementActor):
@@ -465,4 +498,91 @@ def decide_finding(
             request_id=request.state.request_id,
             rewrite_text=body.rewrite_text,
         ),
+    )
+
+
+@router.post(
+    "/reviews/{job_id}/exports",
+    operation_id="v1_workspace_submit_review_export",
+    response_model=ExportSubmissionView,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_export(
+    job_id: UUID,
+    body: SubmitExportBody,
+    request: Request,
+    actor: ManagementActor,
+    idempotency_key: IdempotencyKey,
+) -> ExportSubmission:
+    return _workspace_service(request).submit_export(
+        actor,
+        SubmitReviewExport(
+            project_id=_project_id(request, actor),
+            job_id=job_id,
+            expected_review_version=body.expected_review_version,
+            expected_document_version=body.expected_document_version,
+            expected_decision_event_id=body.expected_decision_event_id,
+            format=body.format,
+            idempotency_key=idempotency_key,
+            request_id=request.state.request_id,
+        ),
+    )
+
+
+@router.get(
+    "/reviews/{job_id}/exports",
+    operation_id="v1_workspace_list_review_exports",
+    response_model=list[ReportVersionView],
+)
+def list_exports(
+    job_id: UUID,
+    request: Request,
+    actor: ManagementActor,
+) -> list[ReportVersionView]:
+    records = _workspace_service(request).list_exports(
+        actor, _project_id(request, actor), job_id
+    )
+    return [
+        ReportVersionView(
+            id=record.report.id,
+            revision=record.report.revision,
+            schema_version=record.report.schema_version,
+            content_sha256=record.report.content_sha256,
+            status=record.report.status,
+            created_by=record.report.created_by,
+            created_at=record.report.created_at,
+            published_at=record.report.published_at,
+            artifact_id=record.artifact.id,
+            download_url=f"/api/v1/workspace/reviews/{job_id}/exports/{record.report.id}",
+        )
+        for record in records
+    ]
+
+
+@router.get(
+    "/reviews/{job_id}/exports/{report_version_id}",
+    operation_id="v1_workspace_download_review_export",
+)
+def download_export(
+    job_id: UUID,
+    report_version_id: UUID,
+    request: Request,
+    actor: ManagementActor,
+) -> StreamingResponse:
+    project_id = _project_id(request, actor)
+    record = _workspace_service(request).get_export(
+        actor, project_id, job_id, report_version_id
+    )
+    source = ArtifactService(
+        request.app.state.dependencies.uow_factory,
+        request.app.state.dependencies.object_store,
+    ).open(actor, project_id, job_id, record.artifact.id)
+    return StreamingResponse(
+        source.stream,
+        media_type=record.artifact.object.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="review-{record.report.revision}.md"',
+            "ETag": f'"{record.artifact.object.sha256}"',
+            "X-Content-Type-Options": "nosniff",
+        },
     )

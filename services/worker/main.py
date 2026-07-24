@@ -27,7 +27,9 @@ from peerassist.platform.models import (
     Actor,
     ActorKind,
     Artifact,
+    ObjectDescriptor,
     OutboxEvent,
+    ReportVersion,
     ReviewEvent,
     ReviewJob,
     StageInputManifest,
@@ -91,10 +93,20 @@ class ReviewWorker:
             job = uow.review_jobs.get(scope, work.job_id)
             if job is None:
                 raise NotFound()
-            version = uow.papers.get_version(scope, job.paper_version_id)
-            if version is None:
-                raise NotFound()
+            version = None
+            if work.stage != "export":
+                version = uow.papers.get_version(scope, job.paper_version_id)
+                if version is None:
+                    raise NotFound()
             uow.commit()
+        if work.stage == "export":
+            try:
+                return self._run_export(service_actor, scope, work, worker_id, job)
+            except LeaseLost:
+                return None
+            except Exception:
+                self._fail_export(scope, service_actor, work, worker_id, job)
+                raise
         if job.status == "cancelled":
             with self._uow_factory(service_actor) as uow:
                 uow.work_items.complete(scope, work.id, worker_id)
@@ -245,6 +257,144 @@ class ReviewWorker:
         finally:
             self._materializer.cleanup(workspace)
 
+    def _run_export(
+        self,
+        service_actor: Actor,
+        scope: TenantScope,
+        work,
+        worker_id: str,
+        job: ReviewJob,
+    ) -> ReviewJob:
+        with self._uow_factory(service_actor) as uow:
+            current = uow.review_jobs.get_for_update(scope, job.id)
+            if current is None:
+                raise NotFound()
+            event = next(
+                (
+                    item
+                    for item in uow.review_jobs.list_events(scope, job.id)
+                    if item.aggregate_sequence == work.input_revision
+                ),
+                None,
+            )
+            if event is None or event.event_type != "review_export.requested":
+                raise ValueError("export work does not reference a frozen request")
+            snapshot = dict(event.payload)
+        report = _render_export_snapshot(snapshot)
+        payload = report.encode("utf-8")
+        object_id = f"review-jobs/{job.id}/exports/{work.id}/report.md"
+        if not self._renew_lease(service_actor, scope, work, worker_id):
+            raise LeaseLost()
+        upload_id = self._object_store.create_temporary(scope, max(1, len(payload)))
+        try:
+            temporary = self._object_store.write_temporary(
+                scope, upload_id, io.BytesIO(payload)
+            )
+            published = self._object_store.publish(scope, temporary, object_id)
+        finally:
+            self._object_store.delete_temporary(scope, upload_id)
+        descriptor = ObjectDescriptor(
+            published.object_id,
+            published.size_bytes,
+            published.sha256,
+            "text/markdown; charset=utf-8",
+            published.schema_version,
+        )
+        if not self._renew_lease(service_actor, scope, work, worker_id):
+            raise LeaseLost()
+        report_version_id = uuid5(work.id, "report-version")
+        artifact_id = uuid5(report_version_id, "artifact:review-export")
+        with self._uow_factory(service_actor) as uow:
+            current_work = uow.work_items.get(scope, work.id)
+            if current_work is None or current_work.lease_owner != worker_id:
+                raise LeaseLost()
+            current = uow.review_jobs.get_for_update(scope, job.id)
+            if current is None:
+                raise NotFound()
+            existing_report = uow.report_versions.get(scope, report_version_id)
+            reports = uow.report_versions.list_for_job(scope, job.id)
+            if existing_report is None:
+                report_version = ReportVersion(
+                    report_version_id,
+                    scope.organization_id,
+                    job.project_id,
+                    job.id,
+                    len(reports) + 1,
+                    1,
+                    descriptor.sha256,
+                    "published",
+                    job.created_by,
+                    self._clock(),
+                    published_at=self._clock(),
+                )
+                uow.report_versions.add(scope, report_version)
+            elif existing_report.content_sha256 != descriptor.sha256:
+                raise ValueError("published export does not match registered report")
+            existing_artifact = uow.artifacts.get(scope, artifact_id)
+            if existing_artifact is None:
+                uow.artifacts.add(
+                    scope,
+                    Artifact(
+                        artifact_id,
+                        scope.organization_id,
+                        job.project_id,
+                        job.id,
+                        f"review-export-{report_version_id}.md",
+                        descriptor,
+                        "available",
+                        self._clock(),
+                    ),
+                )
+            elif existing_artifact.object != descriptor:
+                raise ValueError("published export artifact does not match immutable object")
+            completed = replace(
+                current,
+                stage="completed",
+                status="completed",
+                version=current.version + 1,
+                updated_at=self._clock(),
+                safe_error_code=None,
+            )
+            uow.review_jobs.save(scope, completed, current.version)
+            sequence = len(uow.review_jobs.list_events(scope, job.id)) + 1
+            event_type = "review_export.completed"
+            uow.review_jobs.append_event(
+                scope,
+                ReviewEvent(
+                    uuid5(job.id, f"event:{sequence}:{event_type}"),
+                    scope.organization_id,
+                    job.project_id,
+                    job.id,
+                    sequence,
+                    event_type,
+                    1,
+                    {
+                        "artifact_id": str(artifact_id),
+                        "report_version_id": str(report_version_id),
+                        "status": "completed",
+                    },
+                    self._clock(),
+                ),
+            )
+            uow.outbox.append(
+                scope,
+                OutboxEvent(
+                    uuid5(job.id, f"outbox:{sequence}:{event_type}"),
+                    scope.organization_id,
+                    "review_job",
+                    job.id,
+                    sequence,
+                    event_type,
+                    1,
+                    {"job_id": str(job.id), "report_version_id": str(report_version_id)},
+                    self._clock(),
+                    project_id=job.project_id,
+                ),
+            )
+            uow.work_items.complete(scope, work.id, worker_id)
+            uow.commit()
+            return completed
+
     def _generate_documents(
         self,
         service_actor: Actor,
@@ -378,10 +528,84 @@ class ReviewWorker:
                 )
             uow.commit()
 
+    def _fail_export(
+        self,
+        scope: TenantScope,
+        actor: Actor,
+        work,
+        worker_id: str,
+        job: ReviewJob,
+    ) -> None:
+        with self._uow_factory(actor) as uow:
+            current_work = uow.work_items.get(scope, work.id)
+            exhausted = False
+            if current_work is not None and current_work.lease_owner == worker_id:
+                exhausted = current_work.attempt_count >= current_work.max_attempts
+                uow.work_items.fail(scope, current_work, worker_id)
+            current = uow.review_jobs.get(scope, job.id)
+            if current is not None and current.status not in {"cancelled", "completed"}:
+                uow.review_jobs.save(
+                    scope,
+                    replace(
+                        current,
+                        status="failed" if exhausted else "exporting_report",
+                        version=current.version + 1,
+                        updated_at=self._clock(),
+                        safe_error_code=(
+                            "export_attempts_exhausted" if exhausted else "export_retry_pending"
+                        ),
+                    ),
+                    current.version,
+                )
+            uow.commit()
+
 
 def generate_review_documents(pdf_bytes: bytes) -> tuple[str, str]:
     title, text = _extract_pdf(pdf_bytes)
     return _fallback_documents(title, text)
+
+
+def _render_export_snapshot(snapshot: dict[str, object]) -> str:
+    if snapshot.get("format") != "markdown":
+        raise ValueError("unsupported export format")
+    raw_blocks = snapshot.get("blocks")
+    if not isinstance(raw_blocks, (list, tuple)):
+        raise ValueError("export snapshot blocks are missing")
+    by_section: dict[str, list[dict[str, object]]] = {}
+    for raw in raw_blocks:
+        if not isinstance(raw, dict) and not hasattr(raw, "get"):
+            raise ValueError("export snapshot blocks must be objects")
+        section = raw.get("section")
+        text = raw.get("text")
+        if not isinstance(section, str) or not isinstance(text, str):
+            raise ValueError("export snapshot block fields are invalid")
+        by_section.setdefault(section, []).append(dict(raw))
+    section_titles = (
+        ("overall_assessment", "总体评价"),
+        ("major_issues", "主要问题"),
+        ("minor_issues", "次要问题"),
+        ("revision_suggestions", "修改建议"),
+    )
+    if set(by_section) != {section for section, _ in section_titles}:
+        raise ValueError("export snapshot must contain the four review sections")
+    lines = [
+        "# PeerAssist 审稿意见",
+        "",
+        f"> 文档版本：{snapshot.get('document_version')}",
+        "",
+    ]
+    for section, title in section_titles:
+        lines.extend((f"## {title}", ""))
+        for block in by_section[section]:
+            text = str(block["text"]).strip()
+            if text:
+                lines.extend((text, ""))
+            evidence_ids = block.get("evidence_ids")
+            if isinstance(evidence_ids, (list, tuple)) and evidence_ids:
+                lines.extend((f"证据：{', '.join(str(item) for item in evidence_ids)}", ""))
+        if not any(str(block["text"]).strip() for block in by_section[section]):
+            lines.extend(("（无）", ""))
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_review_result(

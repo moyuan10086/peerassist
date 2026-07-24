@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -13,6 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from peerassist.platform.errors import DependencyUnavailable, NotFound
 from peerassist.platform.models import ReviewEvent, ReviewJob, TenantScope
+from peerassist.platform.services.review_workspace import (
+    ExportSubmission,
+    ReviewWorkspaceService,
+    SaveReviewDocument,
+    SubmitReviewExport,
+)
 from peerassist.platform.services.reviews import (
     ChangeReviewJob,
     CreateReviewJob,
@@ -22,7 +29,6 @@ from peerassist.platform.services.reviews import (
     SaveReviewDraft,
 )
 
-from .artifacts import ArtifactService
 from .organizations import IdempotencyKey, ManagementActor
 
 router = APIRouter(prefix="/api/v1", tags=["review-jobs"])
@@ -81,6 +87,15 @@ class ReviewDraftBody(BaseModel):
 class ReviewDraftView(BaseModel):
     draft: str
     version: int
+
+
+class ReviewExportSubmissionView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    export_id: UUID
+    job_id: UUID
+    status: str
+    document_version: int
+    format: str
 
 
 def _service(request: Request) -> ReviewService:
@@ -315,7 +330,8 @@ def record_decision(
 @router.post(
     "/projects/{project_id}/review-jobs/{job_id}/finalize",
     operation_id="v1_finalize_review_job",
-    response_model=ReviewJobView,
+    response_model=ReviewExportSubmissionView,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def finalize_review(
     project_id: UUID,
@@ -324,42 +340,52 @@ def finalize_review(
     request: Request,
     actor: ManagementActor,
     idempotency_key: IdempotencyKey,
-) -> ReviewJob:
+) -> ExportSubmission:
     service = _service(request)
-    finalized = service.finalize(
-        actor,
-        ChangeReviewJob(
-            project_id,
-            job_id,
-            body.expected_version,
-            idempotency_key,
-            request.state.request_id,
-        ),
-    )
-    _, draft = service.get_draft(actor, project_id, job_id)
-    # Preserve the teacher's markdown exactly; only use stripped text to decide
-    # whether the draft is empty.
-    report = draft if draft.strip() else ""
-    if not report:
-        for artifact in ArtifactService(
-            request.app.state.dependencies.uow_factory,
-            request.app.state.dependencies.object_store,
-        ).list(actor, project_id, job_id):
-            if artifact.logical_name != "review.md":
-                continue
-            source = ArtifactService(
-                request.app.state.dependencies.uow_factory,
-                request.app.state.dependencies.object_store,
-            ).open(actor, project_id, job_id, artifact.id)
-            try:
-                report = source.stream.read().decode("utf-8")
-            finally:
-                source.stream.close()
-            break
-    if not report:
-        report = "# PeerAssist 最终审阅报告\n\n当前任务没有可导出的审阅正文。"
-    ArtifactService(
+    job = service.get(actor, project_id, job_id)
+    if job.version != body.expected_version:
+        from peerassist.platform.errors import StaleVersion
+
+        raise StaleVersion(
+            details={
+                "expected_version": body.expected_version,
+                "current_version": job.version,
+            }
+        )
+    workspace = ReviewWorkspaceService(
         request.app.state.dependencies.uow_factory,
         request.app.state.dependencies.object_store,
-    ).publish_text(actor, project_id, job_id, "final_report.md", report)
-    return finalized
+    )
+    document = workspace.get_document(actor, project_id, job_id)
+    _, draft = service.get_draft(actor, project_id, job_id)
+    overall = next(block for block in document.blocks if block.section == "overall_assessment")
+    if draft.strip() and overall.text != draft:
+        document = workspace.save_document(
+            actor,
+            SaveReviewDocument(
+                project_id,
+                job_id,
+                tuple(
+                    replace(block, text=draft, source_type="legacy_draft")
+                    if block.section == "overall_assessment"
+                    else block
+                    for block in document.blocks
+                ),
+                document.document_version,
+                f"{idempotency_key}:legacy-draft",
+                request.state.request_id,
+            ),
+        )
+    return workspace.submit_export(
+        actor,
+        SubmitReviewExport(
+            project_id=project_id,
+            job_id=job_id,
+            expected_review_version=body.expected_version,
+            expected_document_version=document.document_version,
+            expected_decision_event_id=document.base_decision_event_id,
+            format="markdown",
+            idempotency_key=idempotency_key,
+            request_id=request.state.request_id,
+        ),
+    )
