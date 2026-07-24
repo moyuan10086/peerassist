@@ -723,7 +723,12 @@ class ExternalServiceConsent:
             _utc(getattr(self, name), name)
         if self.status in {"granted", "denied", "revoked", "expired", "not_required"} and self.decided_at is None:
             raise ValueError(f"{self.status} consent must include a decision")
-        if self.expires_at is not None and self.decided_at is not None and self.expires_at <= self.decided_at:
+        if (
+            self.status == "granted"
+            and self.expires_at is not None
+            and self.decided_at is not None
+            and self.expires_at <= self.decided_at
+        ):
             raise ValueError("expires_at must be after decided_at")
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not precede created_at")

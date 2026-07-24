@@ -19,6 +19,13 @@ from .memberships import (
     UpdateProjectMembership,
 )
 from .papers import PaperService, PaperSource, PaperUploadResult, UploadPaper
+from .review_workspace import (
+    ChangeExternalServiceConsent,
+    DecideFinding,
+    FindingDecisionResult,
+    ReviewWorkspaceService,
+    SaveReviewDocument,
+)
 from .reviews import ChangeReviewJob, CreateReviewJob, RecordReviewDecision, ReviewService
 
 __all__ = [
@@ -29,10 +36,13 @@ __all__ = [
     "BootstrapOrganization",
     "BootstrapOrganizationResult",
     "BootstrapOrganizationService",
+    "ChangeExternalServiceConsent",
     "ChangeIdentity",
     "ChangeReviewJob",
     "CreateProject",
     "CreateReviewJob",
+    "DecideFinding",
+    "FindingDecisionResult",
     "GrantOrganizationMembership",
     "GrantProjectMembership",
     "IdentityOperatorService",
@@ -44,6 +54,8 @@ __all__ = [
     "PaperUploadResult",
     "RecordReviewDecision",
     "ReviewService",
+    "ReviewWorkspaceService",
+    "SaveReviewDocument",
     "UpdateOrganizationMembership",
     "UpdateProjectMembership",
     "UploadPaper",
