@@ -40,8 +40,13 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: web/peerassist-workspace/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Install frontend dependencies
         run: npm ci --prefix web/peerassist-workspace
+      - name: Validate design contract
+        run: python scripts/check_design_md.py
       - name: Build frontend
         run: npm run build --prefix web/peerassist-workspace
       - name: Verify committed distribution

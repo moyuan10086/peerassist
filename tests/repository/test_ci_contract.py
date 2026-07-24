@@ -53,9 +53,14 @@ def test_frontend_and_repository_policy_jobs_use_locked_commands() -> None:
     policy = jobs["repository-policy"]
 
     assert _step_uses(frontend, "actions/setup-node@v4")["with"]["node-version"] == 24
+    assert _step_uses(frontend, "actions/setup-python@v5")["with"]["python-version"] == "3.12"
     assert "npm ci" in _commands(frontend)
+    assert "python scripts/check_design_md.py" in _commands(frontend)
     assert "npm run build" in _commands(frontend)
     assert "git diff --exit-code -- web/peerassist-workspace/dist" in _commands(frontend)
+    step_names = [step.get("name") for step in _steps(frontend)]
+    assert step_names.index("Install frontend dependencies") < step_names.index("Validate design contract")
+    assert step_names.index("Validate design contract") < step_names.index("Build frontend")
     assert "python scripts/check_docs.py" in _commands(policy)
     assert "python scripts/check_secrets.py" in _commands(policy)
 

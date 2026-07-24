@@ -8,10 +8,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "scripts" / "check_design_md.py"
 DESIGN = ROOT / "DESIGN.md"
 TOKENS = ROOT / "web" / "peerassist-workspace" / "design-tokens.json"
+LOCAL_CLI = ROOT / "web" / "peerassist-workspace" / "node_modules" / ".bin" / "designmd"
 PACKAGE = ROOT / "web" / "peerassist-workspace" / "package.json"
 PACKAGE_LOCK = ROOT / "web" / "peerassist-workspace" / "package-lock.json"
 UI_SPEC = ROOT / "docs" / "superpowers" / "specs" / "2026-07-20-peerassist-editorial-workspace-ui-design.md"
@@ -52,6 +55,9 @@ def _run_with_fake_cli(
 
 
 def test_repository_design_contract_passes() -> None:
+    if not LOCAL_CLI.is_file():
+        pytest.skip("run npm ci in web/peerassist-workspace to install the DESIGN.md CLI")
+
     result = subprocess.run(
         [sys.executable, str(CHECKER), str(DESIGN), str(TOKENS)],
         cwd=ROOT,
