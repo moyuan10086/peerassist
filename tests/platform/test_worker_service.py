@@ -89,6 +89,74 @@ def test_worker_claims_review_and_publishes_summary_and_report(tmp_path: Path) -
     assert not any(tmp_path.rglob("object-000.bin"))
 
 
+def test_worker_renews_lease_during_generation_and_before_publish(tmp_path: Path, monkeypatch) -> None:
+    paper_service, store, actors, project = _seed()
+    uploaded = paper_service.upload(
+        actors["reviewer"],
+        UploadPaper(
+            project.id, "paper.pdf", "application/pdf", 1024,
+            "worker-heartbeat", "worker-heartbeat-request",
+        ),
+        io.BytesIO(b"%PDF-1.7\nheartbeat fixture\n%%EOF\n"),
+    )
+    job = ReviewService(paper_service._uow_factory, clock=paper_service._clock).create(
+        actors["reviewer"],
+        CreateReviewJob(
+            project.id, uploaded.version.id, "full", "worker-heartbeat-review", "worker-heartbeat-review-request"
+        ),
+    )
+    renewals = {"count": 0}
+    worker = ReviewWorker(
+        paper_service._uow_factory,
+        store,
+        tmp_path,
+        document_generator=lambda _: ("# Summary\n", "# Review\n"),
+        clock=paper_service._clock,
+    )
+    monkeypatch.setattr(worker, "_renew_lease", lambda *_args: renewals.__setitem__("count", renewals["count"] + 1) or True)
+
+    processed = worker.run_once(worker_id="heartbeat-worker")
+
+    assert processed is not None and processed.id == job.id
+    assert renewals["count"] >= 3
+
+
+def test_worker_lease_loss_stops_before_publish_without_raising(tmp_path: Path, monkeypatch) -> None:
+    paper_service, store, actors, project = _seed()
+    uploaded = paper_service.upload(
+        actors["reviewer"],
+        UploadPaper(
+            project.id, "paper.pdf", "application/pdf", 1024,
+            "worker-lease-loss", "worker-lease-loss-request",
+        ),
+        io.BytesIO(b"%PDF-1.7\nlease loss fixture\n%%EOF\n"),
+    )
+    job = ReviewService(paper_service._uow_factory, clock=paper_service._clock).create(
+        actors["reviewer"],
+        CreateReviewJob(
+            project.id, uploaded.version.id, "full", "worker-lease-loss-review", "worker-lease-loss-review-request"
+        ),
+    )
+    worker = ReviewWorker(
+        paper_service._uow_factory,
+        store,
+        tmp_path,
+        document_generator=lambda _: ("# Summary\n", "# Review\n"),
+        clock=paper_service._clock,
+    )
+    published = {"count": 0}
+    monkeypatch.setattr(worker, "_renew_lease", lambda *_args: False)
+    monkeypatch.setattr(worker._publisher, "publish", lambda *_args, **_kwargs: published.__setitem__("count", 1))
+
+    processed = worker.run_once(worker_id="lease-loss-worker")
+
+    assert processed is None
+    assert published["count"] == 0
+    assert not any(tmp_path.rglob("object-000.bin"))
+    with paper_service._uow_factory(actors["viewer"]) as uow:
+        assert uow.review_jobs.get(project.scope, job.id) == job
+
+
 def test_worker_discards_staged_outputs_when_job_is_cancelled_before_publish_commit(
     tmp_path: Path,
 ) -> None:

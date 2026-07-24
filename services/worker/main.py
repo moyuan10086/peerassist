@@ -43,6 +43,11 @@ def _utc_now() -> datetime:
 
 
 MODEL_DATA_SCOPE = {"paper_text": True}
+LEASE_SECONDS = 900
+
+
+class LeaseLost(RuntimeError):
+    """The worker no longer owns its queue item."""
 
 
 def _same_model_snapshot(left: ModelReviewConfig, right: ModelReviewConfig) -> bool:
@@ -79,7 +84,7 @@ class ReviewWorker:
     def run_once(self, *, worker_id: str) -> ReviewJob | None:
         service_actor = Actor(uuid5(NAMESPACE_URL, "peerassist:worker"), ActorKind.SERVICE)
         with self._uow_factory(service_actor) as uow:
-            work = uow.work_items.claim_next(worker_id, 300)
+            work = uow.work_items.claim_next(worker_id, LEASE_SECONDS)
             if work is None:
                 return None
             scope = TenantScope(work.organization_id, work.project_id)
@@ -118,12 +123,14 @@ class ReviewWorker:
                 workspace,
             )
             pdf_bytes = (materialized / "inputs" / "object-000.bin").read_bytes()
+            if not self._renew_lease(service_actor, scope, work, worker_id):
+                raise LeaseLost()
             if self._document_generator is not None:
                 summary, report = self._document_generator(pdf_bytes)
                 model_status, model_fallback_reason = "not_requested", None
             else:
                 summary, report, model_status, model_fallback_reason = self._generate_documents(
-                    service_actor, scope, job, version, pdf_bytes
+                    service_actor, scope, work, worker_id, job, version, pdf_bytes
                 )
             review_result = build_review_result(
                 pdf_bytes,
@@ -138,6 +145,8 @@ class ReviewWorker:
                 encoding="utf-8",
             )
             logical_names = ("paper_summary.md", "review.md", "review_result.json")
+            if not self._renew_lease(service_actor, scope, work, worker_id):
+                raise LeaseLost()
             descriptors = self._publisher.publish(
                 scope,
                 job,
@@ -145,6 +154,8 @@ class ReviewWorker:
                 StageOutputSpec(logical_names, 4 * 1024 * 1024),
                 materialized,
             )
+            if not self._renew_lease(service_actor, scope, work, worker_id):
+                raise LeaseLost()
             with self._uow_factory(Actor(job.created_by, ActorKind.USER)) as uow:
                 current = uow.review_jobs.get_for_update(scope, job.id)
                 if current is None:
@@ -226,6 +237,8 @@ class ReviewWorker:
                 uow.work_items.complete(scope, work.id, worker_id)
                 uow.commit()
                 return completed
+        except LeaseLost:
+            return None
         except Exception:
             self._fail(scope, service_actor, work, worker_id, job, "worker_stage_failed")
             raise
@@ -236,6 +249,8 @@ class ReviewWorker:
         self,
         service_actor: Actor,
         scope: TenantScope,
+        work,
+        worker_id: str,
         job: ReviewJob,
         version,
         pdf_bytes: bytes,
@@ -253,13 +268,24 @@ class ReviewWorker:
                         if latest is None or not _same_model_snapshot(config, latest):
                             return (*_fallback_documents(title, text), "local_fallback", "model_config_changed")
                         try:
+                            if not self._renew_lease(service_actor, scope, work, worker_id):
+                                raise LeaseLost()
                             summary, report = _generate_with_model(title, text, config)
                             return summary, report, "external_model", None
                         except Exception:
                             return (*_fallback_documents(title, text), "local_fallback", "model_request_failed")
-                    return (*_fallback_documents(title, text), "local_fallback", reason)
+            return (*_fallback_documents(title, text), "local_fallback", reason)
         reason = "empty_input"
         return (*_fallback_documents(title, text), "local_fallback", reason)
+
+    def _renew_lease(self, actor: Actor, scope: TenantScope, work, worker_id: str) -> bool:
+        try:
+            with self._uow_factory(actor) as uow:
+                uow.work_items.renew(scope, work.id, worker_id, LEASE_SECONDS)
+                uow.commit()
+            return True
+        except Exception:
+            return False
 
     @contextmanager
     def _model_consent_gate(
