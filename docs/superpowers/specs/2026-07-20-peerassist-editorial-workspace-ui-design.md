@@ -5,6 +5,8 @@
 
 本文件保留视觉方向、响应式布局、PDF 画布、选区快照、焦点管理和证据定位约定。教师端导航以“我的审稿、论文研读、审稿意见、历史记录”为准；草稿以服务端 `ReviewDocument` 为权威，不再以浏览器本地草稿为恢复基线；具体覆盖关系见 `2026-07-24-peerassist-evidence-review-workspace-positioning-design.md`。
 
+根目录 `DESIGN.md` 是 PeerAssist 视觉 token、组件样式约束与无障碍对比度要求的规范性来源，所有前端实现和设计评审必须以其为准。
+
 ## 目标
 
 让老师在一个连续工作流中完成：上传论文、快速理解、定位证据、修改意见和导出结果。界面不把 Review Job、Agent、EventSource 等实现概念放在主路径上。
