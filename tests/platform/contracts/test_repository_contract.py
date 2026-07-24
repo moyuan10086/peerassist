@@ -194,6 +194,18 @@ def test_exception_rolls_back_state_events_work_and_outbox(uow_factory, clock) -
         assert uow.review_jobs.list_events(scope, aggregate.id) == ()
 
 
+def test_review_job_get_for_update_returns_tenant_bound_row(uow_factory, clock) -> None:
+    principal = actor()
+    scope = TenantScope(uuid4(), uuid4())
+    aggregate = job(scope, clock())
+    with uow_factory(principal) as uow:
+        uow.review_jobs.add(scope, aggregate)
+        uow.commit()
+    with uow_factory(principal) as uow:
+        assert uow.review_jobs.get_for_update(scope, aggregate.id) == aggregate
+        assert uow.review_jobs.get_for_update(TenantScope(uuid4(), scope.project_id), aggregate.id) is None
+
+
 def test_tenant_predicates_hide_cross_tenant_rows_and_lists(uow_factory, clock) -> None:
     principal = actor()
     visible_scope = TenantScope(uuid4(), uuid4())

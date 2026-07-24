@@ -495,6 +495,9 @@ class _ReviewJobs:
             else None
         )
 
+    def get_for_update(self, scope: TenantScope, job_id: UUID) -> ReviewJob | None:
+        return self.get(scope, job_id)
+
     def list(self, scope: TenantScope) -> tuple[ReviewJob, ...]:
         return tuple(
             item

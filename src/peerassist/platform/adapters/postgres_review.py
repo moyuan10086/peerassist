@@ -176,6 +176,14 @@ class _ReviewJobs(_Repository):
         )
         return None if row is None else _review_job(row)
 
+    def get_for_update(self, scope: TenantScope, job_id: UUID) -> ReviewJob | None:
+        row = self._one(
+            select(schema.review_jobs)
+            .where(_project_filter(schema.review_jobs, scope), schema.review_jobs.c.id == job_id)
+            .with_for_update()
+        )
+        return None if row is None else _review_job(row)
+
     def list(self, scope: TenantScope) -> tuple[ReviewJob, ...]:
         rows = self.connection.execute(
             select(schema.review_jobs).where(_project_filter(schema.review_jobs, scope)).order_by(schema.review_jobs.c.id)

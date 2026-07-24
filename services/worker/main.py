@@ -146,9 +146,11 @@ class ReviewWorker:
                 materialized,
             )
             with self._uow_factory(Actor(job.created_by, ActorKind.USER)) as uow:
-                current = uow.review_jobs.get(scope, job.id)
+                current = uow.review_jobs.get_for_update(scope, job.id)
                 if current is None:
                     raise NotFound()
+                if current.status in {"cancelled", "completed", "failed"}:
+                    raise ValueError("job_not_runnable")
                 existing = {
                     artifact.logical_name: artifact
                     for artifact in uow.artifacts.list_for_job(scope, job.id)
@@ -275,7 +277,7 @@ class ReviewWorker:
             if config is None:
                 yield None, "model_unavailable"
                 return
-            current_job = uow.review_jobs.get(scope, job.id)
+            current_job = uow.review_jobs.get_for_update(scope, job.id)
             if current_job is None:
                 yield None, "job_missing"
                 return
