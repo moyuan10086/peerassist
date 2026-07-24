@@ -732,9 +732,21 @@ def test_review_document_empty_factory_and_document_version_are_independent() ->
         last_edited_by=editor_id,
         created_at=NOW,
     )
+    same_document = models.ReviewDocument.empty(
+        id=document_id,
+        organization_id=organization_id,
+        project_id=project_id,
+        review_job_id=job_id,
+        last_edited_by=editor_id,
+        created_at=NOW,
+    )
 
     assert document.id == document_id
-    assert document.blocks == ()
+    assert tuple(block.section for block in document.blocks) == models.REVIEW_DOCUMENT_SECTIONS
+    assert tuple(block.id for block in document.blocks) == tuple(
+        block.id for block in same_document.blocks
+    )
+    assert all(block.text == "" and block.source_type == "manual" for block in document.blocks)
     assert document.document_version == 1
     assert document.base_decision_event_id is None
     assert document.last_edited_by == editor_id
@@ -742,3 +754,38 @@ def test_review_document_empty_factory_and_document_version_are_independent() ->
     assert document.updated_at == NOW
     with pytest.raises(ValueError, match="document_version"):
         replace(document, document_version=0)
+
+
+def test_review_document_requires_every_section_but_allows_multiple_blocks_per_section() -> None:
+    blocks = tuple(
+        _document_block(
+            section=section,
+            finding_lineage_id=None,
+            finding_id=None,
+            finding_revision=None,
+            evidence_ids=(),
+            evidence_locator=None,
+        )
+        for section in models.REVIEW_DOCUMENT_SECTIONS
+    )
+    common = {
+        "id": uuid4(),
+        "organization_id": uuid4(),
+        "project_id": uuid4(),
+        "review_job_id": uuid4(),
+        "document_version": 1,
+        "base_decision_event_id": None,
+        "last_edited_by": uuid4(),
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+
+    with pytest.raises(ValueError, match="all four sections"):
+        models.ReviewDocument(blocks=blocks[:-1], **common)
+
+    additional_major_issue = replace(blocks[1], id=uuid4(), text="A second major issue.")
+    document = models.ReviewDocument(
+        blocks=(*blocks, additional_major_issue),
+        **common,
+    )
+    assert [block.section for block in document.blocks].count("major_issues") == 2

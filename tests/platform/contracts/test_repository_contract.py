@@ -123,13 +123,14 @@ def document(scope: TenantScope, now, *, version: int = 1):
         scope.organization_id,
         scope.project_id,
         uuid4(),
-        (
+        tuple(
             platform_models.ReviewDocumentBlock(
                 uuid4(),
-                "overall_assessment",
-                "Promising work with revisions required.",
+                section,
+                "Promising work with revisions required." if section == "overall_assessment" else "",
                 "manual",
-            ),
+            )
+            for section in platform_models.REVIEW_DOCUMENT_SECTIONS
         ),
         version,
         None,

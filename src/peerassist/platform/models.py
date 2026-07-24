@@ -12,7 +12,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import TypeAlias
-from uuid import UUID
+from uuid import UUID, uuid5
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
@@ -821,6 +821,8 @@ class ReviewDocument:
             raise TypeError("blocks must contain only ReviewDocumentBlock values")
         if len({block.id for block in blocks}) != len(blocks):
             raise ValueError("block IDs must be unique within a review document")
+        if {block.section for block in blocks} != _REVIEW_DOCUMENT_SECTION_SET:
+            raise ValueError("review document must contain all four sections")
         object.__setattr__(self, "blocks", blocks)
         _utc(self.created_at, "created_at")
         _utc(self.updated_at, "updated_at")
@@ -843,7 +845,15 @@ class ReviewDocument:
             organization_id=organization_id,
             project_id=project_id,
             review_job_id=review_job_id,
-            blocks=(),
+            blocks=tuple(
+                ReviewDocumentBlock(
+                    id=uuid5(id, f"peerassist.review-document.section:{section}"),
+                    section=section,
+                    text="",
+                    source_type="manual",
+                )
+                for section in REVIEW_DOCUMENT_SECTIONS
+            ),
             document_version=1,
             base_decision_event_id=None,
             last_edited_by=last_edited_by,
