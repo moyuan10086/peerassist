@@ -4,7 +4,10 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
+
 from peerassist.model_settings import (
+    ModelSettingsError,
     ModelSettingsInput,
     discover_models,
     load_model_settings,
@@ -89,3 +92,37 @@ def test_model_discovery_uses_saved_secret_and_returns_sorted_unique_ids(tmp_pat
         "authorization": "Bearer sk-synthetic-private",
         "timeout": 20.0,
     }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("revision", 0),
+        ("revision", "1"),
+        ("enabled", "false"),
+        ("provider", 7),
+        ("base_url", 7),
+        ("model", 7),
+        ("api_key", {"secret": "value"}),
+    ],
+)
+def test_model_settings_rejects_wrong_or_fail_open_json_types(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    path = tmp_path / "invalid-settings.json"
+    payload = {
+        "schema_version": "peerassist.model_settings.v1",
+        "provider": "openai-compatible",
+        "base_url": "https://provider.example/v1",
+        "model": "gpt-test",
+        "api_key": "sk-synthetic-private",
+        "revision": 1,
+        "enabled": True,
+        "policy_version": "peerassist.model-policy.v1",
+        "configuration_id": "config-1",
+    }
+    payload[field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ModelSettingsError):
+        load_model_settings(path=path)

@@ -150,7 +150,9 @@ class ReviewWorker:
                 if current is None:
                     raise NotFound()
                 if current.status in {"cancelled", "completed", "failed"}:
-                    raise ValueError("job_not_runnable")
+                    uow.work_items.complete(scope, work.id, worker_id)
+                    uow.commit()
+                    return current
                 existing = {
                     artifact.logical_name: artifact
                     for artifact in uow.artifacts.list_for_job(scope, job.id)

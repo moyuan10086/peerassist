@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -86,6 +87,53 @@ def test_worker_claims_review_and_publishes_summary_and_report(tmp_path: Path) -
     finally:
         source.stream.close()
     assert not any(tmp_path.rglob("object-000.bin"))
+
+
+def test_worker_discards_staged_outputs_when_job_is_cancelled_before_publish_commit(
+    tmp_path: Path,
+) -> None:
+    paper_service, store, actors, project = _seed()
+    uploaded = paper_service.upload(
+        actors["reviewer"],
+        UploadPaper(
+            project.id, "paper.pdf", "application/pdf", 1024,
+            "worker-cancel-race", "worker-cancel-race-request",
+        ),
+        io.BytesIO(b"%PDF-1.7\ncancel race fixture\n%%EOF\n"),
+    )
+    job = ReviewService(paper_service._uow_factory, clock=paper_service._clock).create(
+        actors["reviewer"],
+        CreateReviewJob(
+            project.id, uploaded.version.id, "full", "worker-cancel-race-review", "worker-cancel-race-review-request"
+        ),
+    )
+    worker = ReviewWorker(
+        paper_service._uow_factory,
+        store,
+        tmp_path,
+        document_generator=lambda _: ("# Summary\n", "# Review\n"),
+        clock=paper_service._clock,
+    )
+    publish = worker._publisher.publish
+
+    def publish_then_cancel(*args, **kwargs):
+        descriptors = publish(*args, **kwargs)
+        with paper_service._uow_factory(actors["reviewer"]) as uow:
+            current = uow.review_jobs.get(project.scope, job.id)
+            assert current is not None
+            uow.review_jobs.save(
+                project.scope,
+                replace(current, status="cancelled", version=current.version + 1),
+                current.version,
+            )
+            uow.commit()
+        return descriptors
+
+    worker._publisher.publish = publish_then_cancel
+
+    processed = worker.run_once(worker_id="cancel-race-worker")
+
+    assert processed is not None and processed.status == "cancelled"
 
 
 def test_worker_processes_jobs_from_projects_created_after_bootstrap(tmp_path: Path) -> None:

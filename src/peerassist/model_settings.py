@@ -72,6 +72,8 @@ class StoredModelSettings:
     configuration_id: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.api_key, str) or len(self.api_key) > 4096:
+            raise ModelSettingsError("API Key 长度无效。")
         if self.revision < 1:
             raise ModelSettingsError("模型配置 revision 无效。")
         if not self.policy_version or len(self.policy_version) > 128:
@@ -129,19 +131,35 @@ def _load_model_settings_unlocked(target: Path) -> StoredModelSettings | None:
     if not isinstance(payload, dict) or payload.get("schema_version") != _SCHEMA_VERSION:
         raise ModelSettingsError("模型配置文件格式无效。")
     try:
-        provider = _validate_provider(str(payload.get("provider") or ""))
-        base_url = _validate_base_url(str(payload.get("base_url") or ""))
-        model = _validate_model(str(payload.get("model") or ""), required=True)
+        provider_raw = payload.get("provider", "")
+        base_url_raw = payload.get("base_url", "")
+        model_raw = payload.get("model", "")
+        api_key_raw = payload.get("api_key", "")
+        policy_raw = payload.get("policy_version", "peerassist.model-policy.v1")
+        configuration_raw = payload.get("configuration_id", "")
+        if not all(isinstance(value, str) for value in (
+            provider_raw, base_url_raw, model_raw, api_key_raw, policy_raw, configuration_raw
+        )):
+            raise ModelSettingsError("模型配置文件格式无效。")
+        revision = payload.get("revision", 1)
+        enabled = payload.get("enabled", True)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise ModelSettingsError("模型配置文件格式无效。")
+        if not isinstance(enabled, bool):
+            raise ModelSettingsError("模型配置文件格式无效。")
+        provider = _validate_provider(provider_raw)
+        base_url = _validate_base_url(base_url_raw)
+        model = _validate_model(model_raw, required=True)
         legacy_id = _legacy_configuration_id(provider, base_url, model)
         return StoredModelSettings(
             provider=provider,
             base_url=base_url,
             model=model,
-            api_key=str(payload.get("api_key") or "").strip(),
-            revision=int(payload.get("revision") or 1),
-            enabled=bool(payload.get("enabled", True)),
-            policy_version=str(payload.get("policy_version") or "peerassist.model-policy.v1"),
-            configuration_id=str(payload.get("configuration_id") or legacy_id),
+            api_key=api_key_raw.strip(),
+            revision=revision,
+            enabled=enabled,
+            policy_version=policy_raw,
+            configuration_id=configuration_raw or legacy_id,
         )
     except ModelSettingsError:
         raise
