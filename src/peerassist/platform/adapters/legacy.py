@@ -20,29 +20,13 @@ class LocalLegacyReader:
         self._root = root.resolve()
 
     def read_job(self, scope: TenantScope, registration: LegacyRegistration) -> ReviewJob:
-        if (
-            registration.organization_id != scope.organization_id
-            or registration.project_id != scope.project_id
-            or registration.status != "read_only"
-        ):
-            raise NotFound()
-        job_dir = self._job_dir(registration.opaque_locator)
-        manifest_path = job_dir / "job.json"
+        payload = self._read_manifest(scope, registration)
         try:
-            raw = manifest_path.read_bytes()
-        except OSError:
-            raise NotFound() from None
-        if len(raw) > _MAX_MANIFEST_BYTES:
-            raise DependencyUnavailable()
-        if hashlib.sha256(raw).hexdigest() != registration.manifest_sha256:
-            raise DependencyUnavailable()
-        try:
-            payload = json.loads(raw)
             job_id = UUID(str(payload["id"]))
             created_at = _datetime(payload["created_at"])
             updated_at = _datetime(payload["updated_at"])
             revision = max(1, int(payload.get("revision") or 1))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             raise DependencyUnavailable() from None
         if str(job_id) != registration.opaque_locator:
             raise DependencyUnavailable()
@@ -61,6 +45,27 @@ class LocalLegacyReader:
             created_at,
             updated_at,
         )
+
+    def read_workspace_facts(
+        self,
+        scope: TenantScope,
+        registration: LegacyRegistration,
+    ) -> dict[str, object]:
+        payload = self._read_manifest(scope, registration)
+        metadata = payload.get("metadata")
+        migration = metadata.get("workspace_migration") if isinstance(metadata, dict) else None
+        explicit = migration if isinstance(migration, dict) else {}
+        result: dict[str, object] = {
+            "paper_sha256": payload.get("paper_id"),
+            "mode": payload.get("mode"),
+        }
+        consent = explicit.get("consent")
+        sections = explicit.get("document_sections")
+        if isinstance(consent, dict):
+            result["consent"] = json.loads(json.dumps(consent))
+        if isinstance(sections, dict):
+            result["document_sections"] = json.loads(json.dumps(sections))
+        return result
 
     def read_artifact(
         self,
@@ -98,6 +103,34 @@ class LocalLegacyReader:
         if self._root not in resolved.parents:
             raise NotFound()
         return resolved
+
+    def _read_manifest(
+        self,
+        scope: TenantScope,
+        registration: LegacyRegistration,
+    ) -> dict[str, object]:
+        if (
+            registration.organization_id != scope.organization_id
+            or registration.project_id != scope.project_id
+            or registration.status != "read_only"
+        ):
+            raise NotFound()
+        manifest_path = self._job_dir(registration.opaque_locator) / "job.json"
+        try:
+            raw = manifest_path.read_bytes()
+        except OSError:
+            raise NotFound() from None
+        if len(raw) > _MAX_MANIFEST_BYTES:
+            raise DependencyUnavailable()
+        if hashlib.sha256(raw).hexdigest() != registration.manifest_sha256:
+            raise DependencyUnavailable()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            raise DependencyUnavailable() from None
+        if not isinstance(payload, dict):
+            raise DependencyUnavailable()
+        return payload
 
 
 def _datetime(value: object) -> datetime:

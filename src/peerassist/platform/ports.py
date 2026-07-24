@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -265,6 +265,9 @@ class StageArtifactPublisher(Protocol):
 
 class LegacyReader(Protocol):
     def read_job(self, scope: TenantScope, registration: LegacyRegistration) -> ReviewJob: ...
+    def read_workspace_facts(
+        self, scope: TenantScope, registration: LegacyRegistration
+    ) -> Mapping[str, object]: ...
     def read_artifact(
         self,
         scope: TenantScope,

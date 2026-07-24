@@ -61,3 +61,49 @@ def test_legacy_reader_rejects_digest_change_and_symlink_escape(tmp_path) -> Non
     (tmp_path / locator / "job.json").write_text("{}", encoding="utf-8")
     with pytest.raises(DependencyUnavailable):
         LocalLegacyReader(tmp_path).read_job(scope, registration)
+
+
+def test_legacy_reader_exposes_only_explicit_workspace_migration_facts(tmp_path) -> None:
+    scope = TenantScope(uuid4(), uuid4())
+    locator = str(uuid4())
+    job_dir = tmp_path / locator
+    job_dir.mkdir()
+    payload = {
+        "id": locator,
+        "paper_id": "c" * 64,
+        "mode": "fast",
+        "stage": "await_confirmation",
+        "status": "awaiting_human_confirmation",
+        "revision": 2,
+        "created_at": "2026-07-18T18:00:00Z",
+        "updated_at": "2026-07-18T19:00:00Z",
+        "metadata": {
+            "workspace_migration": {
+                "consent": {
+                    "service": "model-review",
+                    "status": "granted",
+                    "provider_config_revision": 2,
+                    "policy_version": "policy-v1",
+                    "data_scope": {"paper_text": True},
+                    "decided_by": str(uuid4()),
+                    "decided_at": "2026-07-18T18:30:00Z",
+                },
+                "document_sections": {
+                    "overall_assessment": "Overall",
+                    "major_issues": "Major",
+                    "minor_issues": "Minor",
+                    "revision_suggestions": "Suggestions",
+                },
+            }
+        },
+    }
+    manifest = json.dumps(payload).encode()
+    (job_dir / "job.json").write_bytes(manifest)
+    registration = _registration(scope, locator, hashlib.sha256(manifest).hexdigest())
+
+    facts = LocalLegacyReader(tmp_path).read_workspace_facts(scope, registration)
+
+    assert facts["paper_sha256"] == "c" * 64
+    assert facts["mode"] == "fast"
+    assert facts["consent"]["provider_config_revision"] == 2
+    assert facts["document_sections"]["major_issues"] == "Major"
