@@ -61,7 +61,10 @@ def _json(url: str, *, method: str = "GET", payload=None):
         return response.status, json.loads(response.read().decode())
 
 
-def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path) -> None:
+def test_review_job_http_lifecycle_and_sse_replay(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "model-settings.json"))
+    monkeypatch.delenv("PEERASSIST_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     paper_id = _paper(tmp_path)
     server = create_review_job_server(data_dir=tmp_path, host="127.0.0.1", port=0)
     thread = Thread(target=server.serve_forever, daemon=True)

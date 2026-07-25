@@ -1306,6 +1306,10 @@ function App() {
     ? "登录"
     : bootstrap.windows.find((item) => item.id === activeWindow)?.label || "论文阅读";
 
+  if (activeWindow === "login" && !authSession.authenticated) {
+    return <LoginLayout available={authSession.available} />;
+  }
+
   return (
     <div className="app-shell">
       <aside className="app-sidebar" aria-label="PeerAssist 工作窗口">
@@ -1456,7 +1460,6 @@ function App() {
         {activeWindow === "trace" && (authSession.authenticated ? <TraceWindow events={events} streamLines={streamLines} /> : <AccessGate title="工具追踪需要登录" detail="登录后才能查看审稿事件和工具调用。" />)}
         {activeWindow === "confirm" && (authSession.authenticated ? <ConfirmWindow items={queueItems} busy={busy} onDecision={submitDecision} /> : <AccessGate title="人工确认需要登录" detail="登录后才能处理审稿意见。" />)}
         {activeWindow === "artifacts" && (authSession.authenticated ? <ArtifactsWindow paths={paths} reports={state.artifacts} /> : <AccessGate title="产物导出需要登录" detail="登录后才能下载审阅报告和产物。" />)}
-        {activeWindow === "login" && <LoginWindow available={authSession.available} />}
         {activeWindow === "admin" && (
           authSession.is_admin
             ? <AdminWindow showToast={showToast} />
@@ -1576,34 +1579,41 @@ function PaperOverviewPanel({ overview, jobStatus }: { overview?: PaperOverview;
   );
 }
 
-function LoginWindow({ available }: { available: boolean }) {
+function LoginLayout({ available }: { available: boolean }) {
   return (
-    <section className="login-stage">
-      <div className="login-panel">
-        <span className="login-mark"><ShieldCheck size={28} /></span>
-        <p className="eyebrow">PeerAssist Identity</p>
-        <h2>账号登录</h2>
-        <p>登录后进入管理后台，维护组织、项目、成员和角色权限。</p>
-        <div className="login-actions">
+    <main className="login-entry">
+      <section className="login-entry-brand" aria-label="PeerAssist">
+        <span className="login-entry-mark">PA</span>
+        <div>
+          <strong>PeerAssist</strong>
+          <p>智能审稿工作台</p>
+        </div>
+      </section>
+      <section className="login-entry-card" aria-labelledby="login-entry-title">
+        <p className="login-entry-kicker">欢迎回来</p>
+        <h1 id="login-entry-title">登录账号</h1>
+        <p className="login-entry-copy">进入你的审稿项目，继续阅读、审阅和确认论文意见。</p>
+        <div className="login-entry-actions">
           <button
-            className="primary-button wide"
+            className="login-entry-primary"
             type="button"
             disabled={!available}
-            onClick={() => window.location.assign("/api/v1/auth/login?return_path=/admin")}
+            onClick={() => window.location.assign("/api/v1/auth/login?return_path=/paper")}
           >
             <LogIn size={17} /> {available ? "登录" : "身份服务启动中"}
           </button>
           <button
-            className="ghost-button wide"
+            className="login-entry-register"
             type="button"
             disabled={!available}
-            onClick={() => window.location.assign("/api/v1/auth/register?return_path=/admin")}
+            onClick={() => window.location.assign("/api/v1/auth/register?return_path=/paper")}
           >
-            <Plus size={17} /> 创建账号
+            没有账号？创建一个
           </button>
         </div>
-      </div>
-    </section>
+      </section>
+      <p className="login-entry-note">论文与审稿记录仅对登录后的项目成员开放。</p>
+    </main>
   );
 }
 

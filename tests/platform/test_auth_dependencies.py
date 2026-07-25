@@ -96,3 +96,4 @@ def test_browser_registration_requests_the_identity_provider_signup_screen() -> 
     assert registration.status_code == 307
     query = parse_qs(urlsplit(registration.headers["location"]).query)
     assert query["screen_hint"] == ["signup"]
+    assert query["prompt"] == ["create"]

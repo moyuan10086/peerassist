@@ -235,7 +235,8 @@ input:focus-visible {
 }
 
 .pf-v5-c-button.pf-m-primary,
-#kc-login {
+#kc-login,
+#kc-register {
   display: block;
   width: 100%;
   min-height: 46px;
@@ -252,7 +253,8 @@ input:focus-visible {
 }
 
 .pf-v5-c-button.pf-m-primary:hover,
-#kc-login:hover {
+#kc-login:hover,
+#kc-register:hover {
   border-color: var(--pa-accent-dark) !important;
   background: var(--pa-accent-dark) !important;
 }
@@ -310,6 +312,80 @@ input:focus-visible {
   color: var(--pa-danger);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.register-page .pf-v5-c-login {
+  align-items: flex-start;
+}
+
+.register-page .pf-v5-c-login__container {
+  width: min(520px, 100%);
+}
+
+.register-main {
+  padding-top: 26px;
+}
+
+#kc-register-form {
+  width: 100%;
+}
+
+.pf-v5-c-form__label-wrap,
+.pf-v5-c-form__input-wrap {
+  width: 100%;
+}
+
+.pf-v5-c-form__label-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 7px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pf-v5-c-form__label-wrap .pf-v5-c-form__label {
+  display: inline;
+  margin-bottom: 0;
+}
+
+.registration-password-field {
+  position: relative;
+}
+
+.registration-password-field .pf-v5-c-form-control {
+  padding-right: 66px;
+}
+
+.pf-v5-c-form__helper-text {
+  display: block;
+  margin-top: 6px;
+  color: var(--pa-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.pf-v5-c-form__helper-text.pf-m-error {
+  color: var(--pa-danger);
+}
+
+.register-actions {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.back-to-login {
+  color: var(--pa-accent-dark);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+  text-decoration: none;
+}
+
+.back-to-login:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 @media (max-width: 560px) {

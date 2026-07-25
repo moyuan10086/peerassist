@@ -6,10 +6,15 @@ THEME = ROOT / "infrastructure/keycloak/theme/peerassist/login"
 
 def test_peerassist_keycloak_theme_is_self_contained_and_localized() -> None:
     assert (THEME / "login.ftl").is_file()
+    assert (THEME / "register.ftl").is_file()
+    assert (THEME / "register.ftl").stat().st_mode & 0o004
     assert (THEME / "resources/css/login.css").stat().st_mode & 0o004
-    assert (THEME / "theme.properties").read_text(encoding="utf-8") == (
-        "parent=base\nimport=common/keycloak\nstyles=css/login.css\ncacheThemes=false\ncacheTemplates=false\n"
-    )
+    properties = (THEME / "theme.properties").read_text(encoding="utf-8")
+    assert "parent=base" in properties
+    assert "styles=css/login.css" in properties
+    assert "cacheThemes=false" in properties
+    assert "cacheTemplates=false" in properties
+    assert "kcInputClass=pf-v5-c-form-control" in properties
     css = (THEME / "resources/css/login.css").read_text(encoding="utf-8")
     messages = (THEME / "resources/messages/messages_zh_CN.properties").read_text(
         encoding="utf-8"
@@ -19,6 +24,20 @@ def test_peerassist_keycloak_theme_is_self_contained_and_localized() -> None:
     assert ".brand-context" in css
     assert "loginAccountTitle=登录 PeerAssist" in messages
     assert "doLogIn=登录" in messages
+    assert "registerTitle=创建账号" in messages
+    assert "email=邮箱" in messages
+
+
+def test_peerassist_registration_uses_the_same_branded_form_structure() -> None:
+    template = (THEME / "register.ftl").read_text(encoding="utf-8")
+    css = (THEME / "resources/css/login.css").read_text(encoding="utf-8")
+
+    assert 'class="login-pf register-page"' in template
+    assert 'class="pf-v5-c-login__container"' in template
+    assert 'id="kc-register-form"' in template
+    assert 'class="pf-v5-c-form-control"' in template
+    assert ".register-page .pf-v5-c-login__container" in css
+    assert ".registration-password-field" in css
 
 
 def test_peerassist_login_is_a_compact_single_task_entrypoint() -> None:

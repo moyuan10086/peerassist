@@ -177,6 +177,8 @@ class OidcIdentityProvider:
             }
             if kwargs.get("screen_hint") == "signup":
                 parameters["screen_hint"] = "signup"
+            if kwargs.get("prompt") in {"create", "login"}:
+                parameters["prompt"] = kwargs["prompt"]
             return f"{discovery.authorization_endpoint}?{urlencode(parameters)}"
         except AuthenticationRequired:
             raise

@@ -3265,3 +3265,150 @@ select:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Login is an entry point, not a reduced version of the review workspace. */
+.login-entry {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 28px clamp(24px, 7vw, 112px) 30px;
+  background: #f3f5f2;
+}
+
+.login-entry-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: #152d28;
+}
+
+.login-entry-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #4c9083;
+  border-radius: 8px;
+  background: #173f38;
+  color: #effbf7;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.login-entry-brand strong {
+  display: block;
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.login-entry-brand p {
+  margin: 4px 0 0;
+  color: #70817c;
+  font-size: 12px;
+}
+
+.login-entry-card {
+  width: min(396px, 100%);
+  align-self: center;
+  justify-self: center;
+  border: 1px solid #d7e0dc;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 40px rgba(28, 53, 46, 0.08);
+  padding: 36px;
+}
+
+.login-entry-kicker {
+  margin: 0 0 8px;
+  color: #187265;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.login-entry-card h1 {
+  margin: 0 0 10px;
+  color: #172925;
+  font-size: 28px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.login-entry-copy {
+  margin: 0;
+  color: #687872;
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.login-entry-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 28px;
+}
+
+.login-entry-primary,
+.login-entry-register {
+  min-height: 44px;
+  width: 100%;
+  border-radius: 7px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.login-entry-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #12685d;
+  background: #16786b;
+  color: #f5fffb;
+}
+
+.login-entry-primary:hover:not(:disabled) {
+  border-color: #0d5b50;
+  background: #12685d;
+}
+
+.login-entry-register {
+  border: 0;
+  background: transparent;
+  color: #326b61;
+  font-size: 13px;
+}
+
+.login-entry-register:hover:not(:disabled) {
+  color: #0e5f54;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.login-entry-primary:disabled,
+.login-entry-register:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.login-entry-note {
+  justify-self: center;
+  margin: 0;
+  color: #81908b;
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-width: 560px) {
+  .login-entry {
+    min-height: 100svh;
+    padding: 22px 20px 20px;
+  }
+
+  .login-entry-card {
+    padding: 28px 24px;
+  }
+
+  .login-entry-card h1 {
+    font-size: 25px;
+  }
+}

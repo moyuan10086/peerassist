@@ -315,11 +315,16 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8000",
         validation_alias=AliasChoices("PEERASSIST_PLATFORM_API_URL"),
     )
+    peerassist_identity_gateway_url: str = Field(
+        default="http://127.0.0.1:8081",
+        validation_alias=AliasChoices("PEERASSIST_IDENTITY_GATEWAY_URL"),
+    )
 
     @field_validator(
         "peerassist_openai_base_url",
         "peerassist_review_api_url",
         "peerassist_platform_api_url",
+        "peerassist_identity_gateway_url",
     )
     @classmethod
     def validate_http_base_url(cls, value: str) -> str:

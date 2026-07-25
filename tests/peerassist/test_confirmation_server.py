@@ -5,6 +5,7 @@ import threading
 import tomllib
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import peerassist.confirmation_server as confirmation_server
@@ -177,7 +178,11 @@ def _seed_peerassist_stage(run_dir: Path) -> Path:
     return out_dir
 
 
-def test_render_confirmation_page_contains_evidence_and_actions(tmp_path: Path) -> None:
+def test_render_confirmation_page_contains_evidence_and_actions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "model-settings.json"))
     run_dir = tmp_path / "run"
     _seed_peerassist_stage(run_dir)
 
@@ -708,18 +713,57 @@ def test_workspace_frontend_exposes_account_admin_and_summary_surfaces() -> None
 
     assert "登录 / 注册" in source
     assert "成员与权限" in source
-    assert "账号登录" in source
-    assert "管理后台" in source
-    assert "/api/v1/auth/register?return_path=/admin" in source
+    assert "登录账号" in source
+    assert "智能审稿工作台" in source
+    assert "/api/v1/auth/register?return_path=/paper" in source
     assert "function parsePaperSummaryMarkdown" in source
     assert "这篇论文讲了什么" in source
     assert "一句话结论" in source
     assert "摘要正在生成" in source
 
 
+def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path, monkeypatch) -> None:
+    class _IdentityHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"issuer":"http://identity.test"}')
+
+        def log_message(self, *_args) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _IdentityHandler)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    monkeypatch.setenv(
+        "PEERASSIST_IDENTITY_GATEWAY_URL",
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+    )
+    confirmation_server.get_settings.cache_clear()
+    server = create_confirmation_server(run_dir=tmp_path, paper_id="demo", host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://{server.server_address[0]}:{server.server_address[1]}/identity/realms/demo/.well-known",
+            timeout=5,
+        ) as response:
+            assert json.loads(response.read()) == {"issuer": "http://identity.test"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+        confirmation_server.get_settings.cache_clear()
+
+
 def test_confirmation_server_state_and_decision_endpoints(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "model-settings.json"))
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.delenv("PEERASSIST_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("EXECUTION_OPENAI_API_KEY", raising=False)

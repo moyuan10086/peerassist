@@ -118,6 +118,7 @@ class BrowserSessionService:
         }
         if screen_hint is not None:
             authorization_parameters["screen_hint"] = screen_hint
+            authorization_parameters["prompt"] = "create"
         if force_reauthentication:
             authorization_parameters["prompt"] = "login"
         authorization_url = self._identity_provider.build_authorization_url(

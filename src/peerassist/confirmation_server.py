@@ -71,6 +71,10 @@ def _is_platform_api_path(path: str) -> bool:
     return path == "/api/v1" or path.startswith("/api/v1/")
 
 
+def _is_identity_path(path: str) -> bool:
+    return path == "/identity" or path.startswith("/identity/")
+
+
 def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     state = load_confirmation_state(run_dir=run_dir)
     source_pdf_path = _discover_source_pdf(run_dir=run_dir, paper_id=paper_id)
@@ -6265,6 +6269,10 @@ def _platform_api_base_url() -> str:
     return get_settings().peerassist_platform_api_url.rstrip("/")
 
 
+def _identity_gateway_base_url() -> str:
+    return get_settings().peerassist_identity_gateway_url.rstrip("/")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve a local PeerAssist confirmation review console.")
     parser.add_argument("--run-dir", required=True)
@@ -6296,6 +6304,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_identity_path(path):
+                self._proxy_identity()
+                return
             if _is_platform_api_path(path):
                 self._proxy_platform_api()
                 return
@@ -6337,6 +6348,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_HEAD(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_identity_path(path):
+                self._proxy_identity()
+                return
             if _is_platform_api_path(path):
                 self._proxy_platform_api()
                 return
@@ -6366,6 +6380,9 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
 
         def do_POST(self) -> None:
             path = self.path.split("?", 1)[0]
+            if _is_identity_path(path):
+                self._proxy_identity()
+                return
             if _is_platform_api_path(path):
                 self._proxy_platform_api()
                 return
@@ -6463,6 +6480,14 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
             self._proxy_api(
                 _platform_api_base_url(),
                 "platform_api_unavailable",
+                timeout=30,
+                preserve_redirects=True,
+            )
+
+        def _proxy_identity(self) -> None:
+            self._proxy_api(
+                _identity_gateway_base_url(),
+                "identity_service_unavailable",
                 timeout=30,
                 preserve_redirects=True,
             )
