@@ -4,22 +4,24 @@
 
 ## 当前基线
 
-- 版本：`0.1.0-p0`
+- 版本：`0.1.1-p0`
 - Git 分支：`peerassist-m0`
-- Git 标签：`v0.1.0-p0`（源代码演进自 `b1b0f66`，包含登录主题与身份网关修复）
+- Git 标签：`v0.1.1-p0`（教师首次使用闭环补丁）
 - 当前代码入口：`/root/PeerAssist/current`（Git worktree 实际位置为 `/root/.worktrees/peerassist-m0`）
 - 公网入口：`http://101.47.158.17:8766/`
-- 版本清单：[`v0.1.0-p0.md`](v0.1.0-p0.md)
+- 版本清单：[`v0.1.1-p0.md`](v0.1.1-p0.md)
 
 ## 历史版本
+
+`v0.1.0-p0` 是第一个可部署的教师审稿闭环基线，说明见 [`v0.1.0-p0.md`](v0.1.0-p0.md)。
 
 归档目录 `/root/PeerAssist/archive/peerassist-mvp` 对应旧的 `peerassist-mvp` 分支，基线提交为 `ff59216`。它只作为迁移参考，不再作为 8766 的启动目录。
 
 需要比较历史时使用 Git：
 
 ```bash
-git diff ff59216..b1b0f66 --stat
-git log --oneline --decorate ff59216..b1b0f66
+git diff v0.1.0-p0..v0.1.1-p0 --stat
+git log --oneline --decorate v0.1.0-p0..v0.1.1-p0
 ```
 
 ## 复用规则

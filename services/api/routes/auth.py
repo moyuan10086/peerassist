@@ -23,7 +23,7 @@ def login(request: Request, return_path: str = Query(default="/")) -> RedirectRe
 
 
 @router.get("/auth/register", operation_id="v1_auth_register")
-def register(request: Request, return_path: str = Query(default="/admin")) -> RedirectResponse:
+def register(request: Request, return_path: str = Query(default="/paper")) -> RedirectResponse:
     started = request.app.state.dependencies.session_service.begin(
         return_path,
         screen_hint="signup",

@@ -89,11 +89,32 @@ def test_browser_registration_requests_the_identity_provider_signup_screen() -> 
     with TestClient(app) as client:
         registration = client.get(
             "/api/v1/auth/register",
-            params={"return_path": "/admin"},
+            follow_redirects=False,
+        )
+        query = parse_qs(urlsplit(registration.headers["location"]).query)
+        transaction_id = query["transaction_id"][0]
+        state = query["state"][0]
+        code = dependencies.identity_provider.issue_callback(
+            UUID(transaction_id),
+            {
+                "iss": dependencies.identity_provider.issuer,
+                "sub": "new-teacher-1",
+                "aud": dependencies.identity_provider.audience,
+                "alg": "RS256",
+                "exp": int((datetime.now(UTC) + timedelta(minutes=5)).timestamp()),
+                "email": "teacher@example.com",
+                "email_verified": True,
+                "name": "Teacher User",
+            },
+        )
+        callback = client.get(
+            "/api/v1/auth/callback",
+            params={"state": state, "code": code},
             follow_redirects=False,
         )
 
     assert registration.status_code == 307
-    query = parse_qs(urlsplit(registration.headers["location"]).query)
     assert query["screen_hint"] == ["signup"]
     assert query["prompt"] == ["create"]
+    assert callback.status_code == 303
+    assert callback.headers["location"] == "/paper"

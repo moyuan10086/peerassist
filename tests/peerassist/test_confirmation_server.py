@@ -722,6 +722,23 @@ def test_workspace_frontend_exposes_account_admin_and_summary_surfaces() -> None
     assert "摘要正在生成" in source
 
 
+def test_workspace_frontend_keeps_teacher_actions_truthful_for_platform_jobs() -> None:
+    source = (
+        Path(__file__).parents[2] / "web" / "peerassist-workspace" / "src" / "main.tsx"
+    ).read_text(encoding="utf-8")
+    overview = source[
+        source.index("function PaperOverviewPanel(") : source.index("function LoginLayout(")
+    ]
+    paper_window = source[
+        source.index("function PaperWindow(") : source.index("function PdfReviewReader(")
+    ]
+
+    assert "function paperOverviewFallback(" in source
+    assert 'failed: "摘要生成失败，请到生成审稿页重试任务。"' in source
+    assert "paperOverviewFallback(jobStatus)" in overview
+    assert 'disabled={busy || (!selectedText.trim() && !note.trim())}' in paper_window
+
+
 def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path, monkeypatch) -> None:
     class _IdentityHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:

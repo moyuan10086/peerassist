@@ -12,6 +12,7 @@ from peerassist.model_settings import (
     ModelSettingsConflict,
     ModelSettingsError,
     ModelSettingsInput,
+    StoredModelSettings,
     discover_models,
     load_model_settings,
     save_model_settings,
@@ -63,6 +64,22 @@ def _empty_settings() -> dict[str, object]:
     }
 
 
+def _availability_view(stored: StoredModelSettings | None) -> dict[str, object]:
+    """Project settings down to the fields a non-admin may see.
+
+    Provider-private material (base_url, api_key_hint, revision, policy_version,
+    configuration_id, keys) is never included, so an unavailable configuration and a
+    stored one differ only in these four values.
+    """
+    source = stored.public_view() if stored is not None else _empty_settings()
+    return {
+        "provider": source["provider"],
+        "model": source["model"],
+        "api_key_configured": source["api_key_configured"],
+        "enabled": source["enabled"],
+    }
+
+
 def _is_organization_admin(actor: Actor, request: Request) -> bool:
     with request.app.state.dependencies.uow_factory(actor) as uow:
         return any(
@@ -102,12 +119,16 @@ def _safe_error(request: Request, message: str, *, status_code: int = 400) -> JS
     response_model=None,
 )
 def get_model_settings(_actor: ModelSettingsActor, request: Request) -> dict[str, object] | JSONResponse:
-    if not _is_organization_admin(_actor, request):
-        return {"settings": {"api_key_configured": False, "enabled": False}}
+    is_admin = _is_organization_admin(_actor, request)
     try:
         stored = load_model_settings()
     except ModelSettingsError as exc:
-        return _safe_error(request, str(exc))
+        if is_admin:
+            return _safe_error(request, str(exc))
+        # Unreadable settings are indistinguishable from unconfigured for non-admins.
+        return {"settings": _availability_view(None)}
+    if not is_admin:
+        return {"settings": _availability_view(stored)}
     return {"settings": stored.public_view() if stored is not None else _empty_settings()}
 
 

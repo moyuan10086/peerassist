@@ -290,6 +290,7 @@ type Bootstrap = {
     model?: string;
     base_url?: string;
     api_key_configured?: string | boolean;
+    enabled?: boolean;
   };
   assets: {
     pdf_url?: string;
@@ -305,6 +306,7 @@ type ModelSettingsView = {
   api_mode?: string;
   api_key_configured: boolean;
   api_key_hint?: string;
+  enabled?: boolean;
 };
 
 type PaperOverview = {
@@ -362,6 +364,21 @@ function parsePaperSummaryMarkdown(markdown: string): PaperOverview {
     result: read("主要发现", "主要结果", "结果概览"),
     limitation: read("局限", "局限性"),
   };
+}
+
+function paperOverviewFallback(status = "") {
+  const terminalMessages: Record<string, string> = {
+    failed: "摘要生成失败，请到生成审稿页重试任务。",
+    cancelled: "任务已取消，重新开始审稿后会生成论文摘要。",
+    interrupted: "任务已中断，请重试后继续生成论文摘要。",
+    blocked: "摘要生成已暂停，请按任务提示完成授权或重试。",
+    completed: "任务已完成，但摘要暂未加载，请刷新后重试。",
+    awaiting_human_confirmation: "审稿意见已生成，但摘要暂未加载，请刷新后重试。",
+  };
+  if (terminalMessages[status]) return terminalMessages[status];
+  return status
+    ? `摘要正在生成：当前${labelJobStatus(status)}。完成后会在这里显示问题、方法、发现与局限。`
+    : "论文概要将在上传后生成。";
 }
 
 const REVIEW_DRAFT_STORAGE_PREFIX = "peerassist.reviewDraft.";
@@ -608,39 +625,42 @@ function App() {
   }, [clearActivePaper, selectedProjectId]);
 
   useEffect(() => {
-    if (!modelConfigured || !bootstrap.model_config.base_url || !bootstrap.model_config.model) {
-      setModelReachable(false);
+    if (!authSession.authenticated) {
+      setModelReachable(modelConfigured && bootstrap.model_config.enabled !== false);
       return;
     }
     const controller = new AbortController();
     setModelReachable(null);
-    fetch("/api/model-settings/discover", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-CSRF-Token": cookieValue("peerassist_csrf"),
-      },
-      body: JSON.stringify({
-        provider: bootstrap.model_config.provider,
-        base_url: bootstrap.model_config.base_url,
-        model: bootstrap.model_config.model,
-        api_key: "",
-      }),
+    fetch("/api/v1/model-settings", {
+      cache: "no-store",
       signal: controller.signal,
     })
-      .then((response) => setModelReachable(response.ok))
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(apiErrorMessage(payload, "无法读取模型可用状态"));
+        return payload.settings as ModelSettingsView;
+      })
+      .then((settings) => {
+        const available = Boolean(settings.enabled && settings.api_key_configured && settings.model);
+        setBootstrap((current) => ({
+          ...current,
+          model_config: {
+            ...current.model_config,
+            provider: settings.provider,
+            model: settings.model,
+            base_url: settings.base_url || current.model_config.base_url,
+            api_key_configured: settings.api_key_configured,
+            enabled: Boolean(settings.enabled),
+          },
+        }));
+        setModelReachable(available);
+      })
       .catch((cause) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
         setModelReachable(false);
       });
     return () => controller.abort();
-  }, [
-    bootstrap.model_config.api_key_configured,
-    bootstrap.model_config.base_url,
-    bootstrap.model_config.model,
-    bootstrap.model_config.provider,
-    modelConfigured,
-  ]);
+  }, [authSession.authenticated]);
 
   useEffect(() => {
     if (!authSession.authenticated || !activePaperId || !activePdfUrl) {
@@ -1470,7 +1490,7 @@ function App() {
           initial={bootstrap.model_config}
           onClose={() => setModelSettingsOpen(false)}
           onSaved={(settings) => {
-            setModelReachable(null);
+            setModelReachable(Boolean(settings.enabled && settings.api_key_configured && settings.model));
             setBootstrap((current) => ({
               ...current,
               model_config: {
@@ -1478,6 +1498,7 @@ function App() {
                 base_url: settings.base_url,
                 model: settings.model,
                 api_key_configured: settings.api_key_configured,
+                enabled: Boolean(settings.enabled),
               },
             }));
             showToast(`模型已切换为 ${settings.model}`);
@@ -1560,7 +1581,7 @@ function PaperOverviewPanel({ overview, jobStatus }: { overview?: PaperOverview;
       <div className="paper-overview-body">
         <div className="paper-overview-summary">
           <small>这篇论文讲了什么 · 一句话结论</small>
-            <p>{overview?.summary || (jobStatus ? `摘要正在生成：当前${labelJobStatus(jobStatus)}。完成后会在这里显示问题、方法、发现与局限。` : "论文概要将在上传后生成。")}</p>
+            <p>{overview?.summary || paperOverviewFallback(jobStatus)}</p>
         </div>
         {facts.map(([label, value]) => (
           <div className="paper-overview-fact" key={label}>
@@ -2281,7 +2302,7 @@ function PaperWindow({
               <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：请作者解释统计显著性阈值与多重比较校正。" />
               <div className="field-row">
                 <input value={page} onChange={(event) => setPage(event.target.value)} aria-label="PDF 页码" inputMode="numeric" />
-                <button className="primary-button" type="button" disabled={busy || linkedReviewJob || (!selectedText.trim() && !note.trim())} onClick={() => onSubmitManual(selectedText, note, page)}>
+                <button className="primary-button" type="button" disabled={busy || (!selectedText.trim() && !note.trim())} onClick={() => onSubmitManual(selectedText, note, page)}>
                   <ClipboardCheck size={15} /> 加入证据队列
                 </button>
               </div>
@@ -2803,6 +2824,7 @@ function AgentWindow({
           <button className="primary-button wide" type="button" disabled={busy || !modelEnabled} onClick={() => onRunReview("", mode)}>
             {busy ? <Loader2 className="spin" size={16} /> : <Bot size={16} />} {modelEnabled ? "开始全篇智能审稿" : "模型未启用"}
           </button>
+          {!modelEnabled && <p className="muted">当前不会生成 AI 摘要与审稿意见；你仍可阅读论文并添加人工批注。</p>}
           <div className="model-box">
             <code>{baseUrl || "未配置 Base URL"}</code>
           </div>

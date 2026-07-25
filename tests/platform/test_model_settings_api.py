@@ -142,7 +142,19 @@ def test_model_settings_validation_returns_a_readable_safe_message(monkeypatch) 
 
 
 def test_model_settings_write_and_discovery_are_hidden_from_non_admins(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    from peerassist.model_settings import ModelSettingsInput, save_model_settings
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(settings_path))
+    save_model_settings(
+        ModelSettingsInput(
+            "openai-compatible",
+            "https://provider.example/v1",
+            "teacher-review-model",
+            api_key="sk-synthetic-private",
+        ),
+        path=settings_path,
+    )
     dependencies = PlatformDependencies.for_test()
     teacher = Actor(uuid4(), ActorKind.USER)
     now = datetime(2026, 7, 24, 1, 0, tzinfo=UTC)
@@ -158,12 +170,18 @@ def test_model_settings_write_and_discovery_are_hidden_from_non_admins(tmp_path,
             json={"provider": "openai-compatible", "base_url": "https://provider.example/v1", "model": "m"},
         )
     assert get_response.status_code == 200
-    assert "base_url" not in get_response.json()["settings"]
-    assert "model" not in get_response.json()["settings"]
-    assert "revision" not in get_response.json()["settings"]
-    assert "policy_version" not in get_response.json()["settings"]
-    assert "configuration_id" not in get_response.json()["settings"]
-    assert "api_key_hint" not in get_response.json()["settings"]
+    teacher_settings = get_response.json()["settings"]
+    assert teacher_settings == {
+        "provider": "openai-compatible",
+        "model": "teacher-review-model",
+        "api_key_configured": True,
+        "enabled": True,
+    }
+    assert "base_url" not in teacher_settings
+    assert "revision" not in teacher_settings
+    assert "policy_version" not in teacher_settings
+    assert "configuration_id" not in teacher_settings
+    assert "api_key_hint" not in teacher_settings
     assert response.status_code == 404
 
 
