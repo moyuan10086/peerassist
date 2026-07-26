@@ -16,6 +16,8 @@
 ## 开发与操作
 
 - [仓库 Agent 规范](../AGENTS.md)
+- [贡献指南](../CONTRIBUTING.md)
+- [安全策略](../SECURITY.md)
 - [开发指南](development.md)
 - [操作手册](peerassist_operation_manual.md)
 - [引用核查说明](peerassist_citation_audit.md)
@@ -26,6 +28,8 @@
 - [版本索引](versions/README.md)
 - [2026-07-17 M0 工程审阅](system_review_2026-07-17.md)
 - [2026-07-20 全系统审阅](system_review_2026-07-20.md)
+- [平台画布与 Agent 设计](superpowers/specs/2026-07-17-peerassist-platform-canvas-agent-design.md)
+- [M0 工程基线计划](superpowers/plans/2026-07-17-peerassist-m0-engineering-baseline.md)
 - `superpowers/specs/`：历史设计与已审阅规格
 - `superpowers/plans/`：历史实施计划
 

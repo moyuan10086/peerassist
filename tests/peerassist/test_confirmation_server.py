@@ -740,8 +740,11 @@ def test_workspace_frontend_keeps_teacher_actions_truthful_for_platform_jobs() -
 
 
 def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path, monkeypatch) -> None:
+    seen_hosts: list[str] = []
+
     class _IdentityHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            seen_hosts.append(str(self.headers.get("Host") or ""))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -767,6 +770,7 @@ def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path
             timeout=5,
         ) as response:
             assert json.loads(response.read()) == {"issuer": "http://identity.test"}
+        assert seen_hosts == [f"{server.server_address[0]}:{server.server_address[1]}"]
     finally:
         server.shutdown()
         server.server_close()

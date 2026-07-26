@@ -113,7 +113,19 @@ def model_settings_lock(*, path: Path | None = None, exclusive: bool = False):
     target = path or model_settings_path()
     lock_path = target.with_name(f"{target.name}.lock")
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with lock_path.open("a+b") as handle:
+    if exclusive:
+        handle = lock_path.open("a+b")
+    else:
+        try:
+            handle = lock_path.open("rb")
+        except FileNotFoundError:
+            try:
+                handle = lock_path.open("a+b")
+            except PermissionError:
+                # Atomic settings replacement makes a lock-free initial snapshot safe.
+                yield
+                return
+    with handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         try:
             yield

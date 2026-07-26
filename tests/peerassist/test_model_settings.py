@@ -94,6 +94,32 @@ def test_model_discovery_uses_saved_secret_and_returns_sorted_unique_ids(tmp_pat
     }
 
 
+def test_model_settings_reader_uses_read_only_shared_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "model-settings.json"
+    saved = save_model_settings(
+        ModelSettingsInput(
+            provider="openai-compatible",
+            base_url="https://provider.example/v1",
+            model="gpt-5.6-sol",
+            api_key="sk-synthetic-private",
+        ),
+        path=path,
+    )
+    lock_path = path.with_name(f"{path.name}.lock")
+    real_open = Path.open
+
+    def readonly_open(self: Path, mode: str = "r", *args, **kwargs):
+        if self == lock_path and mode != "rb":
+            raise PermissionError("read-only model settings volume")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", readonly_open)
+
+    assert load_model_settings(path=path) == saved
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

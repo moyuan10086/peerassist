@@ -1,0 +1,44 @@
+services:
+  postgres:
+    restart: unless-stopped
+
+  keycloak:
+    ports: !override
+      - "127.0.0.1:8001:8080"
+    restart: unless-stopped
+
+  minio:
+    restart: unless-stopped
+
+  platform-bootstrap:
+    environment:
+      PEERASSIST_BOOTSTRAP_API_BASE_URL: http://api:8080
+      PEERASSIST_BOOTSTRAP_TOKEN_URL: http://api:8080/identity/realms/${PEERASSIST_OIDC_REALM:?}/protocol/openid-connect/token
+
+  api:
+    command: [python, -m, uvicorn, services.api.app:create_configured_app, --factory, --host, 0.0.0.0, --port, "8080"]
+    ports: !override
+      - "127.0.0.1:8000:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/ready', timeout=2)"]
+
+  worker:
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+    external: true
+    name: ${PEERASSIST_POSTGRES_VOLUME:?}
+  keycloak-data:
+    external: true
+    name: ${PEERASSIST_KEYCLOAK_VOLUME:?}
+  minio-data:
+    external: true
+    name: ${PEERASSIST_MINIO_VOLUME:?}
+  worker-scratch:
+    external: true
+    name: ${PEERASSIST_WORKER_SCRATCH_VOLUME:?}
+  model-settings-data:
+    external: true
+    name: ${PEERASSIST_MODEL_SETTINGS_VOLUME:?}

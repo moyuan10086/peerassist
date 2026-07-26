@@ -1,0 +1,19 @@
+[Unit]
+Description=PeerAssist platform API, worker, identity and data services
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/root/PeerAssist
+Environment=PEERASSIST_APP_DIR=/root/PeerAssist
+Environment=PEERASSIST_PLATFORM_ENV_FILE=/etc/peerassist/platform.env
+Environment=PEERASSIST_PLATFORM_PROJECT=peerassist-platform
+ExecStart=/usr/local/sbin/peerassist-platform-stack start
+ExecStop=/usr/local/sbin/peerassist-platform-stack stop
+TimeoutStartSec=600
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

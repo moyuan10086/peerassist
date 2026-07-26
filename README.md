@@ -28,19 +28,22 @@ uv run python scripts/verify_repository.py fast
 npm --prefix web/peerassist-workspace run build
 ```
 
+提交前完整门禁为 `uv run python scripts/verify_repository.py all`。飞书同步文档保持 10 个固定章节，只对受影响章节做精确更新，不追加平行的日期日志。
+
 常用文档：
 
 - [项目总览](docs/PROJECT_OVERVIEW.md)
 - [开发指南](docs/development.md)
 - [操作手册](docs/peerassist_operation_manual.md)
 - [安全策略](SECURITY.md)
-- [贡献指南](CONTRIBUTING.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
 - [版本索引](docs/versions/README.md)
 
 ## 当前本机入口
 
 - 工作台：<http://127.0.0.1:8766/>
 - ReviewJob API：<http://127.0.0.1:8767/api/health>
+- 平台 API readiness：<http://127.0.0.1:8000/api/v1/ready>
 - 演示 PDF：<http://127.0.0.1:8766/paper.pdf>
 
 公网 HTTP 地址只用于公开或合成材料演示，不能处理真实未发表稿件。

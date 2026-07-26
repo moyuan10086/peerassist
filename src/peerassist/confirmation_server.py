@@ -6507,6 +6507,7 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 "Authorization",
                 "Cookie",
                 "Content-Type",
+                "Host",
                 "Idempotency-Key",
                 "Last-Event-ID",
                 "Origin",

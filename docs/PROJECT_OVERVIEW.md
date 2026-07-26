@@ -35,7 +35,7 @@
 - 当前分支还包含 Git 目录重整、`uv` 锁文件和文档治理提交；发布标签保持不可变。
 - Python 环境使用 `uv` 和仓库根目录的 `uv.lock` 管理，不复制旧 `.venv`。
 
-旧路径 `/root/.worktrees/peerassist-m0` 和符号链接 `/root/PeerAssist/current` 已退出当前开发与部署链路。迁移前目录暂存于 `/root/PeerAssist.pre-git-layout`，只用于本次回滚确认，不是开发入口。
+旧路径 `/root/.worktrees/peerassist-m0`、符号链接 `/root/PeerAssist/current`、迁移目录 `/root/PeerAssist.pre-git-layout` 和临时迁移状态目录均已在 Git 引用、运行数据与服务路径核验后清理。它们只属于历史拓扑，不再保留为开发、部署或回滚入口。
 
 ## 三、当前可用能力
 
@@ -64,7 +64,8 @@
 | PostgreSQL | 容器健康 | 平台数据服务，volume 保持不变 |
 | MinIO | 容器健康 | S3 兼容对象存储，volume 保持不变 |
 | Keycloak | 容器健康 | OIDC 身份服务，volume 保持不变 |
-| 平台 API `:8000` | 当前不可用 | `peerassist-platform-stack.service` 在目录迁移前已经失败；本次重整只确认无回归，没有把它描述成 ready |
+| 平台 API `http://127.0.0.1:8000` | 运行且 ready | `/api/v1/ready` 返回数据库、身份和对象存储均 ready |
+| 平台 Worker | 运行中 | 从 PostgreSQL 队列领取任务；模型设置卷以只读方式挂载 |
 
 公网 `http://101.47.158.17:8766/` 只适合公开或合成材料的演示。真实未发表稿件必须在 HTTPS、受控身份和明确外部模型授权下处理。
 
@@ -75,13 +76,17 @@ cd /root/PeerAssist
 uv sync --extra platform-dev
 uv run python scripts/verify_repository.py fast
 npm --prefix web/peerassist-workspace run build
+curl --fail http://127.0.0.1:8000/api/v1/ready
 ```
+
+平台栈由 Git 中的 `infrastructure/compose/compose.m1.yml`、`infrastructure/compose/compose.platform.yml` 和 `deploy/systemd/` 管理。运行数据继续使用已有 PostgreSQL、Keycloak、MinIO、Worker scratch 和模型设置持久卷；bootstrap 状态与旧兼容读取目录固定在 `/root/PeerAssist/runtime/platform/`，不依赖 worktree 或 `/tmp` 临时源码目录。
+
+**当前管理员模型配置。** 后端使用 `openai-compatible` provider，地址为 `https://deepkey.top/v1`，模型为 `gpt-5.6-sol`，配置已启用并由 Worker 成功读取。包含密钥的完整配置只保存在服务器端 model-settings 持久卷中，文件权限为 `0640`；Git、飞书和前端状态接口都不得保存或返回原始密钥。
 
 ## 五、当前限制与风险
 
 **待完成。** 当前已确认的主要限制：
 
-- 平台 API/Worker 当前未运行，M1 平台代码不能等同于当前在线主链路；
 - 公网仍是 HTTP，不能承载真实未发表论文、正式会话或敏感模型调用；
 - 前端主要集中在 `main.tsx` 和 `styles.css`，维护和行为回归成本较高；
 - 浏览器自动化覆盖不足，核心教师主流程仍需要稳定的 Playwright 回归；
@@ -122,7 +127,7 @@ npm --prefix web/peerassist-workspace run build
 - 完整投稿、分稿和出版流程；
 - 大规模 SaaS 配额、计费和复杂权限矩阵。
 
-恢复这些方案前，先完成平台 API 恢复、HTTPS、主流程自动化和现有前端边界拆分。
+恢复这些方案前，先完成 HTTPS、主流程自动化和现有前端边界拆分。
 
 ## 八、文档权威顺序与更新规则
 

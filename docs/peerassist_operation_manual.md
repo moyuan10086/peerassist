@@ -8,6 +8,21 @@
 
 主页顶部提供“登录 / 注册”“成员与权限”“模型设置”和“上传论文 / 智能审稿”四个直接入口；登录后也可通过 `/admin` 管理组织、项目和成员。智能审稿页上传 PDF 后会写入 MinIO、创建 PostgreSQL 审阅任务，并由 Worker 从全局服务端队列领取任意项目的待处理任务，生成 `paper_summary.md` 与 `review.md`。Worker 仅在领取任务后从任务自身派生组织和项目范围，客户端不能指定或扩大该范围。论文阅读页会把前者解析为“这篇论文讲了什么”、研究问题、方法、主要结果和局限；产物尚未生成时显示明确状态，不再隐藏整个摘要区。模型状态只有在模型列表接口验证成功后才显示可用；仅保存过失效凭据时会显示“连接失败”。
 
+## 1.1 当前本机平台栈
+
+当前本机部署以 `/root/PeerAssist` 为唯一源码目录，由 Git 中的 Compose 覆盖文件和 systemd 安装脚本管理。环境变量与密钥只放在权限为 `0600` 的 `/etc/peerassist/platform.env`，不得写进仓库。
+
+```bash
+cd /root/PeerAssist
+sudo deploy/systemd/install-platform-stack.sh
+sudo systemctl restart peerassist-ui.service peerassist-platform-stack.service
+curl --fail http://127.0.0.1:8000/api/v1/ready
+```
+
+`peerassist-platform-stack.service` 管理 PostgreSQL、Keycloak、MinIO、平台 API 和 Worker。UI 仅 `Wants=` 平台栈，不在其后排序，这是因为平台 readiness 会通过公开 OIDC issuer 访问 `:8766`；两者必须允许并行启动，避免形成启动循环。持久数据使用 Compose external volumes，bootstrap 状态和兼容读取目录位于 `/root/PeerAssist/runtime/platform/`。
+
+管理员通过后端模型设置配置 provider、base URL、模型和 API Key。完整配置只保存在服务器端 model-settings 持久卷中，API 进程可写，Worker 只读；普通老师和前端只能读取脱敏状态。排障或交接时可以记录 provider、模型和 revision，但禁止打印、复制或提交原始 API Key。
+
 主要页面：
 
 | 路径 | 用途 |
