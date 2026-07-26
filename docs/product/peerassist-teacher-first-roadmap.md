@@ -1,3 +1,5 @@
+<!-- status: current-reference -->
+
 # PeerAssist 教师优先产品路线图
 
 **生效日期：** 2026-07-19

@@ -5,9 +5,57 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.check_docs import RepositoryScanError, find_broken_links
+from scripts.check_docs import RepositoryScanError, find_authority_errors, find_broken_links
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
+
+
+def _write_authority_fixture(root: Path) -> None:
+    files = {
+        "README.md": "<!-- authority: docs/PROJECT_OVERVIEW.md -->\n",
+        "docs/README.md": "<!-- authority: docs/PROJECT_OVERVIEW.md -->\n",
+        "docs/PROJECT_OVERVIEW.md": "<!-- current-authority -->\n",
+        "docs/versions/README.md": "<!-- authority: docs/PROJECT_OVERVIEW.md -->\n",
+        "docs/system_review_2026-07-17.md": "<!-- status: historical-review -->\n",
+        "docs/system_review_2026-07-20.md": "<!-- status: historical-review -->\n",
+        "docs/superpowers/specs/2026-07-17-peerassist-platform-canvas-agent-design.md": (
+            "<!-- status: historical-plan -->\n"
+        ),
+        "docs/product/peerassist-teacher-first-roadmap.md": "<!-- status: current-reference -->\n",
+        "docs/versions/v0.1.0-p0.md": "<!-- status: version-record -->\n",
+        "docs/versions/v0.1.1-p0.md": "<!-- status: version-record -->\n",
+    }
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+
+def test_find_authority_errors_accepts_single_authority_contract(tmp_path: Path) -> None:
+    _write_authority_fixture(tmp_path)
+
+    assert find_authority_errors(tmp_path) == []
+
+
+def test_find_authority_errors_reports_duplicates_missing_markers_and_retired_paths(
+    tmp_path: Path,
+) -> None:
+    _write_authority_fixture(tmp_path)
+    (tmp_path / "README.md").write_text(
+        "<!-- current-authority -->\ncd /root/.worktrees/peerassist-m0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs/system_review_2026-07-17.md").write_text("# Review\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+
+    assert find_authority_errors(tmp_path) == [
+        "expected one current authority marker, found 2",
+        "README.md: missing authority link marker",
+        "README.md: contains retired current instruction",
+        "docs/system_review_2026-07-17.md: missing status marker",
+    ]
 
 
 def test_find_broken_links_resolves_spaces_urls_queries_and_anchors(tmp_path: Path) -> None:

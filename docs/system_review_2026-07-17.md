@@ -1,3 +1,5 @@
+<!-- status: historical-review -->
+
 # PeerAssist system review
 
 This report records the verified M0 engineering baseline on 2026-07-17. It

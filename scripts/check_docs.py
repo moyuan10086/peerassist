@@ -15,6 +15,22 @@ from markdown_it import MarkdownIt
 
 _IGNORED_SCHEMES = {"http", "https", "mailto"}
 _MARKDOWN = MarkdownIt("commonmark")
+_CURRENT_AUTHORITY = "<!-- current-authority -->"
+_AUTHORITY_LINK = "<!-- authority: docs/PROJECT_OVERVIEW.md -->"
+_AUTHORITY_ENTRIES = (Path("README.md"), Path("docs/README.md"), Path("docs/versions/README.md"))
+_STATUS_MARKERS = {
+    Path("docs/system_review_2026-07-17.md"): "<!-- status: historical-review -->",
+    Path("docs/system_review_2026-07-20.md"): "<!-- status: historical-review -->",
+    Path("docs/superpowers/specs/2026-07-17-peerassist-platform-canvas-agent-design.md"): "<!-- status: historical-plan -->",
+    Path("docs/product/peerassist-teacher-first-roadmap.md"): "<!-- status: current-reference -->",
+    Path("docs/versions/v0.1.0-p0.md"): "<!-- status: version-record -->",
+    Path("docs/versions/v0.1.1-p0.md"): "<!-- status: version-record -->",
+}
+_BANNED_CURRENT_INSTRUCTIONS = (
+    "cd /root/.worktrees/peerassist-m0",
+    "WorkingDirectory=/root/PeerAssist/current",
+    "ExecStart=/root/PeerAssist/current",
+)
 
 
 class RepositoryScanError(Exception):
@@ -135,6 +151,40 @@ def find_broken_links(root: Path, files: Iterable[Path]) -> list[tuple[Path, str
     return [(Path(source), target) for source, target in sorted(broken)]
 
 
+def find_authority_errors(root: Path) -> list[str]:
+    """Return deterministic documentation-authority contract failures."""
+    if not (root / "docs/PROJECT_OVERVIEW.md").is_file():
+        return []
+    markdown_files = _tracked_markdown(root)
+    authority_count = 0
+    for path in markdown_files:
+        try:
+            authority_count += sum(
+                line.strip() == _CURRENT_AUTHORITY
+                for line in path.read_text(encoding="utf-8").splitlines()
+            )
+        except (OSError, UnicodeError) as exc:
+            raise RepositoryScanError("repository scan failed: unable to read Markdown input") from exc
+
+    errors: list[str] = []
+    if authority_count != 1:
+        errors.append(f"expected one current authority marker, found {authority_count}")
+    for relative in _AUTHORITY_ENTRIES:
+        path = root / relative
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if _AUTHORITY_LINK not in text:
+            errors.append(f"{relative.as_posix()}: missing authority link marker")
+        for instruction in _BANNED_CURRENT_INSTRUCTIONS:
+            if instruction in text:
+                errors.append(f"{relative.as_posix()}: contains retired current instruction")
+    for relative, marker in _STATUS_MARKERS.items():
+        path = root / relative
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if marker not in text:
+            errors.append(f"{relative.as_posix()}: missing status marker")
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     root = Path.cwd().resolve()
@@ -148,9 +198,12 @@ def main(argv: list[str] | None = None) -> int:
     except RepositoryScanError as exc:
         print(exc.safe_message, file=sys.stderr)
         return 2
+    authority_errors = [] if args else find_authority_errors(root)
     for path, target in findings:
         print(f"{path.as_posix()}: {target}")
-    return 1 if findings else 0
+    for error in authority_errors:
+        print(error)
+    return 1 if findings or authority_errors else 0
 
 
 if __name__ == "__main__":

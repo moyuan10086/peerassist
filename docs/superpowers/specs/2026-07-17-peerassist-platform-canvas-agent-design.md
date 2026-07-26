@@ -1,3 +1,5 @@
+<!-- status: historical-plan -->
+
 # PeerAssist Platform, Evidence Canvas, and Autonomous Agent Design
 
 **Status:** Approved design, implementation contracts reviewed
