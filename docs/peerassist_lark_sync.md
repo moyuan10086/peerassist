@@ -13,7 +13,7 @@ PeerAssist 的工程事实以 Git 为准。唯一当前项目总览是
 - Token：`XuVIdkaGgoykehxox9Kc3Qnhnw2`
 - 所有者身份：用户陈昊
 - 最后验证日期：2026-07-26
-- 最后验证 revision：`302`
+- 最后验证 revision：`304`
 - 结构：恰好十个固定二级章节
 
 ## 当前同步状态
@@ -23,8 +23,8 @@ PeerAssist 的工程事实以 Git 为准。唯一当前项目总览是
 - Python 环境：`uv`，锁文件为仓库根目录 `uv.lock`
 - Git 目录统一：已完成
 - Git 内统一总文档：已完成
-- 飞书十章重整：已完成，revision `298` 覆盖为 revision `301`，运行探针口径修正到 revision `302`
-- GitHub 分支、标签和默认分支同步：执行中，等待 GitHub `workflow` scope 授权
+- 飞书十章重整：已完成，revision `298` 覆盖为 revision `301`，最终同步到 revision `304`
+- GitHub 分支、标签和默认分支同步：已完成；默认分支为 `peerassist-m0`
 - 平台 API `:8000` 恢复：待完成，不得沿用历史 readiness 结论
 
 ## 十章职责
