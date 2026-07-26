@@ -40,6 +40,11 @@ data/
 output/
 src/baseline/
 compare/
+/runtime/
+
+# Repository layout migration and rollback data (kept outside Git)
+/.peerassist-migration/
+/PeerAssist.pre-git-layout/
 
 # Local paper parsing / execution artifacts
 *.extracted.txt
