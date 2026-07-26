@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-app_dir=/root/PeerAssist/current
+app_dir=/root/PeerAssist
 run_dir=/root/PeerAssist/runtime/runs/arxiv_real_data/runs/arxiv_2607_08522_v1
 
 keycloak_container="$(docker ps \
