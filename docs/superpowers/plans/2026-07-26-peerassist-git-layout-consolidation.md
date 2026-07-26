@@ -61,7 +61,7 @@
 - [ ] Test the recovery script in a disposable directory for crashes before/after both renames and before/after every state write. Persist `initial -> old-moved -> candidate-active -> verified`, fsync the state directory around writes/renames, and use OIDs/hashes rather than names alone.
 - [ ] Rename live root to `/root/PeerAssist.pre-git-layout`, record/fsync `old-moved`, then rename candidate to `/root/PeerAssist`, record/fsync `candidate-active`. Do not start any service while the state is `old-moved`.
 - [ ] At the final path, rebuild `.venv`, install the package, and verify shebang, `.pth`, imports, and entrypoints reference only `/root/PeerAssist`.
-- [ ] Install updated units/launcher, run `systemctl daemon-reload`, start services, and verify 8766, 8767, PDF Range, readiness, runtime manifests, and Docker volume identity.
+- [ ] Install updated units/launcher, run `systemctl daemon-reload`, start services, and verify 8766, 8767, PDF Range, runtime manifests, and Docker volume identity. Treat platform-stack/API readiness as a baseline comparison: when Task 1 recorded `failed` plus connection refusal, require that exact unavailable state and unchanged healthy PostgreSQL/MinIO/Keycloak identities, label the platform API unavailable rather than successful, and do not start or repair the unrelated platform stack during cutover.
 - [ ] If verification fails before `verified`, stop new services, restore old units/launcher, reverse the renames, run `systemctl daemon-reload`, and restore old services. After service/data/Git checks pass, record/fsync `verified`; later GitHub/Feishu failures do not roll back validated infrastructure.
 
 ### Task 4: Create One Authoritative Project Document

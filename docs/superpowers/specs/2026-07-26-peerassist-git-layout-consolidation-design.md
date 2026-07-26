@@ -154,7 +154,7 @@ git status
 3. 使用持久化 `state` 文件驱动两次 rename，不使用目录 exchange：先将 `/root/PeerAssist` 移到 `/root/PeerAssist.pre-git-layout`，再将 candidate 移到 `/root/PeerAssist`。每次 rename 前后 `fsync` 状态目录，并为 `initial`、`old-moved`、`candidate-active`、`verified` 四种状态定义幂等恢复。任何重启或中断后，恢复脚本根据状态和两个目录的 Git OID 决定继续或反向恢复，禁止凭目录名猜测。`old-moved` 状态必须优先恢复旧目录或继续激活已校验 candidate，不能启动任何依赖缺失路径的服务。
 4. candidate 到达最终 `/root/PeerAssist` 后，按锁定依赖重新创建并安装正式 `.venv`；校验 Python shebang、editable `.pth`、包导入和所有 systemd entrypoint 均只引用最终路径。
 5. 安装已验证的 systemd unit 和启动器，执行 `systemctl daemon-reload`，再启动服务。
-6. 验证可执行路径、Git refs/OID、8766、8767、PDF Range、Review Job/paper 清单、PostgreSQL/MinIO/Keycloak volume 身份和平台 readiness。
+6. 验证可执行路径、Git refs/OID、8766、8767、PDF Range、Review Job/paper 清单及 PostgreSQL/MinIO/Keycloak 的容器与 volume 身份。平台 stack/API readiness 只与迁移前基线比较：若基线已记录 unit `failed` 且 readiness 连接被拒绝，则验收要求该“不可用”状态精确不退化，并同时要求三个数据/身份容器健康且身份不变；不得将其标为 readiness 成功，也不得在本次切换中启动或修复无关的平台 stack。
 
 ### 7.5 提交点与回滚
 
@@ -181,6 +181,7 @@ git status
 - systemd、启动器、helper 和 Compose 不再引用 `/root/PeerAssist/current` 或旧 `.worktrees` 路径；所有实际可执行文件存在并通过冒烟。
 - 正式 `.venv` 的 shebang、`.pth` 和入口脚本只引用 `/root/PeerAssist`，不引用 candidate 或旧 worktree。
 - 8766、8767、PDF Range 和相关运行数据校验通过。
+- 平台 API readiness 的验收结果明确标为“不可用但与迁移前基线一致”，而不是成功；unit 状态和连接拒绝结果与受保护基线精确一致，PostgreSQL、MinIO、Keycloak 仍为原容器/volume 且健康。本次迁移不负责启动或修复平台 stack。
 - runtime 的 job/paper ID、文件数、总字节数、最新时间和不可变文件哈希与切换前清单一致；数据库、对象存储和身份 volume 未更换。
 - 仓库内只有一个带 `current-authority` 标记的项目总文档；三个入口文档通过确定性导航检查，历史文档带类型标记。
 - 飞书仍为十章，清楚区分当前事实、历史完成、历史方案和待完成事项。
