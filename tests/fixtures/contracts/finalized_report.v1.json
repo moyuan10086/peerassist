@@ -1,17 +1,17 @@
 {
   "schema_version": "peerassist.finalized_report_fixture.v1",
   "job_id": "00000000-0000-4000-8000-000000000001",
-  "paper_id": "8c22d331f340849a1a2afced41d775340996bf754cda8dec3c7525f82fcf6456",
+  "paper_id": "d5423e88a0a29b4cc70e8007884da9ca6d9df0bdaf235a2db495ac448ac2b681",
   "terminal_status": "completed",
   "terminal_stage": "complete",
   "confirmation_revision": 1,
   "report_version": "r000001",
   "required_artifacts": ["report_en_json", "report_en_md", "report_zh_json", "report_zh_md"],
   "artifact_sha256": {
-    "report_en_json": "6a1624d28bc51abecbc5d8bb944cee648e8ea5cb0614452cc78298cd3a036b6f",
-    "report_en_md": "341d1c2ea99067240b2a792f2419c35de4f9a8c0234004ac32ab49f335fcedbf",
-    "report_zh_json": "20c05461039d2ee333822d9263b3c9a1f6ffdeaacb3536d3415c4fe49470ed72",
-    "report_zh_md": "f76aed8a763563b256914ed10b0f14327c3db8a8903a1234449d3ca1be894cd6"
+    "report_en_json": "79045ee10fd15109f48021cc050e8b08027afcdbe89c49c6c2d1a9f987721128",
+    "report_en_md": "7c32165c2b9f98970e7b05d23ffdb37238076c93bac75daf2704e755535a8111",
+    "report_zh_json": "28d4f522fad1746de61e47d09f678c15002e18b8ab0afd5c2d835c090719e5f9",
+    "report_zh_md": "e597aad30808523145adb2a2c6b5240174e8697cfe748cce8a7938b19f6d7f36"
   },
   "required_evidence_ids": ["P01-L001"],
   "required_citation_ids": ["CF-CONTRACT-1", "L-CONTRACT-1", "R-CONTRACT-1"]

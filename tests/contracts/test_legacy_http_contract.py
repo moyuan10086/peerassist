@@ -23,7 +23,7 @@ from schemas.peerassist_jobs import PaperRecord, ReviewJobState
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures" / "contracts"
-PAPER_SHA256 = "8c22d331f340849a1a2afced41d775340996bf754cda8dec3c7525f82fcf6456"
+PAPER_SHA256 = "d5423e88a0a29b4cc70e8007884da9ca6d9df0bdaf235a2db495ac448ac2b681"
 CONTRACT = json.loads(
     (FIXTURES / "legacy_http_contract.v1.json").read_text(encoding="utf-8")
 )
