@@ -22,8 +22,11 @@ compose() {
 }
 
 case ${1-} in
+  build)
+    compose build
+    ;;
   start)
-    compose up --build --detach --remove-orphans
+    compose up --detach --remove-orphans
     deadline=$(( $(date +%s) + 420 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
       if curl --fail --silent --max-time 3 \
@@ -41,7 +44,7 @@ case ${1-} in
     compose stop
     ;;
   *)
-    echo "usage: ${0##*/} {start|stop}" >&2
+    echo "usage: ${0##*/} {build|start|stop}" >&2
     exit 2
     ;;
 esac

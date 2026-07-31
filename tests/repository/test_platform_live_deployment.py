@@ -44,11 +44,13 @@ def test_live_platform_launcher_has_named_service_health_gates() -> None:
         "/etc/peerassist/platform.env",
         "compose.m1.yml",
         "compose.platform.yml",
-        "up --build --detach --remove-orphans",
+        "up --detach --remove-orphans",
+        "compose build",
         "http://127.0.0.1:8000/api/v1/ready",
         "ps --status running --quiet worker",
     ):
         assert token in source
+    assert "up --build" not in source
     assert ".worktrees/peerassist-m0" not in source
     assert "peerassist-p0-platform-api" not in source
     assert "11e13f252e46" not in source
