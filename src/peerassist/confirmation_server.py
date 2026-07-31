@@ -6459,6 +6459,25 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 return
             self._send_json(result)
 
+        def do_PUT(self) -> None:
+            self._proxy_mutating_api()
+
+        def do_DELETE(self) -> None:
+            self._proxy_mutating_api()
+
+        def _proxy_mutating_api(self) -> None:
+            path = self.path.split("?", 1)[0]
+            if _is_identity_path(path):
+                self._proxy_identity()
+                return
+            if _is_platform_api_path(path):
+                self._proxy_platform_api()
+                return
+            if _is_review_job_api_path(path):
+                self._proxy_review_job_api()
+                return
+            self.send_error(404, "not found")
+
         def log_message(self, _format: str, *_args: Any) -> None:
             return
 

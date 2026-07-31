@@ -796,6 +796,74 @@ def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path
         confirmation_server.get_settings.cache_clear()
 
 
+def test_confirmation_server_proxies_platform_put_and_delete(tmp_path: Path, monkeypatch) -> None:
+    observed: list[tuple[str, str, bytes]] = []
+
+    class _PlatformHandler(BaseHTTPRequestHandler):
+        def _handle(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            observed.append((self.command, self.path, self.rfile.read(length)))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_PUT = _handle
+        do_DELETE = _handle
+
+        def log_message(self, *_args) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _PlatformHandler)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    monkeypatch.setenv(
+        "PEERASSIST_PLATFORM_API_URL",
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+    )
+    confirmation_server.get_settings.cache_clear()
+    server = create_confirmation_server(
+        run_dir=tmp_path,
+        paper_id="demo",
+        host="127.0.0.1",
+        port=0,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    try:
+        requests = (
+            urllib.request.Request(
+                f"{base_url}/api/v1/workspace/project",
+                data=b'{"project_id":"test"}',
+                headers={"Content-Type": "application/json"},
+                method="PUT",
+            ),
+            urllib.request.Request(
+                f"{base_url}/api/v1/workspace/reviews/test",
+                method="DELETE",
+            ),
+        )
+        for request in requests:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert json.loads(response.read()) == {"ok": True}
+
+        assert observed == [
+            ("PUT", "/api/v1/workspace/project", b'{"project_id":"test"}'),
+            ("DELETE", "/api/v1/workspace/reviews/test", b""),
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+        confirmation_server.get_settings.cache_clear()
+
+
 def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "model-settings.json"))
     monkeypatch.setenv("MODEL_PROVIDER", "openai")

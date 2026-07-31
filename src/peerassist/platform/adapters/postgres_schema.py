@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.engine import Connection, Engine
 
-from .postgres_v0002_signature import (
+from .postgres_v0003_signature import (
     CATALOG_INSPECTION_SQL,
     EXPECTED_CATALOG_FINGERPRINT,
     EXPECTED_CATALOG_SIGNATURE,
@@ -35,7 +35,7 @@ from .postgres_v0002_signature import (
     catalog_signature_from_row,
 )
 
-HEAD_REVISION = "0002_review_workspace"
+HEAD_REVISION = "0003_review_export_states"
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -191,9 +191,7 @@ organization_memberships = Table(
         ["organization_id"], ["organizations.id"], name="fk_organization_memberships_organization"
     ),
     ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_organization_memberships_user"),
-    UniqueConstraint(
-        "organization_id", "user_id", name="uq_organization_memberships_organization_user"
-    ),
+    UniqueConstraint("organization_id", "user_id", name="uq_organization_memberships_organization_user"),
     _values("role", ("organization_admin",), "ck_organization_memberships_role"),
     _values("status", ("active", "revoked"), "ck_organization_memberships_status"),
     _check("version > 0", "ck_organization_memberships_version_positive"),
@@ -237,13 +235,13 @@ project_memberships = Table(
     ),
     ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_project_memberships_user"),
     UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
-    _values(
-        "role", ("project_owner", "reviewer", "viewer"), "ck_project_memberships_role"
-    ),
+    _values("role", ("project_owner", "reviewer", "viewer"), "ck_project_memberships_role"),
     _values("status", ("active", "revoked"), "ck_project_memberships_status"),
     _check("version > 0", "ck_project_memberships_version_positive"),
 )
-Index("ix_project_memberships_tenant_user", project_memberships.c.organization_id, project_memberships.c.user_id)
+Index(
+    "ix_project_memberships_tenant_user", project_memberships.c.organization_id, project_memberships.c.user_id
+)
 Index(
     "uq_project_memberships_default_user_organization",
     project_memberships.c.organization_id,
@@ -371,19 +369,34 @@ review_jobs = Table(
             "review",
             "report",
             "finalize",
+            "export",
             "completed",
         ),
         "ck_review_jobs_stage",
     ),
     _values(
         "status",
-        ("queued", "running", "blocked", "cancelling", "cancelled", "failed", "completed"),
+        (
+            "queued",
+            "running",
+            "blocked",
+            "exporting_report",
+            "cancelling",
+            "cancelled",
+            "failed",
+            "completed",
+        ),
         "ck_review_jobs_status",
     ),
     _check("version > 0", "ck_review_jobs_version_positive"),
     _check("attempt >= 0", "ck_review_jobs_attempt_nonnegative"),
 )
-Index("ix_review_jobs_tenant_status", review_jobs.c.organization_id, review_jobs.c.project_id, review_jobs.c.status)
+Index(
+    "ix_review_jobs_tenant_status",
+    review_jobs.c.organization_id,
+    review_jobs.c.project_id,
+    review_jobs.c.status,
+)
 
 review_attempts = Table(
     "review_attempts",
@@ -402,13 +415,13 @@ review_attempts = Table(
         ["review_jobs.organization_id", "review_jobs.project_id", "review_jobs.id"],
         name="fk_review_attempts_job_tenant",
     ),
-    UniqueConstraint(
-        "organization_id", "project_id", "job_id", "id", name="uq_review_attempts_tenant_id"
-    ),
+    UniqueConstraint("organization_id", "project_id", "job_id", "id", name="uq_review_attempts_tenant_id"),
     UniqueConstraint("job_id", "attempt_number", name="uq_review_attempts_job_number"),
     _check("attempt_number > 0", "ck_review_attempts_number_positive"),
     _values(
-        "status", ("queued", "running", "blocked", "cancelled", "failed", "completed"), "ck_review_attempts_status"
+        "status",
+        ("queued", "running", "blocked", "cancelled", "failed", "completed"),
+        "ck_review_attempts_status",
     ),
 )
 
@@ -440,7 +453,13 @@ review_events = Table(
     _check("aggregate_sequence > 0", "ck_review_events_sequence_positive"),
     _check("schema_version > 0", "ck_review_events_schema_version_positive"),
 )
-Index("ix_review_events_tenant_cursor", review_events.c.organization_id, review_events.c.project_id, review_events.c.created_at, review_events.c.id)
+Index(
+    "ix_review_events_tenant_cursor",
+    review_events.c.organization_id,
+    review_events.c.project_id,
+    review_events.c.created_at,
+    review_events.c.id,
+)
 
 external_service_consents = Table(
     "external_service_consents",
@@ -473,9 +492,7 @@ external_service_consents = Table(
         ["paper_versions.organization_id", "paper_versions.project_id", "paper_versions.id"],
         name="fk_external_service_consents_paper_version_tenant",
     ),
-    ForeignKeyConstraint(
-        ["decided_by"], ["users.id"], name="fk_external_service_consents_decided_by"
-    ),
+    ForeignKeyConstraint(["decided_by"], ["users.id"], name="fk_external_service_consents_decided_by"),
     UniqueConstraint(
         "review_job_id",
         "paper_version_id",
@@ -487,7 +504,11 @@ external_service_consents = Table(
         "provider_config_revision > 0 AND generation > 0 AND version > 0",
         "ck_external_service_consents_versions_positive",
     ),
-    _values("status", tuple(sorted(("pending", "granted", "denied", "revoked", "expired", "not_required"))), "ck_external_service_consents_status"),
+    _values(
+        "status",
+        tuple(sorted(("pending", "granted", "denied", "revoked", "expired", "not_required"))),
+        "ck_external_service_consents_status",
+    ),
     _check(
         "(decided_by IS NULL) = (decided_at IS NULL)",
         "ck_external_service_consents_decision_pair",
@@ -536,9 +557,7 @@ review_documents = Table(
         ],
         name="fk_review_documents_base_event_tenant",
     ),
-    ForeignKeyConstraint(
-        ["last_edited_by"], ["users.id"], name="fk_review_documents_last_edited_by"
-    ),
+    ForeignKeyConstraint(["last_edited_by"], ["users.id"], name="fk_review_documents_last_edited_by"),
     UniqueConstraint("review_job_id", name="uq_review_documents_job"),
     _check("document_version > 0", "ck_review_documents_version_positive"),
 )
@@ -579,12 +598,8 @@ commands = Table(
         "organization_id", "actor_id", "operation", "idempotency_key", name="uq_commands_identity"
     ),
     UniqueConstraint("organization_id", "id", name="uq_commands_organization_id"),
-    UniqueConstraint(
-        "organization_id", "project_id", "id", name="uq_commands_project_id"
-    ),
-    UniqueConstraint(
-        "organization_id", "scope_project_id", "id", name="uq_commands_scope_id"
-    ),
+    UniqueConstraint("organization_id", "project_id", "id", name="uq_commands_project_id"),
+    UniqueConstraint("organization_id", "scope_project_id", "id", name="uq_commands_scope_id"),
     _check("char_length(payload_digest) = 64", "ck_commands_payload_digest"),
     _check(
         "(response_status IS NULL AND completed_at IS NULL) OR "
@@ -642,7 +657,12 @@ work_items = Table(
         "ck_work_items_lease_pair",
     ),
 )
-Index("ix_work_items_claim", work_items.c.available_at, work_items.c.lease_expires_at, work_items.c.dead_lettered_at)
+Index(
+    "ix_work_items_claim",
+    work_items.c.available_at,
+    work_items.c.lease_expires_at,
+    work_items.c.dead_lettered_at,
+)
 
 outbox_events = Table(
     "outbox_events",
@@ -665,7 +685,9 @@ outbox_events = Table(
         ["projects.organization_id", "projects.id"],
         name="fk_outbox_events_project_tenant",
     ),
-    UniqueConstraint("aggregate_type", "aggregate_id", "aggregate_sequence", name="uq_outbox_events_aggregate_sequence"),
+    UniqueConstraint(
+        "aggregate_type", "aggregate_id", "aggregate_sequence", name="uq_outbox_events_aggregate_sequence"
+    ),
     _check("aggregate_sequence > 0", "ck_outbox_events_sequence_positive"),
     _check("schema_version > 0", "ck_outbox_events_schema_version_positive"),
     _check("publication_attempts >= 0", "ck_outbox_events_attempts_nonnegative"),
@@ -698,9 +720,7 @@ stage_manifests = Table(
         ],
         name="fk_stage_manifests_attempt_tenant",
     ),
-    UniqueConstraint(
-        "job_id", "attempt_id", "stage", "input_revision", name="uq_stage_manifests_commit"
-    ),
+    UniqueConstraint("job_id", "attempt_id", "stage", "input_revision", name="uq_stage_manifests_commit"),
     UniqueConstraint(
         "organization_id",
         "project_id",
@@ -737,9 +757,7 @@ report_versions = Table(
     ),
     ForeignKeyConstraint(["created_by"], ["users.id"], name="fk_report_versions_created_by"),
     UniqueConstraint("job_id", "revision", name="uq_report_versions_job_revision"),
-    UniqueConstraint(
-        "organization_id", "project_id", "job_id", "id", name="uq_report_versions_tenant_id"
-    ),
+    UniqueConstraint("organization_id", "project_id", "job_id", "id", name="uq_report_versions_tenant_id"),
     _check("revision > 0 AND schema_version > 0", "ck_report_versions_versions_positive"),
     _values("status", ("draft", "published", "superseded"), "ck_report_versions_status"),
     _check(
@@ -855,12 +873,8 @@ audit_events = Table(
     Column("request_id", String(255), nullable=False),
     _json("metadata"),
     _timestamp("created_at"),
-    ForeignKeyConstraint(
-        ["identity_id"], ["external_identities.id"], name="fk_audit_events_identity"
-    ),
-    ForeignKeyConstraint(
-        ["organization_id"], ["organizations.id"], name="fk_audit_events_organization"
-    ),
+    ForeignKeyConstraint(["identity_id"], ["external_identities.id"], name="fk_audit_events_identity"),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], name="fk_audit_events_organization"),
     ForeignKeyConstraint(
         ["organization_id", "project_id"],
         ["projects.organization_id", "projects.id"],
@@ -892,8 +906,19 @@ audit_events = Table(
         "ck_audit_events_project_not_scope_sentinel",
     ),
 )
-Index("ix_audit_events_tenant_created", audit_events.c.organization_id, audit_events.c.project_id, audit_events.c.created_at, audit_events.c.id)
-Index("ix_audit_events_command", audit_events.c.organization_id, audit_events.c.project_id, audit_events.c.command_id)
+Index(
+    "ix_audit_events_tenant_created",
+    audit_events.c.organization_id,
+    audit_events.c.project_id,
+    audit_events.c.created_at,
+    audit_events.c.id,
+)
+Index(
+    "ix_audit_events_command",
+    audit_events.c.organization_id,
+    audit_events.c.project_id,
+    audit_events.c.command_id,
+)
 
 AUDIT_FUNCTION_SQL = """
 CREATE OR REPLACE FUNCTION peerassist_reject_audit_mutation()
@@ -911,6 +936,7 @@ BEFORE UPDATE OR DELETE ON audit_events
 FOR EACH ROW EXECUTE FUNCTION peerassist_reject_audit_mutation()
 """
 AUDIT_PROTECTION_SQL = f"{AUDIT_FUNCTION_SQL}\n{AUDIT_TRIGGER_SQL}"
+
 
 def create_platform_schema(connection: Connection) -> None:
     """Create only M1-owned tables; Alembic remains the migration authority."""
@@ -969,10 +995,14 @@ class PostgresSchemaReadiness:
     async def check(self) -> bool:
         try:
             with self.engine.connect() as connection:
-                result = connection.execute(
-                    text(CATALOG_INSPECTION_SQL),
-                    {"owned_tables": list(OWNED_TABLES)},
-                ).mappings().one()
+                result = (
+                    connection.execute(
+                        text(CATALOG_INSPECTION_SQL),
+                        {"owned_tables": list(OWNED_TABLES)},
+                    )
+                    .mappings()
+                    .one()
+                )
             actual_signature = catalog_signature_from_row(result)
             return (
                 result["alembic_revision"] == HEAD_REVISION

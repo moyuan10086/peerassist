@@ -552,7 +552,7 @@ class ReviewWorkspaceService:
                     scope.organization_id,
                     job.project_id,
                     job.id,
-                    uuid5(command.id, "attempt:export"),
+                    uuid5(job.id, f"attempt:{job.attempt}"),
                     "export",
                     sequence,
                     0,

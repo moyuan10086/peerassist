@@ -18,6 +18,9 @@ def test_m1_compose_has_authoritative_api_worker_and_private_providers() -> None
     assert services["api"]["ports"] == [
         "${PEERASSIST_M1_PORT:?}:${PEERASSIST_M1_PORT:?}"
     ]
+    assert services["api"]["tmpfs"] == [
+        "/tmp:uid=10001,gid=10001,mode=0700,size=256m"
+    ]
     assert any(
         value.endswith(":/var/lib/peerassist/legacy:ro")
         for value in services["api"]["volumes"]

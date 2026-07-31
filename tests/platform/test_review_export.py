@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
@@ -83,6 +83,7 @@ def test_export_submission_freezes_document_and_replays_idempotently() -> None:
     with factory(actors["owner"]) as uow:
         queued = uow.work_items.get(project.scope, submitted.export_id)
         assert queued is not None and queued.stage == "export"
+        assert queued.attempt_id == uuid5(job.id, f"attempt:{job.attempt}")
         event = uow.review_jobs.list_events(project.scope, job.id)[-1]
         assert event.aggregate_sequence == queued.input_revision
         assert event.payload["document_version"] == document.document_version

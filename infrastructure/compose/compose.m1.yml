@@ -208,6 +208,8 @@ services:
     volumes:
       - ${PEERASSIST_LEGACY_ROOT:?}:/var/lib/peerassist/legacy:ro
       - model-settings-data:/var/lib/peerassist/model-settings
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=0700,size=256m
     <<: *service-security
     depends_on:
       migrate: {condition: service_completed_successfully}
