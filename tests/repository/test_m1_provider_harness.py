@@ -21,9 +21,7 @@ COMPOSE_PATH = ROOT / "infrastructure/compose/compose.m1.test.yml"
 ENV_HELPER = ROOT / "scripts/m1_test_env.sh"
 REALM_TEMPLATE = ROOT / "infrastructure/keycloak/realm-template.json"
 KEYCLOAK_BOOTSTRAP = ROOT / "infrastructure/keycloak/bootstrap.sh"
-IMPLEMENTATION_PLAN = (
-    ROOT / "docs/superpowers/plans/2026-07-17-peerassist-m1-platform-authorization.md"
-)
+IMPLEMENTATION_PLAN = ROOT / "docs/superpowers/plans/2026-07-17-peerassist-m1-platform-authorization.md"
 
 
 def test_keycloak_bootstrap_accepts_https_origin_without_explicit_port() -> None:
@@ -31,9 +29,12 @@ def test_keycloak_bootstrap_accepts_https_origin_without_explicit_port() -> None
     assert r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$" in bootstrap
 
 
-def _run_helper(
-    *args: str, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess[str]:
+def test_public_identity_hostname_does_not_enable_http_backchannel() -> None:
+    bootstrap = KEYCLOAK_BOOTSTRAP.read_text(encoding="utf-8")
+    assert "--hostname-backchannel-dynamic=true" not in bootstrap
+
+
+def _run_helper(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(ENV_HELPER), *args],
         cwd=ROOT,
@@ -62,18 +63,18 @@ def _write_fake_docker(tmp_path: Path) -> dict[str, str]:
         "set -eu\n"
         "project= env_file=\n"
         "previous=\n"
-        "for argument in \"$@\"; do\n"
-        "  case \"$previous\" in\n"
+        'for argument in "$@"; do\n'
+        '  case "$previous" in\n'
         "    --project-name) project=$argument ;;\n"
         "    --env-file) env_file=$argument ;;\n"
         "  esac\n"
         "  previous=$argument\n"
         "done\n"
-        "case \" $* \" in\n"
+        'case " $* " in\n'
         "  *' compose '*' down '*)\n"
-        "    if [ \"${FAKE_DOWN_FAIL_ONCE:-0}\" = 1 ] && "
-        "[ ! -e \"$FAKE_STATE/down-failed\" ]; then\n"
-        "      : > \"$FAKE_STATE/down-failed\"\n"
+        '    if [ "${FAKE_DOWN_FAIL_ONCE:-0}" = 1 ] && '
+        '[ ! -e "$FAKE_STATE/down-failed" ]; then\n'
+        '      : > "$FAKE_STATE/down-failed"\n'
         "      exit 7\n"
         "    fi\n"
         "    exit 0\n"
@@ -81,12 +82,12 @@ def _write_fake_docker(tmp_path: Path) -> dict[str, str]:
         "  *' compose '*' port '*)\n"
         "    service=\n"
         "    previous=\n"
-        "    for argument in \"$@\"; do\n"
-        "      if [ \"$previous\" = port ]; then service=$argument; break; fi\n"
+        '    for argument in "$@"; do\n'
+        '      if [ "$previous" = port ]; then service=$argument; break; fi\n'
         "      previous=$argument\n"
         "    done\n"
         "    base=$((20000 + $(printf '%s' \"$project\" | cksum | cut -d' ' -f1) % 20000))\n"
-        "    case \"$service\" in\n"
+        '    case "$service" in\n'
         "      postgres) offset=1 ;; keycloak) offset=2 ;; minio) offset=3 ;;\n"
         "      callback-reservation) offset=4 ;; *) exit 9 ;;\n"
         "    esac\n"
@@ -96,7 +97,7 @@ def _write_fake_docker(tmp_path: Path) -> dict[str, str]:
         "  *' compose '*' up '*' keycloak'*)\n"
         "    grep -Eq '^export M1_TEST_API_CALLBACK_PORT=[1-9][0-9]{3,4}$' \"$env_file\"\n"
         "    file_origin=$(sed -n 's/^export M1_TEST_PUBLIC_ORIGIN=//p' \"$env_file\")\n"
-        "    [ \"${M1_TEST_PUBLIC_ORIGIN:-}\" = \"$file_origin\" ]\n"
+        '    [ "${M1_TEST_PUBLIC_ORIGIN:-}" = "$file_origin" ]\n'
         "    exit 0\n"
         "    ;;\n"
         "  *' compose '*' up '*) exit 0 ;;\n"
@@ -105,8 +106,8 @@ def _write_fake_docker(tmp_path: Path) -> dict[str, str]:
         "  *' network ls -q --filter '*) kind=network ;;\n"
         "  *) exit 10 ;;\n"
         "esac\n"
-        "if [ \"${FAKE_QUERY_FAILURE:-}\" = \"$kind\" ]; then exit 8; fi\n"
-        "if [ \"${FAKE_RESIDUAL:-}\" = \"$kind\" ]; then printf '%s-id\\n' \"$kind\"; fi\n",
+        'if [ "${FAKE_QUERY_FAILURE:-}" = "$kind" ]; then exit 8; fi\n'
+        'if [ "${FAKE_RESIDUAL:-}" = "$kind" ]; then printf \'%s-id\\n\' "$kind"; fi\n',
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -246,9 +247,7 @@ def test_create_writes_a_source_safe_mode_0600_environment(tmp_path: Path) -> No
     assert re.fullmatch(r"peerassist-m1-[0-9a-f]{24}", exports["M1_TEST_PROJECT_NAME"])
     assert exports["M1_TEST_DATABASE_URL"].startswith("postgresql://")
     assert exports["M1_TEST_OIDC_ISSUER"].startswith("http://127.0.0.1:")
-    assert exports["M1_TEST_PUBLIC_ORIGIN"] == (
-        f"http://127.0.0.1:{exports['M1_TEST_API_CALLBACK_PORT']}"
-    )
+    assert exports["M1_TEST_PUBLIC_ORIGIN"] == (f"http://127.0.0.1:{exports['M1_TEST_API_CALLBACK_PORT']}")
     assert exports["M1_TEST_OIDC_REDIRECT_URI"] == (
         f"{exports['M1_TEST_PUBLIC_ORIGIN']}/api/v1/auth/callback"
     )
@@ -350,15 +349,15 @@ def test_create_detects_replacement_of_the_validated_empty_target(
     fake_python.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        "if [ ! -e \"$M1_REPLACED_MARKER\" ]; then\n"
-        "  replacement=\"$M1_REPLACEMENT_TARGET.replacement\"\n"
-        "  : > \"$replacement\"\n"
-        "  chmod 0600 \"$replacement\"\n"
-        "  rm -f -- \"$M1_REPLACEMENT_TARGET\"\n"
-        "  mv -- \"$replacement\" \"$M1_REPLACEMENT_TARGET\"\n"
-        "  : > \"$M1_REPLACED_MARKER\"\n"
+        'if [ ! -e "$M1_REPLACED_MARKER" ]; then\n'
+        '  replacement="$M1_REPLACEMENT_TARGET.replacement"\n'
+        '  : > "$replacement"\n'
+        '  chmod 0600 "$replacement"\n'
+        '  rm -f -- "$M1_REPLACEMENT_TARGET"\n'
+        '  mv -- "$replacement" "$M1_REPLACEMENT_TARGET"\n'
+        '  : > "$M1_REPLACED_MARKER"\n'
         "fi\n"
-        "exec /usr/bin/python3 \"$@\"\n",
+        'exec /usr/bin/python3 "$@"\n',
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
@@ -397,9 +396,7 @@ def test_create_is_atomic_and_refuses_existing_or_symlink_targets(tmp_path: Path
 
 
 @pytest.mark.parametrize("unsafe", ["mode", "hardlink"])
-def test_create_does_not_replace_unsafe_empty_targets(
-    tmp_path: Path, unsafe: str
-) -> None:
+def test_create_does_not_replace_unsafe_empty_targets(tmp_path: Path, unsafe: str) -> None:
     env_file = tmp_path / "provider.env"
     env_file.touch(mode=0o600)
     linked: Path | None = None
@@ -436,9 +433,7 @@ def test_create_does_not_replace_an_empty_target_owned_by_another_user(
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o400, 0o660])
-def test_commands_reject_environment_files_that_are_not_mode_0600(
-    tmp_path: Path, mode: int
-) -> None:
+def test_commands_reject_environment_files_that_are_not_mode_0600(tmp_path: Path, mode: int) -> None:
     env_file = tmp_path / "provider.env"
     assert _run_helper("create", str(env_file)).returncode == 0
     env_file.chmod(mode)
@@ -547,15 +542,10 @@ def test_up_resolves_compose_ports_and_updates_environment_atomically(
     assert exports["M1_TEST_DATABASE_URL"].endswith(
         f"@127.0.0.1:{exports['M1_TEST_POSTGRES_PORT']}/peerassist"
     )
-    assert exports["M1_TEST_OIDC_ISSUER"].startswith(
-        f"http://127.0.0.1:{exports['M1_TEST_KEYCLOAK_PORT']}/"
-    )
-    assert exports["M1_TEST_S3_ENDPOINT"] == (
-        f"http://127.0.0.1:{exports['M1_TEST_MINIO_PORT']}"
-    )
+    assert exports["M1_TEST_OIDC_ISSUER"].startswith(f"http://127.0.0.1:{exports['M1_TEST_KEYCLOAK_PORT']}/")
+    assert exports["M1_TEST_S3_ENDPOINT"] == (f"http://127.0.0.1:{exports['M1_TEST_MINIO_PORT']}")
     assert exports["M1_TEST_OIDC_REDIRECT_URI"] == (
-        f"http://127.0.0.1:{exports['M1_TEST_API_CALLBACK_PORT']}"
-        "/api/v1/auth/callback"
+        f"http://127.0.0.1:{exports['M1_TEST_API_CALLBACK_PORT']}/api/v1/auth/callback"
     )
 
 
@@ -591,9 +581,7 @@ def test_parent_shell_must_resource_environment_after_up(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("command", ["wait", "require-ready"])
-def test_consumer_commands_reject_unresolved_endpoints(
-    tmp_path: Path, command: str
-) -> None:
+def test_consumer_commands_reject_unresolved_endpoints(tmp_path: Path, command: str) -> None:
     env_file = tmp_path / "provider.env"
     assert _run_helper("create", str(env_file)).returncode == 0
     env = _write_fake_docker(tmp_path)
@@ -623,9 +611,7 @@ def test_real_provider_preludes_resource_resolved_endpoints() -> None:
             'bash scripts/m1_test_env.sh require-ready "$M1_ENV_FILE"',
             second_source,
         )
-        wait = commands.index(
-            'bash scripts/m1_test_env.sh wait "$M1_ENV_FILE"', ready
-        )
+        wait = commands.index('bash scripts/m1_test_env.sh wait "$M1_ENV_FILE"', ready)
         consumer = commands.index("$M1_TEST_", wait)
         assert create < first_source < up < second_source < ready < wait < consumer
 
@@ -645,9 +631,7 @@ def test_two_projects_receive_distinct_compose_ports(tmp_path: Path) -> None:
         "M1_TEST_MINIO_PORT",
         "M1_TEST_API_CALLBACK_PORT",
     }
-    assert {first[name] for name in port_names}.isdisjoint(
-        {second[name] for name in port_names}
-    )
+    assert {first[name] for name in port_names}.isdisjoint({second[name] for name in port_names})
 
 
 def test_wait_fails_fast_when_a_provider_exits(tmp_path: Path) -> None:
@@ -659,7 +643,7 @@ def test_wait_fails_fast_when_a_provider_exits(tmp_path: Path) -> None:
     docker = bin_dir / "docker"
     docker.write_text(
         "#!/bin/sh\n"
-        "case \" $* \" in\n"
+        'case " $* " in\n'
         "  *' ps --all --quiet '*) printf 'provider-id\\n' ;;\n"
         "  *' inspect '*) printf 'exited  1\\n' ;;\n"
         "  *) exit 2 ;;\n"
@@ -694,9 +678,7 @@ def test_wait_queries_stopped_provider_containers() -> None:
     reason="Docker CLI is unavailable",
 )
 def test_real_provider_harness_smoke_and_cleanup(tmp_path: Path) -> None:
-    info = subprocess.run(
-        ["docker", "info"], check=False, capture_output=True, text=True, timeout=30
-    )
+    info = subprocess.run(["docker", "info"], check=False, capture_output=True, text=True, timeout=30)
     if info.returncode != 0:
         pytest.skip("Docker daemon is unavailable")
 
@@ -730,8 +712,7 @@ def test_real_provider_harness_smoke_and_cleanup(tmp_path: Path) -> None:
         assert "login" in valid_body or "authenticate" in valid_body
 
         invalid_redirect = (
-            f"http://127.0.0.1:{int(exports['M1_TEST_API_CALLBACK_PORT']) + 1}"
-            "/api/v1/auth/callback"
+            f"http://127.0.0.1:{int(exports['M1_TEST_API_CALLBACK_PORT']) + 1}/api/v1/auth/callback"
         )
         with pytest.raises(urllib.error.HTTPError) as rejected:
             urllib.request.urlopen(

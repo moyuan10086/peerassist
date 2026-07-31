@@ -59,7 +59,6 @@ fi
 if [[ -n "$identity_path" ]]; then
   args+=(
     --hostname="$M1_TEST_PUBLIC_ORIGIN$identity_path"
-    --hostname-backchannel-dynamic=true
   )
 else
   # The raw Keycloak image used by the provider harness still starts in
