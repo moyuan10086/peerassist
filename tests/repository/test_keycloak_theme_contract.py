@@ -56,4 +56,7 @@ def test_keycloak_realm_and_image_install_peerassist_theme() -> None:
     dockerfile = (ROOT / "infrastructure/compose/Dockerfile.keycloak").read_text(encoding="utf-8")
     assert '"loginTheme": "peerassist"' in realm
     assert '"defaultLocale": "zh-CN"' in realm
+    assert '"sslRequired": "external"' in realm
+    assert '"bruteForceProtected": true' in realm
+    assert '"failureFactor": 5' in realm
     assert "COPY infrastructure/keycloak/theme/peerassist /opt/keycloak/themes/peerassist" in dockerfile
