@@ -364,3 +364,24 @@ rg -l --hidden --glob '!runs/**' --glob '!.git/**' --glob '!web/**/node_modules/
 - 大模型输出必须经过人工逐条确认后才能进入正式审稿意见。
 - 无证据新增事实应删除、改写或标记待定，不能直接保留。
 - 审稿意见应绑定 PDF 原文、证据台账、确定性核查或工具追踪，不把模型自由发挥当作证据。
+
+
+## 12. 备份与隔离恢复演练
+
+安装平台脚本会同时安装备份与恢复演练命令。备份包含 PostgreSQL 逻辑转储、Keycloak、MinIO、模型设置、Worker 临时卷、平台环境文件，以及存在时的 Caddy 配置：
+
+```bash
+sudo deploy/systemd/install-platform-stack.sh
+sudo /usr/local/sbin/peerassist-platform-backup
+```
+
+命令在 `/var/backups/peerassist/platform-<UTC时间>` 创建权限为 `0700` 的目录，文件权限为 `0600`，并生成 `SHA256SUMS`。PostgreSQL 使用一致性逻辑转储；为获得一致的卷快照，Keycloak、MinIO、API 和 Worker 会短暂停止，清理钩子会在成功、失败或中断时重新启动它们。备份目录包含密钥和用户数据，只能通过加密通道复制到受控的异机存储，不能加入 Git。
+
+每次备份后在不连接生产网络、不开宿主端口的临时 PostgreSQL 中执行恢复演练：
+
+```bash
+sudo /usr/local/sbin/peerassist-platform-restore-drill \
+  /var/backups/peerassist/platform-<UTC时间>
+```
+
+演练会先验证校验和和四个卷归档，再恢复数据库、确认公共表数量，并始终销毁临时容器。完成后仍需检查 `/api/v1/ready`，并定期将最新备份复制到异机介质；同机备份不能替代灾难恢复副本。

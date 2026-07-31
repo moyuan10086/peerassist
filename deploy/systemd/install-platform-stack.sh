@@ -16,6 +16,12 @@ install -m 0755 \
 install -m 0755 \
   "$repo_root/deploy/systemd/peerassist-ui-start.sh" \
   /usr/local/sbin/peerassist-ui-start
+install -m 0755 \
+  "$repo_root/deploy/systemd/peerassist-platform-backup.sh" \
+  /usr/local/sbin/peerassist-platform-backup
+install -m 0755 \
+  "$repo_root/deploy/systemd/peerassist-platform-restore-drill.sh" \
+  /usr/local/sbin/peerassist-platform-restore-drill
 install -m 0644 \
   "$repo_root/deploy/systemd/peerassist-platform-stack.service" \
   "$unit_dir/peerassist-platform-stack.service"

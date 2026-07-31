@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SYSTEMD = ROOT / "deploy" / "systemd"
+PLATFORM_BACKUP = SYSTEMD / "peerassist-platform-backup.sh"
+PLATFORM_RESTORE_DRILL = SYSTEMD / "peerassist-platform-restore-drill.sh"
 
 
 def test_systemd_examples_are_portable_private_and_hardened() -> None:
@@ -111,3 +113,36 @@ def test_delivered_systemd_units_pass_static_verification(tmp_path: Path) -> Non
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_platform_backup_and_restore_drill_are_safe_examples() -> None:
+    backup = PLATFORM_BACKUP.read_text(encoding="utf-8")
+    restore = PLATFORM_RESTORE_DRILL.read_text(encoding="utf-8")
+
+    for script in (PLATFORM_BACKUP, PLATFORM_RESTORE_DRILL):
+        assert os.access(script, os.X_OK)
+        subprocess.run(["sh", "-n", script], cwd=ROOT, check=True)
+
+    for token in (
+        "umask 077",
+        "pg_dump -Fc",
+        "compose stop keycloak minio api worker",
+        "sha256sum",
+        "trap cleanup",
+        "--network none",
+        ":/source:ro",
+    ):
+        assert token in backup
+    assert "platform.env" in backup
+    assert "chmod 0600" in backup
+
+    for token in (
+        "sha256sum -c SHA256SUMS",
+        "--tmpfs /var/lib/postgresql/data",
+        "pg_restore",
+        "information_schema.tables",
+        "trap cleanup",
+        "--network none",
+    ):
+        assert token in restore
+    assert "-p " not in restore
