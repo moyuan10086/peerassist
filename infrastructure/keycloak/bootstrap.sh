@@ -59,6 +59,8 @@ fi
 if [[ -n "$identity_path" ]]; then
   args+=(
     --hostname="$M1_TEST_PUBLIC_ORIGIN$identity_path"
+    --proxy-headers=xforwarded
+    --proxy-trusted-addresses=172.16.0.0/12
   )
 else
   # The raw Keycloak image used by the provider harness still starts in

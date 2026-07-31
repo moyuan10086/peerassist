@@ -91,9 +91,7 @@ def render_confirmation_page(*, run_dir: Path, paper_id: str) -> str:
     tool_trace = state.get("tool_trace") if isinstance(state.get("tool_trace"), dict) else {}
     events = tool_trace.get("events") if isinstance(tool_trace.get("events"), list) else []
     invocations = (
-        state.get("capability_invocations")
-        if isinstance(state.get("capability_invocations"), list)
-        else []
+        state.get("capability_invocations") if isinstance(state.get("capability_invocations"), list) else []
     )
     paths = state.get("paths") if isinstance(state.get("paths"), dict) else {}
     if source_pdf_path is not None:
@@ -5842,9 +5840,7 @@ def _persist_manual_selection_concern(
             "issue_anchor": evidence_id,
             "finding_check_type": "manual_annotation",
             "finding_semantic_key": note,
-            "finding_content_fingerprint": hashlib.sha256(
-                selected_text.encode("utf-8")
-            ).hexdigest(),
+            "finding_content_fingerprint": hashlib.sha256(selected_text.encode("utf-8")).hexdigest(),
             "selected_text": selected_text,
             "page": page,
             "created_at": timestamp,
@@ -5940,9 +5936,7 @@ def _extract_agent_review_payload(text: str) -> dict[str, Any]:
     return {}
 
 
-def _concerns_from_agent_review_rows(
-    *, rows: list[Any], existing_count: int, model: str
-) -> list[Concern]:
+def _concerns_from_agent_review_rows(*, rows: list[Any], existing_count: int, model: str) -> list[Concern]:
     concerns: list[Concern] = []
     for offset, row in enumerate(rows, start=existing_count + 1):
         if not isinstance(row, dict):
@@ -5962,8 +5956,7 @@ def _concerns_from_agent_review_rows(
                 title=title,
                 evidence_ids=evidence_ids,
                 impact=impact,
-                benign_explanation=benign_explanation
-                or "模型未给出充分善意解释，需审稿人复核。",
+                benign_explanation=benign_explanation or "模型未给出充分善意解释，需审稿人复核。",
                 author_action=author_action,
                 status=ConcernStatus.PENDING_HUMAN_CONFIRMATION,
                 source_agent_ids=["llm_full_paper_review_agent"],
@@ -6183,9 +6176,7 @@ def _summarize_agent_results_for_review(rows: list[Any]) -> list[dict[str, Any]]
     return summaries
 
 
-def _chat_completion(
-    *, api_key: str, base_url: str, model: str, messages: list[dict[str, str]]
-) -> str:
+def _chat_completion(*, api_key: str, base_url: str, model: str, messages: list[dict[str, str]]) -> str:
     endpoint = base_url.rstrip("/") + "/chat/completions"
     body = json.dumps(
         {
@@ -6253,9 +6244,7 @@ def _public_model_settings() -> dict[str, object]:
         "provider": current["provider"],
         "base_url": current["base_url"],
         "model": current["model"],
-        "api_mode": "responses"
-        if current["provider"] == "openai-codex"
-        else "chat_completions",
+        "api_mode": "responses" if current["provider"] == "openai-codex" else "chat_completions",
         "api_key_configured": current["api_key_configured"] == "true",
         "api_key_hint": "Codex 登录" if current["provider"] == "openai-codex" else "",
     }
@@ -6513,6 +6502,8 @@ def _handler_factory(*, run_dir: Path, paper_id: str) -> type[BaseHTTPRequestHan
                 "Origin",
                 "Range",
                 "X-CSRF-Token",
+                "X-Forwarded-Host",
+                "X-Forwarded-Proto",
                 "If-None-Match",
                 "If-Modified-Since",
             ):
@@ -6817,8 +6808,7 @@ def _render_item(item: dict[str, Any]) -> str:
     )
     source_agents = item.get("source_agent_ids") if isinstance(item.get("source_agent_ids"), list) else []
     source_agent_tags = "".join(
-        f'<span class="tag">{html.escape(_display_name(str(agent_id)))}</span>'
-        for agent_id in source_agents
+        f'<span class="tag">{html.escape(_display_name(str(agent_id)))}</span>' for agent_id in source_agents
     )
     previous_text = html.escape(str(item.get("author_action") or ""), quote=True)
     return f"""
@@ -6882,14 +6872,11 @@ def _event_status_count(events: list[Any], status: str) -> int:
     return sum(
         1
         for row in events
-        if isinstance(row, dict)
-        and str(row.get("status") or "").replace(" ", "_").lower() == expected
+        if isinstance(row, dict) and str(row.get("status") or "").replace(" ", "_").lower() == expected
     )
 
 
-def _render_evidence_chain_matrix(
-    items: list[Any], *, events: list[Any], invocations: list[Any]
-) -> str:
+def _render_evidence_chain_matrix(items: list[Any], *, events: list[Any], invocations: list[Any]) -> str:
     concerns = [item for item in items if isinstance(item, dict)]
     if not concerns:
         return """
@@ -6951,7 +6938,7 @@ def _render_evidence_chain_matrix(
   <div class="evidence-chain-row" data-evidence-chain-row data-concern-id="{html.escape(concern_id, quote=True)}"{pdf_page_attr}>
     <div>
       <div class="chain-title">{html.escape(title)}</div>
-      <div class="chain-muted">{html.escape(str(first_evidence.get('locator') or '未标注位置'))}</div>
+      <div class="chain-muted">{html.escape(str(first_evidence.get("locator") or "未标注位置"))}</div>
     </div>
     <span class="chain-pill">{html.escape(pdf_page_text)}</span>
     <span class="chain-pill ok">{len(evidence_rows)} 条</span>
@@ -6974,7 +6961,7 @@ def _render_evidence_chain_matrix(
     <span class="evidence-chain-count">{len(concerns)} 条关注点</span>
   </div>
   <div class="evidence-chain-grid">
-    {''.join(rows)}
+    {"".join(rows)}
   </div>
 </section>
 """
@@ -7046,7 +7033,7 @@ def _render_evidence_focus(items: list[Any]) -> str:
                 f"""
 <div class="focus-row">
   <div class="focus-title"><code>{html.escape(evidence_id)}</code> · {html.escape(title)}</div>
-  <div class="focus-meta">{html.escape(str(row.get('locator') or '未标注位置'))}</div>
+  <div class="focus-meta">{html.escape(str(row.get("locator") or "未标注位置"))}</div>
 </div>
 """
             )
@@ -7659,7 +7646,9 @@ def _render_pdf_tool_trace_strip(events: list[Any]) -> str:
 def _render_pdf_tool_trace_card(event: dict[str, Any]) -> str:
     status = str(event.get("status") or "unknown").replace(" ", "_").lower()
     tool = str(event.get("tool") or event.get("call_id") or "tool")
-    summary = str(event.get("output_summary") or event.get("input_summary") or event.get("error_code") or "等待输出摘要")
+    summary = str(
+        event.get("output_summary") or event.get("input_summary") or event.get("error_code") or "等待输出摘要"
+    )
     agent = _display_name(str(event.get("agent_id") or "peerassist"))
     artifact_ids = event.get("artifact_ids") if isinstance(event.get("artifact_ids"), list) else []
     evidence_ids = event.get("evidence_ids") if isinstance(event.get("evidence_ids"), list) else []
@@ -7746,9 +7735,7 @@ def _render_paper_preview_lines(rows: list[dict[str, Any]], *, fallback_title: s
     return "".join(rendered)
 
 
-def _render_margin_comments(
-    items: list[dict[str, Any]], *, evidence_preview: list[dict[str, Any]]
-) -> str:
+def _render_margin_comments(items: list[dict[str, Any]], *, evidence_preview: list[dict[str, Any]]) -> str:
     rows: list[str] = []
     for position, item in enumerate(items[:4], start=1):
         evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
@@ -7836,9 +7823,7 @@ def _render_artifact_workspace(paths: dict[str, Any]) -> str:
     return f'<div class="artifact-list">{"".join(rows)}</div>'
 
 
-def _render_next_actions(
-    *, pending_count: int, failed_event_count: int, actions_count: int
-) -> str:
+def _render_next_actions(*, pending_count: int, failed_event_count: int, actions_count: int) -> str:
     rows = [
         (
             "处理待确认项",
@@ -7900,9 +7885,7 @@ def _review_stage_lifecycle(
     failed_event_count: int,
 ) -> list[dict[str, str]]:
     event_statuses = {
-        str(row.get("status") or "").replace(" ", "_").lower()
-        for row in events
-        if isinstance(row, dict)
+        str(row.get("status") or "").replace(" ", "_").lower() for row in events if isinstance(row, dict)
     }
     has_trace_activity = any(status for status in event_statuses)
     has_running_trace = bool(
@@ -7967,7 +7950,9 @@ def _review_stage_lifecycle(
         {
             "index": "06",
             "title": "MCP / Skills 调用",
-            "status": "blocked" if failed_event_count > 0 else ("completed" if has_invocations or has_completed_trace else "waiting"),
+            "status": "blocked"
+            if failed_event_count > 0
+            else ("completed" if has_invocations or has_completed_trace else "waiting"),
             "copy": f"{len(invocations)} 条能力调用记录",
         },
         {
@@ -7991,13 +7976,13 @@ def _render_agent_stage_board(stages: list[dict[str, str]]) -> str:
         status = str(stage.get("status") or "waiting").replace(" ", "_").lower()
         cards.append(
             f"""
-<div class="agent-stage-card" data-agent-stage="{html.escape(str(stage.get('index') or ''), quote=True)}" data-stage-status="{html.escape(status, quote=True)}">
+<div class="agent-stage-card" data-agent-stage="{html.escape(str(stage.get("index") or ""), quote=True)}" data-stage-status="{html.escape(status, quote=True)}">
   <div class="agent-stage-top">
-    <span class="agent-stage-index">{html.escape(str(stage.get('index') or ''))}</span>
+    <span class="agent-stage-index">{html.escape(str(stage.get("index") or ""))}</span>
     <span class="agent-stage-status">{html.escape(_localized_status(status))}</span>
   </div>
-  <div class="agent-stage-title">{html.escape(str(stage.get('title') or ''))}</div>
-  <div class="agent-stage-copy">{html.escape(str(stage.get('copy') or ''))}</div>
+  <div class="agent-stage-title">{html.escape(str(stage.get("title") or ""))}</div>
+  <div class="agent-stage-copy">{html.escape(str(stage.get("copy") or ""))}</div>
 </div>
 """
         )
@@ -8010,10 +7995,7 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
         if not isinstance(row, dict):
             continue
         status = str(row.get("status") or "unknown")
-        detail = (
-            f"{int(row.get('draft_count') or 0)} 条草稿"
-            f" · {int(row.get('warning_count') or 0)} 条警告"
-        )
+        detail = f"{int(row.get('draft_count') or 0)} 条草稿 · {int(row.get('warning_count') or 0)} 条警告"
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         metadata_text = _compact_metadata(metadata)
         rows.append(
@@ -8021,7 +8003,7 @@ def _render_agent_timeline(agent_runs: list[Any]) -> str:
 <div class="agent-row">
   <div class="agent-dot"></div>
   <div>
-    <div class="agent-name">{html.escape(_display_name(str(row.get('agent_id') or 'agent')))} {_status_pill(status)}</div>
+    <div class="agent-name">{html.escape(_display_name(str(row.get("agent_id") or "agent")))} {_status_pill(status)}</div>
     <div class="agent-detail">{html.escape(detail)}</div>
     <div class="agent-meta">{html.escape(metadata_text)}</div>
   </div>
@@ -8049,32 +8031,30 @@ def _render_trace_events(events: list[Any]) -> str:
         artifacts = [str(item) for item in row.get("artifact_ids", []) if item]
         evidence_ids = [str(item) for item in row.get("evidence_ids", []) if item]
         error_text = " · ".join(
-            str(item)
-            for item in (row.get("error_code"), row.get("error_message"))
-            if item
+            str(item) for item in (row.get("error_code"), row.get("error_message")) if item
         )
         rows.append(
             f"""
-<details class="trace-event" data-trace-audit-card data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}"{open_attr}>
+<details class="trace-event" data-trace-audit-card data-status="{html.escape(status.replace(" ", "_").lower(), quote=True)}"{open_attr}>
   <summary>
     <span>
-      <span class="trace-head"><span class="trace-tool">{html.escape(str(row.get('tool') or row.get('call_id') or 'tool'))}</span>{_status_pill(status)}</span>
-      <span class="trace-summary">{html.escape(_display_name(str(row.get('agent_id') or 'peerassist')))}{html.escape(duration_text)}</span>
+      <span class="trace-head"><span class="trace-tool">{html.escape(str(row.get("tool") or row.get("call_id") or "tool"))}</span>{_status_pill(status)}</span>
+      <span class="trace-summary">{html.escape(_display_name(str(row.get("agent_id") or "peerassist")))}{html.escape(duration_text)}</span>
       <span class="trace-summary">{html.escape(summary)}</span>
     </span>
   </summary>
   <div class="trace-audit-body">
     <div class="trace-audit-grid">
-      {_render_audit_field('调用 ID', str(row.get('call_id') or '未记录'))}
-      {_render_audit_field('任务 ID', str(row.get('task_id') or '未记录'))}
-      {_render_audit_field('来源', _localized_source(str(row.get('source') or 'internal')))}
-      {_render_audit_field('开始时间', str(row.get('ts') or '未记录'))}
-      {_render_audit_field('输入摘要', input_summary or '未记录')}
-      {_render_audit_field('输出摘要', output_summary or '未记录')}
+      {_render_audit_field("调用 ID", str(row.get("call_id") or "未记录"))}
+      {_render_audit_field("任务 ID", str(row.get("task_id") or "未记录"))}
+      {_render_audit_field("来源", _localized_source(str(row.get("source") or "internal")))}
+      {_render_audit_field("开始时间", str(row.get("ts") or "未记录"))}
+      {_render_audit_field("输入摘要", input_summary or "未记录")}
+      {_render_audit_field("输出摘要", output_summary or "未记录")}
     </div>
-    {_render_audit_chips('证据', evidence_ids)}
-    {_render_audit_chips('产物', artifacts)}
-    {_render_audit_field('错误信息', error_text or '无')}
+    {_render_audit_chips("证据", evidence_ids)}
+    {_render_audit_chips("产物", artifacts)}
+    {_render_audit_field("错误信息", error_text or "无")}
   </div>
 </details>
 """
@@ -8120,32 +8100,30 @@ def _render_invocations(invocations: list[Any]) -> str:
         duration_text = f" · {int(duration)} ms" if isinstance(duration, int) else ""
         open_attr = " open" if index == len(visible_invocations) - 1 else ""
         error_text = " · ".join(
-            str(item)
-            for item in (row.get("error_code"), row.get("error_message"))
-            if item
+            str(item) for item in (row.get("error_code"), row.get("error_message")) if item
         )
         rows.append(
             f"""
-<details class="trace-event" data-capability-audit-card data-status="{html.escape(status.replace(' ', '_').lower(), quote=True)}"{open_attr}>
+<details class="trace-event" data-capability-audit-card data-status="{html.escape(status.replace(" ", "_").lower(), quote=True)}"{open_attr}>
   <summary>
     <span>
-      <span class="trace-head"><span class="trace-tool">{html.escape(str(row.get('capability_name') or row.get('call_id') or 'capability'))}</span>{_status_pill(status)}</span>
-      <span class="trace-summary">来源={html.escape(_localized_source(str(row.get('source') or '')))} · 尝试={html.escape(str(row.get('attempts') or 0))}{html.escape(duration_text)}</span>
+      <span class="trace-head"><span class="trace-tool">{html.escape(str(row.get("capability_name") or row.get("call_id") or "capability"))}</span>{_status_pill(status)}</span>
+      <span class="trace-summary">来源={html.escape(_localized_source(str(row.get("source") or "")))} · 尝试={html.escape(str(row.get("attempts") or 0))}{html.escape(duration_text)}</span>
       <span class="trace-summary">能力调用可追溯记录</span>
     </span>
   </summary>
   <div class="trace-audit-body">
     <div class="trace-audit-grid">
-      {_render_audit_field('调用 ID', str(row.get('call_id') or '未记录'))}
-      {_render_audit_field('任务 ID', str(row.get('task_id') or '未记录'))}
-      {_render_audit_field('代理', _display_name(str(row.get('agent_id') or 'peerassist')))}
-      {_render_audit_field('来源', _localized_source(str(row.get('source') or 'internal')))}
-      {_render_audit_field('尝试次数', str(row.get('attempts') or 0))}
-      {_render_audit_field('状态', _localized_status(status))}
+      {_render_audit_field("调用 ID", str(row.get("call_id") or "未记录"))}
+      {_render_audit_field("任务 ID", str(row.get("task_id") or "未记录"))}
+      {_render_audit_field("代理", _display_name(str(row.get("agent_id") or "peerassist")))}
+      {_render_audit_field("来源", _localized_source(str(row.get("source") or "internal")))}
+      {_render_audit_field("尝试次数", str(row.get("attempts") or 0))}
+      {_render_audit_field("状态", _localized_status(status))}
     </div>
-    {_render_audit_chips('证据', evidence_ids)}
-    {_render_audit_chips('产物', artifacts)}
-    {_render_audit_field('错误信息', error_text or '无')}
+    {_render_audit_chips("证据", evidence_ids)}
+    {_render_audit_chips("产物", artifacts)}
+    {_render_audit_field("错误信息", error_text or "无")}
   </div>
 </details>
 """

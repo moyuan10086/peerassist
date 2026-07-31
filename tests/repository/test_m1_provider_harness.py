@@ -32,6 +32,8 @@ def test_keycloak_bootstrap_accepts_https_origin_without_explicit_port() -> None
 def test_public_identity_hostname_does_not_enable_http_backchannel() -> None:
     bootstrap = KEYCLOAK_BOOTSTRAP.read_text(encoding="utf-8")
     assert "--hostname-backchannel-dynamic=true" not in bootstrap
+    assert "--proxy-headers=xforwarded" in bootstrap
+    assert "--proxy-trusted-addresses=172.16.0.0/12" in bootstrap
 
 
 def _run_helper(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

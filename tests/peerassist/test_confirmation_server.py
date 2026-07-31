@@ -477,8 +477,8 @@ def test_render_confirmation_page_contains_evidence_and_actions(
     assert "页边批注" in html
     assert "暂无待人工确认批注" not in html
     assert "p.1 line 1" in html
-    assert "data-action=\"confirm\"" in html
-    assert "data-action=\"rewrite\"" in html
+    assert 'data-action="confirm"' in html
+    assert 'data-action="rewrite"' in html
 
 
 def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
@@ -560,7 +560,7 @@ def test_render_source_pdf_viewer_contains_selection_review_button() -> None:
     assert "调用模型" in html
     assert "写回队列" in html
     assert "人工确认" in html
-    assert "data-review-mode=\"fast\"" in html
+    assert 'data-review-mode="fast"' in html
     assert 'data-pdf-agent-mode="fast"' in html
     assert 'data-pdf-agent-mode="standard"' in html
     assert 'data-pdf-agent-mode="deep"' in html
@@ -698,7 +698,7 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
     assert "function PdfPageView" in source
     assert 'title="单页阅读"' in source
     assert 'title="双页阅读"' in source
-    assert 'data-view-mode={effectiveViewMode}' in source
+    assert "data-view-mode={effectiveViewMode}" in source
     assert "pdf-annotation-pin" in source
     assert "打开关注：" in source
     assert "selected={item.id === activeConcernId}" in source
@@ -707,9 +707,9 @@ def test_workspace_frontend_contains_pdfjs_review_reader() -> None:
 
 
 def test_workspace_frontend_exposes_account_admin_and_summary_surfaces() -> None:
-    source = (
-        Path(__file__).parents[2] / "web" / "peerassist-workspace" / "src" / "main.tsx"
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[2] / "web" / "peerassist-workspace" / "src" / "main.tsx").read_text(
+        encoding="utf-8"
+    )
 
     assert "登录 / 注册" in source
     assert "成员与权限" in source
@@ -723,28 +723,30 @@ def test_workspace_frontend_exposes_account_admin_and_summary_surfaces() -> None
 
 
 def test_workspace_frontend_keeps_teacher_actions_truthful_for_platform_jobs() -> None:
-    source = (
-        Path(__file__).parents[2] / "web" / "peerassist-workspace" / "src" / "main.tsx"
-    ).read_text(encoding="utf-8")
-    overview = source[
-        source.index("function PaperOverviewPanel(") : source.index("function LoginLayout(")
-    ]
-    paper_window = source[
-        source.index("function PaperWindow(") : source.index("function PdfReviewReader(")
-    ]
+    source = (Path(__file__).parents[2] / "web" / "peerassist-workspace" / "src" / "main.tsx").read_text(
+        encoding="utf-8"
+    )
+    overview = source[source.index("function PaperOverviewPanel(") : source.index("function LoginLayout(")]
+    paper_window = source[source.index("function PaperWindow(") : source.index("function PdfReviewReader(")]
 
     assert "function paperOverviewFallback(" in source
     assert 'failed: "摘要生成失败，请到生成审稿页重试任务。"' in source
     assert "paperOverviewFallback(jobStatus)" in overview
-    assert 'disabled={busy || (!selectedText.trim() && !note.trim())}' in paper_window
+    assert "disabled={busy || (!selectedText.trim() && !note.trim())}" in paper_window
 
 
 def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path, monkeypatch) -> None:
-    seen_hosts: list[str] = []
+    seen_headers: list[tuple[str, str, str]] = []
 
     class _IdentityHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            seen_hosts.append(str(self.headers.get("Host") or ""))
+            seen_headers.append(
+                (
+                    str(self.headers.get("Host") or ""),
+                    str(self.headers.get("X-Forwarded-Proto") or ""),
+                    str(self.headers.get("X-Forwarded-Host") or ""),
+                )
+            )
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -765,12 +767,25 @@ def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(
+        request = urllib.request.Request(
             f"http://{server.server_address[0]}:{server.server_address[1]}/identity/realms/demo/.well-known",
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "peerassist.example",
+            },
+        )
+        with urllib.request.urlopen(
+            request,
             timeout=5,
         ) as response:
             assert json.loads(response.read()) == {"issuer": "http://identity.test"}
-        assert seen_hosts == [f"{server.server_address[0]}:{server.server_address[1]}"]
+        assert seen_headers == [
+            (
+                f"{server.server_address[0]}:{server.server_address[1]}",
+                "https",
+                "peerassist.example",
+            )
+        ]
     finally:
         server.shutdown()
         server.server_close()
@@ -781,9 +796,7 @@ def test_confirmation_server_proxies_same_origin_identity_gateway(tmp_path: Path
         confirmation_server.get_settings.cache_clear()
 
 
-def test_confirmation_server_state_and_decision_endpoints(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_confirmation_server_state_and_decision_endpoints(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PEERASSIST_MODEL_SETTINGS_PATH", str(tmp_path / "model-settings.json"))
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.delenv("PEERASSIST_OPENAI_API_KEY", raising=False)
@@ -947,10 +960,10 @@ def test_confirmation_server_serves_source_pdf_when_available(tmp_path: Path) ->
     html = render_confirmation_page(run_dir=run_dir, paper_id="paper")
 
     assert "原始 PDF 已导入" in html
-    assert 'data-source-pdf-viewer' in html
-    assert 'data-pdf-reader' in html
-    assert 'data-pdf-canvas' in html
-    assert 'data-pdf-text-layer' in html
+    assert "data-source-pdf-viewer" in html
+    assert "data-pdf-reader" in html
+    assert "data-pdf-canvas" in html
+    assert "data-pdf-text-layer" in html
     assert 'data-pdf-action="next"' in html
     assert 'data-pdf-action="fit"' in html
     assert "pdf.min.mjs" in html
@@ -1013,9 +1026,7 @@ def test_source_pdf_prefers_canonical_paper_over_generated_report(tmp_path: Path
         thread.join(timeout=5)
 
 
-def test_agent_review_writes_structured_concerns_to_confirmation_queue(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_agent_review_writes_structured_concerns_to_confirmation_queue(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "run"
     out_dir = _seed_peerassist_stage(run_dir)
     monkeypatch.setenv("PEERASSIST_OPENAI_API_KEY", "test-key")
@@ -1038,7 +1049,7 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
                         "benign_explanation": "The ablation may be available in supplementary material.",
                         "author_action": "Please add an ablation study or explain where it is reported.",
                     }
-                ]
+                ],
             }
         )
 
@@ -1075,9 +1086,7 @@ def test_agent_review_writes_structured_concerns_to_confirmation_queue(
         assert generated[0]["evidence_ids"] == ["P01-L001"]
         assert generated[0]["status"] == "pending_human_confirmation"
         assert any(item["id"] == generated[0]["id"] for item in queue["items"])
-        assert (out_dir / "agent_review_draft.md").read_text(encoding="utf-8").startswith(
-            "# 审稿辅助报告"
-        )
+        assert (out_dir / "agent_review_draft.md").read_text(encoding="utf-8").startswith("# 审稿辅助报告")
     finally:
         server.shutdown()
         server.server_close()
@@ -1171,9 +1180,7 @@ def test_chat_completion_uses_configurable_review_timeout(monkeypatch) -> None:
         confirmation_server.get_settings.cache_clear()
 
 
-def test_homepage_model_settings_endpoint_saves_and_returns_models(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_homepage_model_settings_endpoint_saves_and_returns_models(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "run"
     _seed_peerassist_stage(run_dir)
     settings_path = tmp_path / "model-settings.json"
@@ -1252,9 +1259,7 @@ def test_paper_overview_extracts_title_abstract_method_and_result(tmp_path: Path
     overview = confirmation_server._build_paper_overview(run_dir)
 
     assert overview["title"] == "Efficient Evaluation"
-    assert overview["summary"] == (
-        "本文用序贯检验动态决定评测样本量，在可靠性不下降的前提下降低计算成本。"
-    )
+    assert overview["summary"] == ("本文用序贯检验动态决定评测样本量，在可靠性不下降的前提下降低计算成本。")
     assert "inefficient for model evaluation" in overview["abstract"]
     assert overview["method"] == "We propose a sequential testing framework."
     assert overview["result"] == "Our experiments reduce evaluation cost by 40%."
@@ -1272,10 +1277,7 @@ def test_review_api_base_url_uses_workspace_setting(monkeypatch) -> None:
 def test_peerassist_confirm_server_console_script_is_registered() -> None:
     payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
-    assert (
-        payload["project"]["scripts"]["peerassist-confirm-server"]
-        == "peerassist.confirmation_server:main"
-    )
+    assert payload["project"]["scripts"]["peerassist-confirm-server"] == "peerassist.confirmation_server:main"
 
 
 def test_confirmation_server_module_has_python_m_entrypoint() -> None:
