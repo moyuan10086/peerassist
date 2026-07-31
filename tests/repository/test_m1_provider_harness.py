@@ -20,9 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "infrastructure/compose/compose.m1.test.yml"
 ENV_HELPER = ROOT / "scripts/m1_test_env.sh"
 REALM_TEMPLATE = ROOT / "infrastructure/keycloak/realm-template.json"
+KEYCLOAK_BOOTSTRAP = ROOT / "infrastructure/keycloak/bootstrap.sh"
 IMPLEMENTATION_PLAN = (
     ROOT / "docs/superpowers/plans/2026-07-17-peerassist-m1-platform-authorization.md"
 )
+
+
+def test_keycloak_bootstrap_accepts_https_origin_without_explicit_port() -> None:
+    bootstrap = KEYCLOAK_BOOTSTRAP.read_text(encoding="utf-8")
+    assert r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$" in bootstrap
 
 
 def _run_helper(
