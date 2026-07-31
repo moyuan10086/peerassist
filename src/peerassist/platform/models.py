@@ -22,7 +22,7 @@ class FrozenJsonArray(tuple["FrozenJsonValue", ...]):
 
 
 FrozenJsonValue: TypeAlias = (
-    None | bool | int | float | str | FrozenJsonArray | Mapping[str, "FrozenJsonValue"]
+    bool | int | float | str | FrozenJsonArray | Mapping[str, "FrozenJsonValue"] | None
 )
 
 _SENSITIVE_KEY_WORDS = frozenset(

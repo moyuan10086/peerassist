@@ -138,7 +138,7 @@ def test_review_workspace_repositories_are_exposed_by_both_uows() -> None:
         "consents",
         "review_documents",
         "report_versions",
-    }.issubset(memory_adapters.MemoryUnitOfWork.__dict__.get("__annotations__", {}))
+    }.issubset(inspect.get_annotations(memory_adapters.MemoryUnitOfWork))
 
     from peerassist.platform.adapters.postgres import PostgresUnitOfWork
 
