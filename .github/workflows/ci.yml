@@ -2,9 +2,9 @@ name: CI
 
 "on":
   push:
-    branches: [peerassist-mvp, main]
+    branches: [peerassist-m0, main]
   pull_request:
-    branches: [peerassist-mvp, main]
+    branches: [peerassist-m0, main]
 
 permissions:
   contents: read

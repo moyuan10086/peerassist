@@ -29,8 +29,8 @@ def test_ci_triggers_permissions_and_jobs_are_bounded() -> None:
     workflow = _workflow()
 
     assert workflow["permissions"] == {"contents": "read"}
-    assert workflow["on"]["push"]["branches"] == ["peerassist-mvp", "main"]
-    assert workflow["on"]["pull_request"]["branches"] == ["peerassist-mvp", "main"]
+    assert workflow["on"]["push"]["branches"] == ["peerassist-m0", "main"]
+    assert workflow["on"]["pull_request"]["branches"] == ["peerassist-m0", "main"]
     assert set(workflow["jobs"]) == {"python", "frontend", "repository-policy", "clean-checkout-smoke"}
 
 

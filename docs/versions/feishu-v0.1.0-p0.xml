@@ -1,7 +1,7 @@
 <hr/>
 <h3>3.1 版本基线与代码量（2026-07-25）</h3>
 <callout emoji="✅" background-color="light-green" border-color="green">
-  <p><b>当前唯一基线：</b><code>0.1.0-p0</code>，Git 分支 <code>peerassist-m0</code>，当前代码目录为 <code>/root/.worktrees/peerassist-m0</code>。旧目录不再作为 8766 启动源；历史版本只通过 Git 提交和迁移说明保留，不复制旧源码。</p>
+  <p><b>历史发布基线：</b><code>0.1.0-p0</code>。该版本发布时使用旧 worktree 目录；当前开发分支为 <code>peerassist-m0</code>，当前代码目录为 <code>/root/PeerAssist</code>，旧路径只保留在历史记录中。</p>
 </callout>
 <p><b>统计口径：</b>排除 .git、.venv、node_modules、dist、缓存和二进制；按可维护文本源文件的实际行数统计。生成 bundle、文档和运行数据不计入核心代码量。</p>
 <table>

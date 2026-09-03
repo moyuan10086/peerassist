@@ -26,10 +26,13 @@
 ├── web/                     React/Vite 工作台
 ├── docs/                    产品、架构、操作与版本文档
 ├── reference-materials/     可公开的研究背景资料
+├── eval/PeerAssist-Eval-v1/  评测资料，不是源码版本
 └── runtime/                 本机运行数据，Git 忽略
 ```
 
 - 当前开发分支：`peerassist-m0`
+- `peerassist-mvp` 仅作为 Git 历史分支保留；它是当前分支的祖先，不是活动开发入口。
+- `eval/PeerAssist-Eval-v1` 仅存放评测清单、样例和验收资料，不代表第二套产品源码。
 - 当前发布基线：`v0.1.1-p0`，提交 `ef8b00b`
 - 上一发布基线：`v0.1.0-p0`，提交 `30b048f`
 - 当前分支还包含 Git 目录重整、`uv` 锁文件和文档治理提交；发布标签保持不可变。
@@ -100,13 +103,26 @@ curl --fail http://127.0.0.1:8000/api/v1/ready
 | 状态 | 名称 | Git 依据 | 说明 |
 | --- | --- | --- | --- |
 | 历史来源 | FactReview | `origin/main` | PeerAssist 的上游代码底座 |
-| 已归档 | `peerassist-mvp` | 分支 `peerassist-mvp`，基线 `ff59216` | 旧文件型工作区和历史实现参考 |
+| 已归档 | `peerassist-mvp` | 本地分支 `ff59216`；GitHub 历史分支 `1e73c93`；均为当前分支祖先 | 旧文件型工作区和历史实现参考，不参与当前 CI/部署 |
 | 已归档 | 本地旧版保护 | 分支 `archive/peerassist-mvp-local` | 保存旧工作树尚未提交的安全内容；默认不发布到 GitHub |
 | 历史完成 | `v0.1.0-p0` | 标签指向 `30b048f` | 第一版可部署教师审稿闭环基线 |
 | 当前发布 | `v0.1.1-p0` | 标签指向 `ef8b00b` | 教师首次使用和模型状态补丁 |
 | 当前开发 | `peerassist-m0` | `/root/PeerAssist` 的 HEAD | 在发布基线上继续维护，不创建平行源码目录 |
 
 2026-07-26 之前的结构以 `/root/PeerAssist/current` 指向 `/root/.worktrees/peerassist-m0`，Git 公共元数据却位于归档工作树。该反向依赖已通过独立仓库迁移消除。
+
+### 功能差异摘要
+
+| 维度 | 历史 `peerassist-mvp` | 当前 `peerassist-m0` |
+| --- | --- | --- |
+| 阅读与证据 | PDF 阅读、Range 加载和基础证据定位 | 保留上述能力，并加入证据台账、确定性核查、引用核查和 finding/evidence 绑定 |
+| 审稿任务 | 文件型 ReviewJob 和本地运行态 | PostgreSQL 持久化任务、取消/重试、事件时间线、worker lease 和可恢复阶段清单 |
+| 身份与组织 | 本地入口，无租户边界 | Keycloak OIDC、服务端会话、组织/项目成员、RBAC、CSRF 与限流 |
+| 模型与外部服务 | 全局本地模型调用 | 管理员模型设置、任务级授权、provider/policy/data-scope 门禁和只读状态投影 |
+| 草稿与导出 | 本地草稿或请求内生成结果 | 服务端版本化草稿、CAS 冲突保护、不可变报告版本和异步导出 |
+| 部署与治理 | 单体确认页和源码工作树 | FastAPI 平台、PostgreSQL/MinIO/Keycloak、systemd/Compose、备份恢复、uv 锁定依赖和仓库契约 |
+
+这张表是基于 `peerassist-mvp` 为 `peerassist-m0` 祖先的 Git 历史归纳；它不是第二套源码清单。当前实现只维护 `peerassist-m0`，历史能力通过 Git 提交、分支和标签追溯。
 
 ## 七、历史方案中仍有效与已暂缓内容
 

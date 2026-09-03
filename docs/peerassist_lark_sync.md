@@ -25,6 +25,8 @@ PeerAssist 的工程事实以 Git 为准。唯一当前项目总览是
 - Git 内统一总文档：已完成
 - 飞书十章重整：已完成，revision `298` 覆盖为 revision `301`，Git 统一后同步到 revision `304`，平台恢复状态同步到 revision `311`
 - GitHub 分支、标签和默认分支同步：已完成；默认分支为 `peerassist-m0`
+- GitHub `peerassist-mvp`：保留为只读历史分支，不参与当前 CI 或部署
+- `eval/PeerAssist-Eval-v1`：评测资料目录，不是产品源码版本
 - 冗余迁移目录与旧容器清理：已完成
 - 平台 API `:8000` 与 Worker 恢复：已完成，并通过 readiness 与重启核验
 - 管理员后端模型配置：已完成；飞书只记录 provider 和模型，不记录密钥

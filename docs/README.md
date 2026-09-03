@@ -34,3 +34,5 @@
 - `superpowers/plans/`：历史实施计划
 
 历史文档记录当时事实，不自动代表当前运行状态。
+
+当前开发线只有 `peerassist-m0`；`peerassist-mvp` 是只读历史分支，`eval/PeerAssist-Eval-v1/` 仅用于评测资料。

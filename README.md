@@ -19,6 +19,7 @@ git status
 - 飞书同步文档：<https://my.feishu.cn/docx/XuVIdkaGgoykehxox9Kc3Qnhnw2>
 
 旧的 `/root/.worktrees/peerassist-m0` 和 `/root/PeerAssist/current` 不再是当前入口。
+GitHub 的 `peerassist-mvp` 仅保留为只读历史分支；`eval/PeerAssist-Eval-v1/` 是评测资料目录，不是第二套源码。
 
 ## 开发与验证
 

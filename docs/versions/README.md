@@ -18,3 +18,6 @@ git diff v0.1.0-p0..v0.1.1-p0 --stat
 ```
 
 旧实现通过 Git 分支、标签和提交追溯，不再复制为 `v2`、`v3` 源码目录。运行数据不属于版本提交。
+
+当前开发只在 `peerassist-m0` 进行；GitHub 的 `peerassist-mvp` 是只读历史分支，评测资料位于
+`eval/PeerAssist-Eval-v1/`，两者都不是第二套当前源码。
