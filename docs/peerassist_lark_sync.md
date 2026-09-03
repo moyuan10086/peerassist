@@ -12,8 +12,8 @@ PeerAssist 的工程事实以 Git 为准。唯一当前项目总览是
 - URL：https://my.feishu.cn/docx/XuVIdkaGgoykehxox9Kc3Qnhnw2
 - Token：`XuVIdkaGgoykehxox9Kc3Qnhnw2`
 - 所有者身份：用户陈昊
-- 最后验证日期：2026-07-26
-- 最后验证 revision：`311`
+- 最后验证日期：2026-09-03
+- 最后验证 revision：`333`
 - 结构：恰好十个固定二级章节
 
 ## 当前同步状态
@@ -24,9 +24,10 @@ PeerAssist 的工程事实以 Git 为准。唯一当前项目总览是
 - Git 目录统一：已完成
 - Git 内统一总文档：已完成
 - 飞书十章重整：已完成，revision `298` 覆盖为 revision `301`，Git 统一后同步到 revision `304`，平台恢复状态同步到 revision `311`
-- GitHub 分支、标签和默认分支同步：已完成；默认分支为 `peerassist-m0`
+- GitHub 分支、标签和默认分支同步：已完成；默认分支为 `peerassist-m0`，最新同步提交为 `ef714be`
 - GitHub `peerassist-mvp`：保留为只读历史分支，不参与当前 CI 或部署
 - `eval/PeerAssist-Eval-v1`：评测资料目录，不是产品源码版本
+- 飞书本轮版本治理更新：待文档编辑权限；revision `333` 已读取，当前 bot 身份更新返回 `4030004`，未修改正文
 - 冗余迁移目录与旧容器清理：已完成
 - 平台 API `:8000` 与 Worker 恢复：已完成，并通过 readiness 与重启核验
 - 管理员后端模型配置：已完成；飞书只记录 provider 和模型，不记录密钥
